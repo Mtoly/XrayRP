@@ -471,7 +471,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	// Whether the inbound connection contains a user
 	if sessionInbound.User != nil {
 		srcIP := ""
-		if sessionInbound.Source != nil {
+		if sessionInbound.Source.Address != nil {
 			srcIP = sessionInbound.Source.Address.IP().String()
 		}
 		if d.RuleManager.Detect(sessionInbound.Tag, destination.String(), sessionInbound.User.Email, srcIP) {
