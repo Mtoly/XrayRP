@@ -6,7 +6,6 @@ toolchain go1.25.3
 
 require (
 	dario.cat/mergo v1.0.0
-	github.com/Mtoly/XrayRP/XrayR v1.0.8
 	github.com/apernet/hysteria/core/v2 v2.6.5
 	github.com/apernet/hysteria/extras/v2 v2.6.5
 	github.com/bitly/go-simplejson v0.5.1
@@ -246,6 +245,7 @@ require (
 	github.com/nrdcg/porkbun v0.3.0 // indirect
 	github.com/nzdjb/go-metaname v1.0.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
+	github.com/onsi/gomega v1.33.1 // indirect
 	github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b // indirect
 	github.com/oracle/oci-go-sdk v24.3.0+incompatible // indirect
 	github.com/ovh/go-ovh v1.4.3 // indirect
@@ -350,6 +350,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.5.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/ratelimit v0.3.1 // indirect
