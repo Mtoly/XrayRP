@@ -22,7 +22,7 @@ require (
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/sagernet/sing v0.7.14
 	github.com/sagernet/sing-box v1.12.15
-	github.com/sagernet/sing-shadowsocks v0.2.8
+	github.com/sagernet/sing-shadowsocks v0.2.9
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.9.1
