@@ -14,7 +14,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-acme/lego/v4 v4.16.1
 	github.com/go-resty/resty/v2 v2.17.1
-	github.com/gogf/gf/v2 v2.9.8
+	github.com/gogf/gf/v2 v2.10.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/r3labs/diff/v2 v2.15.1
 	github.com/redis/go-redis/v9 v9.17.2
