@@ -27,6 +27,9 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 	if port == 0 {
 		return nil, "", fmt.Errorf("invalid port 0")
 	}
+	if port > 65535 {
+		return nil, "", fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
+	}
 
 	certFile, keyFile, err := getOrIssueCert(s.config.CertConfig)
 	if err != nil {
