@@ -167,7 +167,7 @@ func run() error {
 	runtime.GC()
 	// Running backend
 	osSignals := make(chan os.Signal, 1)
-	signal.Notify(osSignals, os.Interrupt, os.Kill, syscall.SIGTERM)
+	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
 	<-osSignals
 
 	return nil
