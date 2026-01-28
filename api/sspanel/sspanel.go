@@ -766,15 +766,45 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 		transportProtocol                     string
 	)
 
-	// Check if custom_config is null
-	if len(nodeInfoResponse.CustomConfig) == 0 {
-		return nil, errors.New("custom_config is empty, disable custom config")
-	}
-
+	// Check if custom_config is null, fallback to server string parsing
 	nodeConfig := new(CustomConfig)
-	err := json.Unmarshal(nodeInfoResponse.CustomConfig, nodeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("custom_config format error: %v", err)
+	if len(nodeInfoResponse.CustomConfig) == 0 {
+		// Fallback: parse server string for V2Ray/VLESS nodes
+		if c.NodeType == "V2ray" && nodeInfoResponse.RawServerString != "" {
+			serverConfig := parseServerString(nodeInfoResponse.RawServerString)
+			nodeConfig.OffsetPortNode = serverConfig["offset_port_node"]
+			nodeConfig.Host = serverConfig["host"]
+			nodeConfig.Network = serverConfig["network"]
+			nodeConfig.Security = serverConfig["security"]
+			nodeConfig.Path = serverConfig["path"]
+			nodeConfig.Flow = serverConfig["flow"]
+			nodeConfig.Servicename = serverConfig["servicename"]
+
+			// Parse REALITY config from server string
+			if serverConfig["security"] == "reality" {
+				nodeConfig.EnableREALITY = true
+				nodeConfig.RealityOpts = &REALITYConfig{
+					Dest:       serverConfig["dest"],
+					PrivateKey: serverConfig["privateKey"],
+					ShortIds:   []string{serverConfig["shortId"]},
+				}
+				if serverNames := serverConfig["serverNames"]; serverNames != "" {
+					nodeConfig.RealityOpts.ServerNames = strings.Split(serverNames, ",")
+				}
+			}
+
+			// Enable VLESS if specified
+			if serverConfig["enable_vless"] != "" {
+				nodeConfig.EnableVless = serverConfig["enable_vless"]
+			}
+		} else {
+			return nil, errors.New("custom_config is empty, disable custom config")
+		}
+	} else {
+		err := json.Unmarshal(nodeInfoResponse.CustomConfig, nodeConfig)
+		if err != nil {
+			return nil, fmt.Errorf("custom_config format error: %v", err)
+		}
 	}
 
 	if c.SpeedLimit > 0 {
@@ -880,6 +910,38 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 	}
 
 	return nodeInfo, nil
+}
+
+// parseServerString parses V2Ray/VLESS server string format
+// Format: domain;port;alterID;network;security;params
+func parseServerString(server string) map[string]string {
+	parts := strings.Split(server, ";")
+	config := make(map[string]string)
+
+	if len(parts) > 0 {
+		config["host"] = parts[0]
+	}
+	if len(parts) > 1 {
+		config["offset_port_node"] = parts[1]
+	}
+	if len(parts) > 3 {
+		config["network"] = parts[3]
+	}
+	if len(parts) > 4 {
+		config["security"] = parts[4]
+	}
+	if len(parts) > 5 && parts[5] != "" {
+		// Parse URL-style parameters
+		params := strings.Split(parts[5], "&")
+		for _, param := range params {
+			kv := strings.SplitN(param, "=", 2)
+			if len(kv) == 2 {
+				config[kv[0]] = kv[1]
+			}
+		}
+	}
+
+	return config
 }
 
 // compareVersion, version1 > version2 return 1, version1 < version2 return -1, 0 means equal
