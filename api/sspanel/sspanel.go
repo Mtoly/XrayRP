@@ -447,7 +447,11 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *NodeInfoResponse) (
 	if err != nil {
 		return nil, err
 	}
-	port := uint32(parsedPort)
+	if parsedPort < 1 || parsedPort > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", parsedPort)
+	}
+	port16 := uint16(parsedPort)
+	port := uint32(port16)
 
 	parsedAlterID, err := strconv.ParseInt(serverConf[2], 10, 16)
 	if err != nil {
@@ -663,7 +667,11 @@ func (c *APIClient) ParseTrojanNodeResponse(nodeInfoResponse *NodeInfoResponse) 
 	if err != nil {
 		return nil, err
 	}
-	port := uint32(parsedPort)
+	if parsedPort < 1 || parsedPort > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", parsedPort)
+	}
+	port16 := uint16(parsedPort)
+	port := uint32(port16)
 
 	serverConf := strings.Split(nodeInfoResponse.RawServerString, ";")
 	extraServerConf := strings.Split(serverConf[1], "|")
@@ -787,8 +795,12 @@ func (c *APIClient) ParseSSPanelNodeInfo(nodeInfoResponse *NodeInfoResponse) (*a
 	if err != nil {
 		return nil, err
 	}
+	if parsedPort < 1 || parsedPort > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", parsedPort)
+	}
 
-	port := uint32(parsedPort)
+	port16 := uint16(parsedPort)
+	port := uint32(port16)
 
 	switch c.NodeType {
 	case "Shadowsocks":
