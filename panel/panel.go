@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -34,6 +35,7 @@ import (
 // Panel Structure
 type Panel struct {
 	access       sync.Mutex
+	serverMutex  sync.RWMutex
 	serviceMutex sync.RWMutex
 	panelConfig  *Config
 	Server       *core.Instance
@@ -184,7 +186,9 @@ func (p *Panel) Start() error {
 	if err := server.Start(); err != nil {
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
+	p.serverMutex.Lock()
 	p.Server = server
+	p.serverMutex.Unlock()
 
 	// Load Nodes config
 	for _, nodeConfig := range p.panelConfig.NodesConfig {
@@ -274,13 +278,11 @@ func (p *Panel) Close() error {
 	copy(services, p.Service)
 	p.serviceMutex.RUnlock()
 
-	var firstErr error
+	var errs []error
 	for _, s := range services {
 		if err := s.Close(); err != nil {
 			p.logger.Errorf("Failed to close service: %v", err)
-			if firstErr == nil {
-				firstErr = err
-			}
+			errs = append(errs, err)
 		}
 	}
 
@@ -288,9 +290,16 @@ func (p *Panel) Close() error {
 	p.Service = nil
 	p.serviceMutex.Unlock()
 
-	p.Server.Close()
+	p.serverMutex.Lock()
+	if p.Server != nil {
+		if err := p.Server.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	p.serverMutex.Unlock()
+
 	p.Running = false
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func parseConnectionConfig(c *ConnectionConfig) (*conf.Policy, error) {
