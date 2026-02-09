@@ -19,7 +19,7 @@ require (
 	github.com/r3labs/diff/v2 v2.15.1
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/sagernet/sing v0.7.18
-	github.com/sagernet/sing-box v1.12.20
+	github.com/sagernet/sing-box v1.12.21
 	github.com/sagernet/sing-shadowsocks v0.2.9
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/sirupsen/logrus v1.9.4
@@ -282,7 +282,7 @@ require (
 	github.com/sagernet/nftables v0.3.0-beta.4 // indirect
 	github.com/sagernet/quic-go v0.52.0-sing-box-mod.3 // indirect
 	github.com/sagernet/sing-mux v0.3.4 // indirect
-	github.com/sagernet/sing-quic v0.5.2 // indirect
+	github.com/sagernet/sing-quic v0.5.3 // indirect
 	github.com/sagernet/sing-shadowsocks2 v0.2.1 // indirect
 	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11 // indirect
 	github.com/sagernet/sing-tun v0.7.11 // indirect
