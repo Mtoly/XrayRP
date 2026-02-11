@@ -25,7 +25,8 @@ var (
 		Use: "XrayR",
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := run(); err != nil {
-				log.Fatal(err)
+				log.Error("XrayR failed to start")
+				os.Exit(1)
 			}
 		},
 	}

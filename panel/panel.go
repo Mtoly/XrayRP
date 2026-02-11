@@ -277,7 +277,7 @@ func (p *Panel) Start() error {
 
 	for _, s := range services {
 		if err := s.Start(); err != nil {
-			p.logger.Errorf("Failed to start service: %v", err)
+			p.logger.Error("Failed to start service")
 			return fmt.Errorf("failed to start service: %w", err)
 		}
 	}
