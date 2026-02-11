@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -195,6 +196,12 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		nodeInfo, err = c.parseTrojanNodeResponse(server)
 	case "Shadowsocks":
 		nodeInfo, err = c.parseSSNodeResponse(server)
+	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
+		nodeInfo, err = c.parseHysteria2NodeResponse(server)
+	case "Tuic", "tuic":
+		nodeInfo, err = c.parseTuicNodeResponse(server)
+	case "AnyTLS", "anytls":
+		nodeInfo, err = c.parseAnyTLSNodeResponse(server)
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", c.NodeType)
 	}
@@ -212,7 +219,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	path := "/api/v1/server/UniProxy/user"
 
 	switch c.NodeType {
-	case "V2ray", "Trojan", "Shadowsocks", "Vmess", "Vless":
+	case "V2ray", "Trojan", "Shadowsocks", "Vmess", "Vless", "Hysteria2", "hysteria2", "Hysteria", "hysteria", "Tuic", "tuic", "AnyTLS", "anytls":
 		break
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", c.NodeType)
@@ -256,7 +263,11 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 			u.SpeedLimit = uint64(users[i].SpeedLimit * 1000000 / 8)
 		}
 
-		u.DeviceLimit = c.DeviceLimit // todo waiting v2board send configuration
+		if users[i].DeviceLimit > 0 {
+			u.DeviceLimit = users[i].DeviceLimit
+		} else {
+			u.DeviceLimit = c.DeviceLimit
+		}
 		u.Email = u.UUID + "@v2board.user"
 		if c.NodeType == "Shadowsocks" {
 			u.Passwd = u.UUID
@@ -306,11 +317,75 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 
 // ReportNodeStatus implements the API interface
 func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
+	path := "/api/v1/server/UniProxy/status"
+
+	memUsed := int(math.Round(nodeStatus.Mem))
+	diskUsed := int(math.Round(nodeStatus.Disk))
+	if memUsed < 0 {
+		memUsed = 0
+	}
+	if diskUsed < 0 {
+		diskUsed = 0
+	}
+	if memUsed > 100 {
+		memUsed = 100
+	}
+	if diskUsed > 100 {
+		diskUsed = 100
+	}
+
+	payload := map[string]any{
+		"cpu": nodeStatus.CPU,
+		"mem": map[string]int{
+			"total": 100,
+			"used":  memUsed,
+		},
+		"swap": map[string]int{
+			"total": 0,
+			"used":  0,
+		},
+		"disk": map[string]int{
+			"total": 100,
+			"used":  diskUsed,
+		},
+	}
+
+	res, err := c.client.R().
+		SetBody(payload).
+		ForceContentType("application/json").
+		Post(path)
+
+	_, err = c.parseResponse(res, path, err)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // ReportNodeOnlineUsers implements the API interface
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	path := "/api/v1/server/UniProxy/alive"
+
+	data := make(map[int][]string)
+	for _, user := range *onlineUserList {
+		if user.UID == 0 || user.IP == "" {
+			continue
+		}
+		ipNode := fmt.Sprintf("%s_%d", user.IP, c.NodeID)
+		data[user.UID] = append(data[user.UID], ipNode)
+	}
+
+	res, err := c.client.R().
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
+
+	_, err = c.parseResponse(res, path, err)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -338,9 +413,50 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 // parseSSNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	var header json.RawMessage
+	var (
+		nodeType          = c.NodeType
+		transportProtocol = "tcp"
+		enableTLS         bool
+		path              string
+		host              string
+		serviceName       string
+		port              = uint32(s.ServerPort)
+	)
+
+	plugin := strings.ToLower(strings.TrimSpace(s.Plugin))
+	if plugin != "" && plugin != "none" {
+		switch plugin {
+		case "v2ray-plugin", "xray-plugin":
+			nodeType = "Shadowsocks-Plugin"
+			transportProtocol, enableTLS, host, path, serviceName = parseSSPluginOpts(plugin, s.PluginOpts)
+			if port <= 1 {
+				return nil, fmt.Errorf("Shadowsocks-Plugin listen port must bigger than 1")
+			}
+			port--
+		case "obfs-local", "simple-obfs":
+			mode, obfsHost, obfsPath := parseSimpleObfsOpts(s.PluginOpts)
+			if mode == "" || mode == "http" {
+				path = obfsPath
+				if path == "" {
+					path = "/"
+				}
+				h := simplejson.New()
+				h.Set("type", "http")
+				h.SetPath([]string{"request", "path"}, path)
+				header, _ = h.Encode()
+				host = obfsHost
+			} else if mode == "tls" {
+				return nil, fmt.Errorf("simple-obfs tls mode is not supported")
+			} else {
+				return nil, fmt.Errorf("unsupported simple-obfs mode: %s", mode)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported shadowsocks plugin: %s", plugin)
+		}
+	}
 
 	if s.Obfs == "http" {
-		path := "/"
+		path = "/"
 		if p := s.ObfsSettings.Path; p != "" {
 			if strings.HasPrefix(p, "/") {
 				path = p
@@ -352,15 +468,22 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 		h.Set("type", "http")
 		h.SetPath([]string{"request", "path"}, path)
 		header, _ = h.Encode()
+		if host == "" {
+			host = s.ObfsSettings.Host
+		}
 	}
 	// Create GeneralNodeInfo
 	return &api.NodeInfo{
-		NodeType:          c.NodeType,
+		NodeType:          nodeType,
 		NodeID:            c.NodeID,
-		Port:              uint32(s.ServerPort),
-		TransportProtocol: "tcp",
+		Port:              port,
+		TransportProtocol: transportProtocol,
 		CypherMethod:      s.Cipher,
 		ServerKey:         s.ServerKey, // shadowsocks2022 share key
+		EnableTLS:         enableTLS,
+		Path:              path,
+		Host:              host,
+		ServiceName:       serviceName,
 		NameServerConfig:  s.parseDNSConfig(),
 		Header:            header,
 	}, nil
@@ -462,6 +585,178 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		REALITYConfig:     &realityConfig,
 		NameServerConfig:  s.parseDNSConfig(),
 	}, nil
+}
+
+// parseHysteria2NodeResponse parse the response for Hysteria2 nodes.
+func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	if s == nil {
+		return nil, errors.New("server config is nil")
+	}
+	if s.Version != 0 && s.Version != 2 {
+		return nil, fmt.Errorf("unsupported hysteria version: %d, only v2 is supported", s.Version)
+	}
+
+	hy := &api.Hysteria2Config{
+		Obfs:                  s.Obfs,
+		ObfsPassword:          s.ObfsPassword,
+		UpMbps:                s.UpMbps,
+		DownMbps:              s.DownMbps,
+		IgnoreClientBandwidth: s.IgnoreClientBandwidth,
+		PortHopEnabled:        s.PortHopEnabled,
+		PortHopPorts:          s.PortHopPorts,
+	}
+	if hy.Obfs == "" {
+		hy.Obfs = "none"
+	}
+
+	sni := s.ServerName
+	if sni == "" {
+		sni = s.Host
+	}
+
+	return &api.NodeInfo{
+		NodeType:         "Hysteria2",
+		NodeID:           c.NodeID,
+		Port:             uint32(s.ServerPort),
+		Host:             s.Host,
+		SNI:              sni,
+		EnableTLS:        true,
+		Hysteria2Config:  hy,
+		NameServerConfig: s.parseDNSConfig(),
+	}, nil
+}
+
+// parseTuicNodeResponse parse the response for TUIC nodes.
+func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	if s == nil {
+		return nil, errors.New("server config is nil")
+	}
+
+	sni := s.ServerName
+	if sni == "" {
+		sni = s.Host
+	}
+
+	return &api.NodeInfo{
+		NodeType:  "Tuic",
+		NodeID:    c.NodeID,
+		Port:      uint32(s.ServerPort),
+		Host:      s.Host,
+		SNI:       sni,
+		EnableTLS: true,
+		TuicConfig: &api.TuicConfig{
+			CongestionControl: s.CongestionControl,
+			ZeroRTTHandshake:  s.ZeroRTTHandshake,
+			Heartbeat:         parseHeartbeatSeconds(s.Heartbeat),
+		},
+		NameServerConfig: s.parseDNSConfig(),
+	}, nil
+}
+
+// parseAnyTLSNodeResponse parse the response for AnyTLS nodes.
+func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	if s == nil {
+		return nil, errors.New("server config is nil")
+	}
+
+	sni := s.ServerName
+	if sni == "" {
+		sni = s.Host
+	}
+
+	return &api.NodeInfo{
+		NodeType:         "AnyTLS",
+		NodeID:           c.NodeID,
+		Port:             uint32(s.ServerPort),
+		Host:             s.Host,
+		SNI:              sni,
+		EnableTLS:        true,
+		AnyTLSConfig:     &api.AnyTLSConfig{PaddingScheme: s.PaddingScheme},
+		NameServerConfig: s.parseDNSConfig(),
+	}, nil
+}
+
+func parseHeartbeatSeconds(value string) int {
+	if value == "" {
+		return 0
+	}
+	if d, err := time.ParseDuration(value); err == nil {
+		return int(d.Seconds())
+	}
+	if v, err := strconv.Atoi(value); err == nil {
+		return v
+	}
+	return 0
+}
+
+func parseSSPluginOpts(plugin, opts string) (transport string, enableTLS bool, host, path, serviceName string) {
+	transport = "tcp"
+	if plugin == "v2ray-plugin" || plugin == "xray-plugin" {
+		transport = "ws"
+	}
+
+	for _, raw := range strings.Split(opts, ";") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		key, val, found := strings.Cut(item, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		if !found {
+			if key == "tls" {
+				enableTLS = true
+			}
+			continue
+		}
+		switch key {
+		case "mode":
+			mode := strings.ToLower(val)
+			switch mode {
+			case "websocket", "ws":
+				transport = "ws"
+			case "grpc":
+				transport = "grpc"
+			}
+		case "tls":
+			if val == "1" || strings.EqualFold(val, "true") {
+				enableTLS = true
+			}
+		case "host":
+			host = val
+		case "path":
+			path = val
+		case "servicename", "service":
+			serviceName = val
+		}
+	}
+
+	return transport, enableTLS, host, path, serviceName
+}
+
+func parseSimpleObfsOpts(opts string) (mode, host, path string) {
+	for _, raw := range strings.Split(opts, ";") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		key, val, found := strings.Cut(item, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		if !found {
+			continue
+		}
+		switch key {
+		case "obfs", "mode":
+			mode = strings.ToLower(val)
+		case "obfs-host", "host":
+			host = val
+		case "obfs-uri", "uri", "path":
+			path = val
+		}
+	}
+
+	return mode, host, path
 }
 
 func (s *serverConfig) parseDNSConfig() (nameServerList []*conf.NameServerConfig) {

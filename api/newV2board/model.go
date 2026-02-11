@@ -9,8 +9,21 @@ type serverConfig struct {
 	v2ray
 	trojan
 
-	ServerPort int `json:"server_port"`
-	BaseConfig struct {
+	ServerPort int    `json:"server_port"`
+	Obfs       string `json:"obfs"`
+	Version    int    `json:"version"`
+	// Hy2 uses `obfs-password` in the UniProxy response.
+	ObfsPassword          string   `json:"obfs-password"`
+	UpMbps                int      `json:"up_mbps"`
+	DownMbps              int      `json:"down_mbps"`
+	IgnoreClientBandwidth bool     `json:"ignore_client_bandwidth"`
+	PortHopEnabled        bool     `json:"port_hop_enable"`
+	PortHopPorts          string   `json:"port_hop_ports"`
+	CongestionControl     string   `json:"congestion_control"`
+	ZeroRTTHandshake      bool     `json:"zero_rtt_handshake"`
+	Heartbeat             string   `json:"heartbeat"`
+	PaddingScheme         []string `json:"padding_scheme"`
+	BaseConfig            struct {
 		PushInterval int `json:"push_interval"`
 		PullInterval int `json:"pull_interval"`
 	} `json:"base_config"`
@@ -19,7 +32,8 @@ type serverConfig struct {
 
 type shadowsocks struct {
 	Cipher       string `json:"cipher"`
-	Obfs         string `json:"obfs"`
+	Plugin       string `json:"plugin"`
+	PluginOpts   string `json:"plugin_opts"`
 	ObfsSettings struct {
 		Path string `json:"path"`
 		Host string `json:"host"`
@@ -68,7 +82,8 @@ type route struct {
 }
 
 type user struct {
-	Id         int    `json:"id"`
-	Uuid       string `json:"uuid"`
-	SpeedLimit int    `json:"speed_limit"`
+	Id          int    `json:"id"`
+	Uuid        string `json:"uuid"`
+	SpeedLimit  int    `json:"speed_limit"`
+	DeviceLimit int    `json:"device_limit"`
 }

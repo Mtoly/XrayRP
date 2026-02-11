@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"dario.cat/mergo"
@@ -29,7 +30,10 @@ import (
 	_ "github.com/Mtoly/XrayRP/cmd/distro/all"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service"
+	"github.com/Mtoly/XrayRP/service/anytls"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/hysteria2"
+	"github.com/Mtoly/XrayRP/service/tuic"
 )
 
 // Panel Structure
@@ -245,7 +249,20 @@ func (p *Panel) Start() error {
 				}
 			}
 		}
-		controllerService = controller.New(server, apiClient, controllerConfig, nodeConfig.PanelType)
+		nodeType := apiClient.Describe().NodeType
+		if nodeType == "" && nodeConfig.ApiConfig != nil {
+			nodeType = nodeConfig.ApiConfig.NodeType
+		}
+		switch {
+		case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
+			controllerService = hysteria2.New(apiClient, controllerConfig)
+		case strings.EqualFold(nodeType, "Tuic"):
+			controllerService = tuic.New(apiClient, controllerConfig)
+		case strings.EqualFold(nodeType, "AnyTLS"):
+			controllerService = anytls.New(apiClient, controllerConfig)
+		default:
+			controllerService = controller.New(server, apiClient, controllerConfig, nodeConfig.PanelType)
+		}
 		p.serviceMutex.Lock()
 		p.Service = append(p.Service, controllerService)
 		p.serviceMutex.Unlock()
