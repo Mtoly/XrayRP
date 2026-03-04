@@ -7,6 +7,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 var defaultPath string

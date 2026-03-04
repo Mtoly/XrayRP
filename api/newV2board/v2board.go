@@ -406,15 +406,66 @@ func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
 
 // parseTrojanNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	var (
+		host        string
+		header      json.RawMessage
+		serviceName string
+	)
+
+	transportProtocol := "tcp"
+	if s.Network != "" {
+		transportProtocol = s.Network
+	}
+
+	switch s.Network {
+	case "ws":
+		if s.NetworkSettings.Headers != nil {
+			if httpHeader, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+				return nil, err
+			} else {
+				b, _ := simplejson.NewJson(httpHeader)
+				host = b.Get("Host").MustString()
+			}
+		}
+	case "tcp", "":
+		if s.NetworkSettings.Header != nil {
+			if httpHeader, err := s.NetworkSettings.Header.MarshalJSON(); err != nil {
+				return nil, err
+			} else {
+				header = httpHeader
+			}
+		}
+	case "grpc":
+		serviceName = s.NetworkSettings.ServiceName
+	case "httpupgrade":
+		if s.NetworkSettings.Headers != nil {
+			if httpHeaders, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+				return nil, err
+			} else {
+				b, _ := simplejson.NewJson(httpHeaders)
+				host = b.Get("Host").MustString()
+			}
+		}
+		if s.NetworkSettings.Host != "" {
+			host = s.NetworkSettings.Host
+		}
+	}
+
+	if host == "" {
+		host = s.Host
+	}
+
 	// Create GeneralNodeInfo
 	nodeInfo := &api.NodeInfo{
 		NodeType:          c.NodeType,
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
-		TransportProtocol: "tcp",
+		TransportProtocol: transportProtocol,
 		EnableTLS:         true,
-		Host:              s.Host,
-		ServiceName:       s.ServerName,
+		Host:              host,
+		ServiceName:       serviceName,
+		Path:              s.NetworkSettings.Path,
+		Header:            header,
 		NameServerConfig:  s.parseDNSConfig(),
 	}
 	return nodeInfo, nil
@@ -529,8 +580,19 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		ShortIds:         []string{s.VlessTlsSettings.ShortId},
 	}
 
+	// For backward compatibility with old V2board which used network_settings (snake_case)
+	// for VLESS, copy VlessNetworkSettings fields into NetworkSettings only if populated.
+	// Xboard and newer panels always use networkSettings (camelCase) for all protocols.
 	if c.EnableVless {
-		s.NetworkSettings = s.VlessNetworkSettings
+		if s.VlessNetworkSettings.Path != "" || s.VlessNetworkSettings.Host != "" ||
+			s.VlessNetworkSettings.ServiceName != "" || s.VlessNetworkSettings.Headers != nil ||
+			s.VlessNetworkSettings.Header != nil {
+			s.NetworkSettings.Path = s.VlessNetworkSettings.Path
+			s.NetworkSettings.Host = s.VlessNetworkSettings.Host
+			s.NetworkSettings.Headers = s.VlessNetworkSettings.Headers
+			s.NetworkSettings.ServiceName = s.VlessNetworkSettings.ServiceName
+			s.NetworkSettings.Header = s.VlessNetworkSettings.Header
+		}
 	}
 
 	switch s.Network {
