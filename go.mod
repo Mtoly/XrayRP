@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	dario.cat/mergo v1.0.2
 	github.com/apernet/hysteria/core/v2 v2.7.0
-	github.com/apernet/hysteria/extras/v2 v2.7.0
+	github.com/apernet/hysteria/extras/v2 v2.7.1
 	github.com/bitly/go-simplejson v0.5.1
 	github.com/eko/gocache/lib/v4 v4.2.3
 	github.com/eko/gocache/store/go_cache/v4 v4.2.4
@@ -68,7 +68,7 @@ require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/anytls/sing-anytls v0.0.11 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
-	github.com/apernet/quic-go v0.57.2-0.20260111184307-eec823306178 // indirect
+	github.com/apernet/quic-go v0.59.1-0.20260217092621-db4786c77a22 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.25.3 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.27.7 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.7 // indirect
