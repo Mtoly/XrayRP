@@ -27,7 +27,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/xtls/xray-core v1.260206.0
 	golang.org/x/crypto v0.49.0
-	golang.org/x/net v0.51.0
+	golang.org/x/net v0.52.0
 	golang.org/x/time v0.15.0
 	google.golang.org/protobuf v1.36.11
 )
