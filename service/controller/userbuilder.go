@@ -27,7 +27,7 @@ var AEADMethod = map[shadowsocks.CipherType]uint8{
 	shadowsocks.CipherType_XCHACHA20_POLY1305: 0,
 }
 
-func (c *Controller) buildVmessUser(userInfo *[]api.UserInfo) (users []*protocol.User) {
+func (c *Controller) buildVmessUser(userInfo *[]api.UserInfo, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
 	for i, user := range *userInfo {
 		vmessAccount := &conf.VMessAccount{
@@ -36,20 +36,20 @@ func (c *Controller) buildVmessUser(userInfo *[]api.UserInfo) (users []*protocol
 		}
 		users[i] = &protocol.User{
 			Level:   0,
-			Email:   c.buildUserTag(&user), // Email: InboundTag|email|uid
+			Email:   c.buildUserTagFrom(user, tag), // Email: InboundTag|email|uid
 			Account: serial.ToTypedMessage(vmessAccount.Build()),
 		}
 	}
 	return users
 }
 
-func (c *Controller) buildVlessUser(userInfo *[]api.UserInfo) (users []*protocol.User) {
+func (c *Controller) buildVlessUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
-	flow := strings.TrimSpace(c.nodeInfo.VlessFlow)
+	flow := strings.TrimSpace(nodeInfo.VlessFlow)
 	if flow != "" {
-		transport := strings.ToLower(strings.TrimSpace(c.nodeInfo.TransportProtocol))
+		transport := strings.ToLower(strings.TrimSpace(nodeInfo.TransportProtocol))
 		// XTLS Vision is only valid on direct TLS/REALITY over TCP.
-		if transport != "tcp" || (!c.nodeInfo.EnableTLS && !c.nodeInfo.EnableREALITY) || c.nodeInfo.Header != nil {
+		if transport != "tcp" || (!nodeInfo.EnableTLS && !nodeInfo.EnableREALITY) || nodeInfo.Header != nil {
 			flow = ""
 		}
 	}
@@ -60,14 +60,14 @@ func (c *Controller) buildVlessUser(userInfo *[]api.UserInfo) (users []*protocol
 		}
 		users[i] = &protocol.User{
 			Level:   0,
-			Email:   c.buildUserTag(&user),
+			Email:   c.buildUserTagFrom(user, tag),
 			Account: serial.ToTypedMessage(vlessAccount),
 		}
 	}
 	return users
 }
 
-func (c *Controller) buildTrojanUser(userInfo *[]api.UserInfo) (users []*protocol.User) {
+func (c *Controller) buildTrojanUser(userInfo *[]api.UserInfo, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
 	for i, user := range *userInfo {
 		trojanAccount := &trojan.Account{
@@ -75,20 +75,20 @@ func (c *Controller) buildTrojanUser(userInfo *[]api.UserInfo) (users []*protoco
 		}
 		users[i] = &protocol.User{
 			Level:   0,
-			Email:   c.buildUserTag(&user),
+			Email:   c.buildUserTagFrom(user, tag),
 			Account: serial.ToTypedMessage(trojanAccount),
 		}
 	}
 	return users
 }
 
-func (c *Controller) buildSSUser(userInfo *[]api.UserInfo, method string) (users []*protocol.User) {
+func (c *Controller) buildSSUser(userInfo *[]api.UserInfo, method string, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
 
 	for i, user := range *userInfo {
 		// shadowsocks2022 Key = "openssl rand -base64 32" and multi users needn't cipher method
 		if C.Contains(shadowaead_2022.List, strings.ToLower(method)) {
-			e := c.buildUserTag(&user)
+			e := c.buildUserTagFrom(user, tag)
 			userKey, err := c.checkShadowsocksPassword(user.Passwd, method)
 			if err != nil {
 				errors.LogError(context.Background(), "[UID: %d] %s", user.UID, err)
@@ -104,7 +104,7 @@ func (c *Controller) buildSSUser(userInfo *[]api.UserInfo, method string) (users
 		} else {
 			users[i] = &protocol.User{
 				Level: 0,
-				Email: c.buildUserTag(&user),
+				Email: c.buildUserTagFrom(user, tag),
 				Account: serial.ToTypedMessage(&shadowsocks.Account{
 					Password:   user.Passwd,
 					CipherType: cipherFromString(method),
@@ -115,13 +115,13 @@ func (c *Controller) buildSSUser(userInfo *[]api.UserInfo, method string) (users
 	return users
 }
 
-func (c *Controller) buildSSPluginUser(userInfo *[]api.UserInfo) (users []*protocol.User) {
+func (c *Controller) buildSSPluginUser(userInfo *[]api.UserInfo, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
 
 	for i, user := range *userInfo {
 		// shadowsocks2022 Key = openssl rand -base64 32 and multi users needn't cipher method
 		if C.Contains(shadowaead_2022.List, strings.ToLower(user.Method)) {
-			e := c.buildUserTag(&user)
+			e := c.buildUserTagFrom(user, tag)
 			userKey, err := c.checkShadowsocksPassword(user.Passwd, user.Method)
 			if err != nil {
 				errors.LogError(context.Background(), "[UID: %d] %s", user.UID, err)
@@ -140,7 +140,7 @@ func (c *Controller) buildSSPluginUser(userInfo *[]api.UserInfo) (users []*proto
 			if _, ok := AEADMethod[cypherMethod]; ok {
 				users[i] = &protocol.User{
 					Level: 0,
-					Email: c.buildUserTag(&user),
+					Email: c.buildUserTagFrom(user, tag),
 					Account: serial.ToTypedMessage(&shadowsocks.Account{
 						Password:   user.Passwd,
 						CipherType: cypherMethod,
@@ -168,7 +168,14 @@ func cipherFromString(c string) shadowsocks.CipherType {
 }
 
 func (c *Controller) buildUserTag(user *api.UserInfo) string {
-	return fmt.Sprintf("%s|%s|%d", c.Tag, user.Email, user.UID)
+	c.stateMu.RLock()
+	tag := c.Tag
+	c.stateMu.RUnlock()
+	return c.buildUserTagFrom(*user, tag)
+}
+
+func (c *Controller) buildUserTagFrom(user api.UserInfo, tag string) string {
+	return fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
 }
 
 func (c *Controller) checkShadowsocksPassword(password string, method string) (string, error) {

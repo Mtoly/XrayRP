@@ -14,6 +14,8 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
+const onlineIPTTL = 2 * time.Minute
+
 type Hysteria2Service struct {
 	apiClient api.API
 	config    *controller.Config

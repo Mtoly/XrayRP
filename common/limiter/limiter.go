@@ -102,6 +102,7 @@ type InboundInfo struct {
 	GlobalLimit    struct {
 		config         *GlobalDeviceLimitConfig
 		globalOnlineIP *marshaler.Marshaler
+		keyLocks       sync.Map // Key: user tag -> *sync.Mutex, serializes global-limit cache updates per user
 	}
 }
 
@@ -338,45 +339,62 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 	return nil, false, false
 }
 
+func getGlobalLimitLock(inboundInfo *InboundInfo, uniqueKey string) *sync.Mutex {
+	lock := &sync.Mutex{}
+	if v, loaded := inboundInfo.GlobalLimit.keyLocks.LoadOrStore(uniqueKey, lock); loaded {
+		return v.(*sync.Mutex)
+	}
+	return lock
+}
+
 // Global device limit
 func globalLimit(inboundInfo *InboundInfo, userKey string, uid int, ip string, deviceLimit int) bool {
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(inboundInfo.GlobalLimit.config.Timeout)*time.Second)
 	defer cancel()
 
 	uniqueKey := userKey
+	lock := getGlobalLimitLock(inboundInfo, uniqueKey)
+	lock.Lock()
+	defer lock.Unlock()
 
 	v, err := inboundInfo.GlobalLimit.globalOnlineIP.Get(ctx, uniqueKey, new(map[string]int))
 	if err != nil {
 		if _, ok := err.(*store.NotFound); ok {
-			go pushIP(inboundInfo, uniqueKey, &map[string]int{ip: uid})
-		} else {
-			errors.LogErrorInner(context.Background(), err, "cache service")
+			ipMap := map[string]int{ip: uid}
+			if err := pushIP(ctx, inboundInfo, uniqueKey, &ipMap); err != nil {
+				errors.LogErrorInner(context.Background(), err, "cache service")
+			}
+			return false
 		}
+		errors.LogErrorInner(context.Background(), err, "cache service")
 		return false
 	}
 
-	ipMap := v.(*map[string]int)
-	if deviceLimit > 0 && len(*ipMap) > deviceLimit {
+	cached := v.(*map[string]int)
+	current := make(map[string]int, len(*cached)+1)
+	for k, v := range *cached {
+		current[k] = v
+	}
+
+	if _, ok := current[ip]; ok {
+		return false
+	}
+
+	if deviceLimit > 0 && len(current) >= deviceLimit {
 		return true
 	}
 
-	if _, ok := (*ipMap)[ip]; !ok {
-		(*ipMap)[ip] = uid
-		go pushIP(inboundInfo, uniqueKey, ipMap)
+	current[ip] = uid
+	if err := pushIP(ctx, inboundInfo, uniqueKey, &current); err != nil {
+		errors.LogErrorInner(context.Background(), err, "cache service")
 	}
 
 	return false
 }
 
 // push the ip to cache
-func pushIP(inboundInfo *InboundInfo, uniqueKey string, ipMap *map[string]int) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(inboundInfo.GlobalLimit.config.Timeout)*time.Second)
-	defer cancel()
-
-	if err := inboundInfo.GlobalLimit.globalOnlineIP.Set(ctx, uniqueKey, ipMap); err != nil {
-		errors.LogErrorInner(context.Background(), err, "cache service")
-	}
+func pushIP(ctx context.Context, inboundInfo *InboundInfo, uniqueKey string, ipMap *map[string]int) error {
+	return inboundInfo.GlobalLimit.globalOnlineIP.Set(ctx, uniqueKey, ipMap)
 }
 
 // determineRate returns the minimum non-zero rate

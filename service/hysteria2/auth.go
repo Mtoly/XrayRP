@@ -35,11 +35,14 @@ func (a *hyAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (b
 	user, ok := a.svc.users[auth]
 	if !ok {
 		logger.WithFields(log.Fields{
-			"remote": host,
-			"auth":   auth,
-		}).Warn("Hysteria2 auth failed: unknown UUID")
+			"remote":   host,
+			"auth_len": len(auth),
+		}).Warn("Hysteria2 auth failed: unknown credential")
 		return false, ""
 	}
+
+	now := time.Now()
+	a.svc.cleanupStaleUserIPsLocked(auth, now)
 
 	ipSet, ok := a.svc.onlineIPs[auth]
 	if !ok {
@@ -68,7 +71,7 @@ func (a *hyAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (b
 	}
 
 	// Update last active time for this IP
-	activeMap[host] = time.Now()
+	activeMap[host] = now
 
 	return true, auth
 }

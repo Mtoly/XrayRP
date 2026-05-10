@@ -69,7 +69,37 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 }
 
 func (t *hyTrafficLogger) LogOnlineState(id string, online bool) {
-	// Online state is tracked via Authenticator using the onlineIPs map.
+	// Online state is tracked via Authenticator and event logger using the onlineIPs map.
+}
+
+func (h *Hysteria2Service) cleanupStaleUserIPsLocked(id string, now time.Time) {
+	activeMap, ok := h.ipLastActive[id]
+	if !ok {
+		return
+	}
+
+	cutoff := now.Add(-onlineIPTTL)
+	for ip, lastSeen := range activeMap {
+		if lastSeen.Before(cutoff) {
+			delete(activeMap, ip)
+			if ipSet, ok := h.onlineIPs[id]; ok {
+				delete(ipSet, ip)
+				if len(ipSet) == 0 {
+					delete(h.onlineIPs, id)
+				}
+			}
+		}
+	}
+
+	if len(activeMap) == 0 {
+		delete(h.ipLastActive, id)
+	}
+}
+
+func (h *Hysteria2Service) cleanupStaleOnlineIPsLocked(now time.Time) {
+	for id := range h.ipLastActive {
+		h.cleanupStaleUserIPsLocked(id, now)
+	}
 }
 
 func (t *hyTrafficLogger) TraceStream(stream server.HyStream, stats *server.StreamStats) {}
@@ -212,8 +242,11 @@ func (h *Hysteria2Service) collectUsage() ([]api.UserTraffic, []api.OnlineUser, 
 		t.Download = 0
 	}
 
-	// Collect online users before clearing
-	// This mimics the behavior of traditional Xray protocols (VMess/VLESS/Trojan)
+	// Collect online users before clearing stale entries only.
+	// For Hysteria2, long-lived connections may authenticate once and then remain
+	// active without a fresh auth event every reporting cycle, so we keep active
+	// IPs across cycles and rely on TTL cleanup instead of full map reset.
+	h.cleanupStaleOnlineIPsLocked(time.Now())
 	var onlineUsers []api.OnlineUser
 	for uuid, ipSet := range h.onlineIPs {
 		user, ok := h.users[uuid]
@@ -224,13 +257,6 @@ func (h *Hysteria2Service) collectUsage() ([]api.UserTraffic, []api.OnlineUser, 
 			onlineUsers = append(onlineUsers, api.OnlineUser{UID: user.UID, IP: ip})
 		}
 	}
-
-	// Clear online IPs and last active tracking after collection
-	// This prevents zombie connections from accumulating over time
-	// Similar to limiter.GetOnlineDevice() which calls inboundInfo.UserOnlineIP.Delete(email)
-	// Only IPs that are actively used in the next reporting cycle will be tracked again
-	h.onlineIPs = make(map[string]map[string]struct{})
-	h.ipLastActive = make(map[string]map[string]time.Time)
 
 	return uts, onlineUsers, snapshot
 }
@@ -291,6 +317,10 @@ func (h *Hysteria2Service) userMonitor() error {
 	if usersChanged {
 		h.syncUsers(newUserInfo)
 	}
+
+	h.mu.Lock()
+	h.cleanupStaleOnlineIPsLocked(time.Now())
+	h.mu.Unlock()
 
 	// Check Rule
 	if !h.config.DisableGetRule && h.rules != nil {

@@ -154,7 +154,7 @@ func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
 	return nil
 }
 
-func (c *Controller) addOutbound(config *core.OutboundHandlerConfig) error {
+func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string) error {
 	rawHandler, err := core.CreateObject(c.server, config)
 	if err != nil {
 		return err
@@ -169,10 +169,10 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig) error {
 		sm:      c.stm,
 		limiter: c.dispatcher.Limiter,
 		ruleMgr: c.dispatcher.RuleManager,
-		tag:     c.Tag,
+		tag:     tag,
 		obm:     c.obm,
 	}
-	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), c.Tag)
+	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)
 	if err := c.obm.AddHandler(context.Background(), wrapper); err != nil {
 		return err
 	}
