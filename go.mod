@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	dario.cat/mergo v1.0.2
-	github.com/apernet/hysteria/core/v2 v2.8.2
+	github.com/apernet/hysteria/core/v2 v2.9.1
 	github.com/apernet/hysteria/extras/v2 v2.8.2
 	github.com/bitly/go-simplejson v0.5.1
 	github.com/eko/gocache/lib/v4 v4.2.3
