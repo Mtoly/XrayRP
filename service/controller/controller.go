@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -29,25 +30,27 @@ type LimitInfo struct {
 }
 
 type Controller struct {
-	server       *core.Instance
-	config       *Config
-	clientInfo   api.ClientInfo
-	apiClient    api.API
-	stateMu      sync.RWMutex
-	nodeInfo     *api.NodeInfo
-	Tag          string
-	userList     *[]api.UserInfo
-	tasks        []periodicTask
-	limitedUsers map[api.UserInfo]LimitInfo
-	warnedUsers  map[api.UserInfo]int
-	panelType    string
-	ibm          inbound.Manager
-	obm          outbound.Manager
-	stm          stats.Manager
-	pm           policy.Manager
-	dispatcher   *mydispatcher.DefaultDispatcher
-	startAt      time.Time
-	logger       *log.Entry
+	server          *core.Instance
+	config          *Config
+	clientInfo      api.ClientInfo
+	apiClient       api.API
+	stateMu         sync.RWMutex
+	nodeInfo        *api.NodeInfo
+	Tag             string
+	userList        *[]api.UserInfo
+	appliedRuleList []api.DetectRule
+	syncApplyHooks  syncApplyHooks
+	tasks           []periodicTask
+	limitedUsers    map[api.UserInfo]LimitInfo
+	warnedUsers     map[api.UserInfo]int
+	panelType       string
+	ibm             inbound.Manager
+	obm             outbound.Manager
+	stm             stats.Manager
+	pm              policy.Manager
+	dispatcher      *mydispatcher.DefaultDispatcher
+	startAt         time.Time
+	logger          *log.Entry
 }
 
 type periodicTask struct {
@@ -176,6 +179,8 @@ func (c *Controller) Start() error {
 		} else if len(*ruleList) > 0 {
 			if err := c.UpdateRule(tag, *ruleList); err != nil {
 				c.logger.Print(err)
+			} else {
+				c.setAppliedRuleList(*ruleList)
 			}
 		}
 	}
@@ -241,146 +246,17 @@ func (c *Controller) Close() error {
 	return nil
 }
 
-func (c *Controller) nodeInfoMonitor() (err error) {
+func (c *Controller) nodeInfoMonitor() error {
 	// delay to start
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
-	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
-
-	// First fetch Node Info
-	var nodeInfoChanged = true
-	newNodeInfo, err := c.apiClient.GetNodeInfo()
-	if err != nil {
-		if err.Error() == api.NodeNotModified {
-			nodeInfoChanged = false
-			newNodeInfo = currentNodeInfo
-		} else {
-			c.logger.Print(err)
-			return nil
-		}
+	action := syncActionFromPollingTick(time.Now())
+	if err := c.ExecuteSyncAction(context.Background(), action); err != nil {
+		c.logger.Print(err)
+		return nil
 	}
-	if newNodeInfo.Port == 0 || newNodeInfo.Port > 65535 {
-		return fmt.Errorf("invalid server port: %d, must be 1-65535", newNodeInfo.Port)
-	}
-
-	// Update User
-	var usersChanged = true
-	newUserInfo, err := c.apiClient.GetUserList()
-	if err != nil {
-		if err.Error() == api.UserNotModified {
-			usersChanged = false
-			newUserInfo = currentUserList
-		} else {
-			c.logger.Print(err)
-			return nil
-		}
-	}
-
-	// If nodeInfo changed
-	if nodeInfoChanged {
-		if nodeStateChanged(currentNodeInfo, newNodeInfo) {
-			// Remove old tag
-			oldTag := currentTag
-			err := c.removeOldTag(oldTag)
-			if err != nil {
-				c.logger.Print(err)
-				return nil
-			}
-			if currentNodeInfo != nil && currentNodeInfo.NodeType == "Shadowsocks-Plugin" {
-				err = c.removeOldTag(fmt.Sprintf("dokodemo-door_%s+1", currentTag))
-			}
-			if err != nil {
-				c.logger.Print(err)
-				return nil
-			}
-			// Add new tag
-			newTag := c.buildNodeTagFrom(newNodeInfo)
-			err = c.addNewTag(newNodeInfo, newTag)
-			if err != nil {
-				c.logger.Print(err)
-				return nil
-			}
-			c.setNodeState(newNodeInfo, newTag)
-			currentNodeInfo = newNodeInfo
-			currentTag = newTag
-			nodeInfoChanged = true
-			// Remove Old limiter
-			if err = c.DeleteInboundLimiter(oldTag); err != nil {
-				c.logger.Print(err)
-				return nil
-			}
-		} else {
-			nodeInfoChanged = false
-		}
-	}
-
-	// Check Rule
-	if !c.config.DisableGetRule {
-		if ruleList, err := c.apiClient.GetNodeRule(); err != nil {
-			if err.Error() != api.RuleNotModified {
-				c.logger.Printf("Get rule list filed: %s", err)
-			}
-		} else if len(*ruleList) > 0 {
-			if err := c.UpdateRule(currentTag, *ruleList); err != nil {
-				c.logger.Print(err)
-			}
-		}
-	}
-
-	if nodeInfoChanged {
-		err = c.addNewUser(newUserInfo, newNodeInfo, currentTag)
-		if err != nil {
-			c.logger.Print(err)
-			return nil
-		}
-
-		// Add Limiter
-		if err := c.AddInboundLimiter(currentTag, newNodeInfo.SpeedLimit, newUserInfo, c.config.GlobalDeviceLimitConfig); err != nil {
-			c.logger.Print(err)
-			return nil
-		}
-
-	} else {
-		var deleted, added []api.UserInfo
-		if usersChanged {
-			// Socks/HTTP don't support incremental user changes — full rebuild
-			if currentNodeInfo != nil && (currentNodeInfo.NodeType == "Socks" || currentNodeInfo.NodeType == "HTTP") {
-				if err := c.rebuildInboundWithUsers(newUserInfo, currentNodeInfo, currentTag); err != nil {
-					c.logger.Print(err)
-				}
-				if err := c.AddInboundLimiter(currentTag, currentNodeInfo.SpeedLimit, newUserInfo, c.config.GlobalDeviceLimitConfig); err != nil {
-					c.logger.Print(err)
-				}
-				deleted, added = compareUserList(currentUserList, newUserInfo)
-			} else {
-				deleted, added = compareUserList(currentUserList, newUserInfo)
-				if len(deleted) > 0 {
-					deletedEmail := make([]string, len(deleted))
-					for i, u := range deleted {
-						deletedEmail[i] = fmt.Sprintf("%s|%s|%d", currentTag, u.Email, u.UID)
-					}
-					err := c.removeUsers(deletedEmail, currentTag)
-					if err != nil {
-						c.logger.Print(err)
-					}
-				}
-				if len(added) > 0 {
-					err = c.addNewUser(&added, currentNodeInfo, currentTag)
-					if err != nil {
-						c.logger.Print(err)
-					}
-					// Update Limiter
-					if err := c.UpdateInboundLimiter(currentTag, &added); err != nil {
-						c.logger.Print(err)
-					}
-				}
-			}
-		}
-		c.logger.Printf("%d user deleted, %d user added", len(deleted), len(added))
-	}
-	c.setUserList(newUserInfo)
 	return nil
 }
 
