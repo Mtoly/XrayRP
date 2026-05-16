@@ -143,9 +143,47 @@ func TestSyncCoordinator_DirtyRequeuesInflightAction(t *testing.T) {
 	}
 }
 
+func TestSyncCoordinator_PrioritizesPendingActionsByPriority(t *testing.T) {
+	executor := newCoordinatorTestExecutor()
+	releaseFirst := executor.blockCall(1)
+	releaseSecond := executor.blockCall(2)
+	releaseThird := executor.blockCall(3)
+	releaseFourth := executor.blockCall(4)
+	coordinator := newSyncCoordinator(executor)
+
+	coordinator.Submit(newSyncAction(syncActionTypeSyncAliveState, syncActionSourceManual, syncActionMetadata{}))
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncAliveState)
+
+	coordinator.Submit(newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{}))
+	coordinator.Submit(newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourceWS, syncActionMetadata{}))
+	coordinator.Submit(newSyncAction(syncActionTypeSyncRoutesAndOutbounds, syncActionSourceWS, syncActionMetadata{}))
+
+	close(releaseFirst)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncRoutesAndOutbounds)
+	close(releaseSecond)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncNodeConfig)
+	close(releaseThird)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncUsers)
+	close(releaseFourth)
+
+	waitForCoordinatorIdle(t, coordinator)
+
+	got := executor.Calls()
+	want := []syncActionType{
+		syncActionTypeSyncAliveState,
+		syncActionTypeSyncRoutesAndOutbounds,
+		syncActionTypeSyncNodeConfig,
+		syncActionTypeSyncUsers,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected execution order: got %v want %v", got, want)
+	}
+}
+
 func TestSyncCoordinator_ResyncAllOverridesPendingPartialActions(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	releaseFirst := executor.blockCall(1)
+	releaseSecond := executor.blockCall(2)
 	coordinator := newSyncCoordinator(executor)
 
 	coordinator.Submit(newSyncAction(syncActionTypeSyncAliveState, syncActionSourceManual, syncActionMetadata{}))
@@ -156,6 +194,8 @@ func TestSyncCoordinator_ResyncAllOverridesPendingPartialActions(t *testing.T) {
 	coordinator.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{}))
 
 	close(releaseFirst)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeResyncAll)
+	close(releaseSecond)
 	waitForCoordinatorIdle(t, coordinator)
 
 	got := executor.Calls()
