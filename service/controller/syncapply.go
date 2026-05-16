@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
@@ -12,11 +13,12 @@ import (
 )
 
 type syncApplySnapshot struct {
-	Action     syncAction
-	NodeInfo   *api.NodeInfo
-	UserList   *[]api.UserInfo
-	RuleList   *[]api.DetectRule
-	CertConfig *api.XrayRCertConfig
+	Action            syncAction
+	NodeInfo          *api.NodeInfo
+	UserList          *[]api.UserInfo
+	RuleList          *[]api.DetectRule
+	CertConfig        *api.XrayRCertConfig
+	CertConfigFetched bool
 }
 
 type syncApplyHooks struct {
@@ -120,10 +122,14 @@ func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapsho
 
 	if fetchCert {
 		certConfig, err := c.apiClient.GetXrayRCertConfig()
-		if err != nil && !errors.Is(err, api.ErrUnsupportedPanelFeature) {
-			return snapshot, err
+		if err != nil {
+			if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+				return snapshot, err
+			}
+		} else {
+			snapshot.CertConfig = certConfig
+			snapshot.CertConfigFetched = c.shouldApplyFetchedCertConfig(certConfig)
 		}
-		snapshot.CertConfig = certConfig
 	}
 
 	return snapshot, nil
@@ -161,7 +167,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 		}
 	}
 
-	if snapshot.CertConfig != nil {
+	if snapshot.CertConfigFetched {
 		if err := c.applyCertConfigSnapshot(snapshot.CertConfig, hooks); err != nil {
 			return err
 		}
@@ -213,13 +219,16 @@ func (c *Controller) applyRuleSnapshot(tag string, rules []api.DetectRule, hooks
 		return nil
 	}
 	currentRules := c.getAppliedRuleList()
+	currentRuleTag := c.getAppliedRuleTag()
 	if detectRuleListsEqual(currentRules, rules) {
-		return nil
+		if tag == currentRuleTag || (len(currentRules) == 0 && len(rules) == 0) {
+			return nil
+		}
 	}
 	if err := hooks.updateRule(tag, rules); err != nil {
 		return err
 	}
-	c.setAppliedRuleList(rules)
+	c.setAppliedRuleState(tag, rules)
 	return nil
 }
 
@@ -266,18 +275,24 @@ func (c *Controller) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo,
 }
 
 func (c *Controller) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig, hooks syncApplyHooks) error {
+	current := c.config.CertConfig
+	if panelCertConfigEqual(current, certConfig) {
+		return nil
+	}
 	if certConfig == nil {
+		c.config.CertConfig = nil
+		if hooks.onCertConfigApplied != nil {
+			hooks.onCertConfigApplied(nil)
+		}
 		return nil
 	}
-	if c.config.CertConfig != nil && panelCertConfigEqual(c.config.CertConfig, certConfig) {
-		return nil
+	if current == nil {
+		current = &mylego.CertConfig{}
+		c.config.CertConfig = current
 	}
-	if c.config.CertConfig == nil {
-		c.config.CertConfig = &mylego.CertConfig{}
-	}
-	c.config.CertConfig.Provider = certConfig.Provider
-	c.config.CertConfig.Email = certConfig.Email
-	c.config.CertConfig.DNSEnv = cloneStringMap(certConfig.DNSEnv)
+	current.Provider = certConfig.Provider
+	current.Email = certConfig.Email
+	current.DNSEnv = cloneStringMap(certConfig.DNSEnv)
 	if hooks.onCertConfigApplied != nil {
 		hooks.onCertConfigApplied(clonePanelCertConfig(certConfig))
 	}
@@ -316,6 +331,40 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	return hooks
 }
 
+func (c *Controller) shouldApplyFetchedCertConfig(certConfig *api.XrayRCertConfig) bool {
+	if certConfig != nil {
+		return true
+	}
+	return panelCertConfigMayBeCleared(c.panelType)
+}
+
+func panelCertConfigMayBeCleared(panelType string) bool {
+	switch strings.ToLower(panelType) {
+	case "sspanel", "newv2board", "v2board":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Controller) getAppliedRuleTag() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.appliedRuleTag
+}
+
+func (c *Controller) setAppliedRuleState(tag string, rules []api.DetectRule) {
+	c.stateMu.Lock()
+	c.appliedRuleTag = tag
+	if len(rules) == 0 {
+		c.appliedRuleList = nil
+	} else {
+		c.appliedRuleList = make([]api.DetectRule, len(rules))
+		copy(c.appliedRuleList, rules)
+	}
+	c.stateMu.Unlock()
+}
+
 func (c *Controller) getAppliedRuleList() []api.DetectRule {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
@@ -328,14 +377,13 @@ func (c *Controller) getAppliedRuleList() []api.DetectRule {
 }
 
 func (c *Controller) setAppliedRuleList(rules []api.DetectRule) {
-	c.stateMu.Lock()
-	if len(rules) == 0 {
-		c.appliedRuleList = nil
-	} else {
-		c.appliedRuleList = make([]api.DetectRule, len(rules))
-		copy(c.appliedRuleList, rules)
+	c.stateMu.RLock()
+	tag := c.appliedRuleTag
+	if tag == "" {
+		tag = c.Tag
 	}
-	c.stateMu.Unlock()
+	c.stateMu.RUnlock()
+	c.setAppliedRuleState(tag, rules)
 }
 
 func detectRuleListsEqual(current, next []api.DetectRule) bool {

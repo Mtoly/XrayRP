@@ -38,6 +38,7 @@ type Controller struct {
 	nodeInfo        *api.NodeInfo
 	Tag             string
 	userList        *[]api.UserInfo
+	appliedRuleTag  string
 	appliedRuleList []api.DetectRule
 	syncApplyHooks  syncApplyHooks
 	tasks           []periodicTask
@@ -180,7 +181,7 @@ func (c *Controller) Start() error {
 			if err := c.UpdateRule(tag, *ruleList); err != nil {
 				c.logger.Print(err)
 			} else {
-				c.setAppliedRuleList(*ruleList)
+				c.setAppliedRuleState(tag, *ruleList)
 			}
 		}
 	}
@@ -673,7 +674,7 @@ func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error 
 // Check Cert
 func (c *Controller) certMonitor() error {
 	currentNodeInfo, _, _ := c.getStateSnapshot()
-	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false {
+	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false && c.config.CertConfig != nil {
 		switch c.config.CertConfig.CertMode {
 		case "dns", "http", "tls":
 			lego, err := mylego.New(c.config.CertConfig)

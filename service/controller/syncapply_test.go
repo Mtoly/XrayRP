@@ -354,6 +354,50 @@ func TestSyncApply_RoutePolicyOnlyChangeRebuildsThroughUnifiedApply(t *testing.T
 	}
 }
 
+func TestSyncApply_TagChangeWithSameRulesReappliesRulesThroughUnifiedApply(t *testing.T) {
+	rules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("same.example")}}
+	fakeAPI := &fakeSyncApplyAPI{
+		nodeInfo: &api.NodeInfo{
+			NodeType:    "V2ray",
+			NodeID:      2,
+			Port:        443,
+			SpeedLimit:  100,
+			RoutePolicy: routePolicyWithCandidate("same-candidate"),
+		},
+		ruleList: &rules,
+	}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	currentNode := &api.NodeInfo{
+		NodeType:    "V2ray",
+		NodeID:      1,
+		Port:        443,
+		SpeedLimit:  100,
+		RoutePolicy: routePolicyWithCandidate("same-candidate"),
+	}
+	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	controller.setAppliedRuleList(rules)
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncRoutesAndOutbounds, syncActionSourceWS, syncActionMetadata{Trigger: "routes_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction returned error: %v", err)
+	}
+
+	if len(recorder.removedTags) != 1 || len(recorder.addedTags) != 1 {
+		t.Fatalf("expected tag-changing route sync to rebuild node runtime once, got removed=%d added=%d", len(recorder.removedTags), len(recorder.addedTags))
+	}
+	if recorder.updateRuleCalls != 1 {
+		t.Fatalf("expected same rules to re-apply once when tag changes, got %d", recorder.updateRuleCalls)
+	}
+	if recorder.lastRuleTag != recorder.addedTags[0] {
+		t.Fatalf("expected rule re-apply to bind to new runtime tag %q, got %q", recorder.addedTags[0], recorder.lastRuleTag)
+	}
+	if recorder.lastRuleTag == recorder.removedTags[0] {
+		t.Fatalf("expected rule re-apply to avoid stale runtime tag %q", recorder.removedTags[0])
+	}
+	if got := controller.getAppliedRuleTag(); got != recorder.addedTags[0] {
+		t.Fatalf("expected controller rule state to track new runtime tag %q, got %q", recorder.addedTags[0], got)
+	}
+}
+
 func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	users := []api.UserInfo{{UID: 1, Email: "same@example.com"}}
 	rules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("same.example")}}
@@ -404,6 +448,35 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	}
 	if len(recorder.appliedCertConfigs) != 0 {
 		t.Fatalf("expected unchanged cert snapshot to skip apply, got %d", len(recorder.appliedCertConfigs))
+	}
+}
+
+func TestSyncApply_ClearFetchedCertConfig(t *testing.T) {
+	fakeAPI := &fakeSyncApplyAPI{}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	controller.panelType = "SSPanel"
+	controller.config.CertConfig = &mylego.CertConfig{
+		CertMode: "dns",
+		Provider: "cloudflare",
+		Email:    "ops@example.com",
+		DNSEnv:   map[string]string{"CF_API_TOKEN": "stale-token"},
+	}
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction returned error: %v", err)
+	}
+
+	if fakeAPI.getCertCfgCalls != 1 {
+		t.Fatalf("expected cert sync to fetch cert config once, got %d", fakeAPI.getCertCfgCalls)
+	}
+	if len(recorder.appliedCertConfigs) != 1 {
+		t.Fatalf("expected cert clear to trigger compare-and-apply once, got %d", len(recorder.appliedCertConfigs))
+	}
+	if recorder.appliedCertConfigs[0] != nil {
+		t.Fatalf("expected cert clear hook payload to be nil, got %#v", recorder.appliedCertConfigs[0])
+	}
+	if controller.config.CertConfig != nil {
+		t.Fatalf("expected fetched nil cert config to clear controller cert config, got %#v", controller.config.CertConfig)
 	}
 }
 
