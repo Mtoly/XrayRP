@@ -50,7 +50,30 @@ func TestWSCapNewV2boardOptIn(t *testing.T) {
 	if wsConfig.NodeID != 7 {
 		t.Fatalf("unexpected ws config NodeID: got %d", wsConfig.NodeID)
 	}
-	if wsConfig.NodeType != "V2ray" {
+	if wsConfig.NodeType != "v2ray" {
+		t.Fatalf("unexpected ws config NodeType: got %q", wsConfig.NodeType)
+	}
+}
+
+func TestWSCapNewV2boardUsesPanelFacingVlessNodeType(t *testing.T) {
+	var client api.API = newV2board.New(&api.Config{
+		APIHost:     "https://panel.example.com",
+		Key:         "secret-token",
+		NodeID:      7,
+		NodeType:    "V2ray",
+		EnableVless: true,
+	})
+
+	capable, ok := client.(api.WSCapable)
+	if !ok {
+		t.Fatal("expected newV2board adapter to opt into api.WSCapable")
+	}
+
+	wsConfig := capable.GetWSConfig()
+	if wsConfig == nil {
+		t.Fatal("expected websocket config payload, got nil")
+	}
+	if wsConfig.NodeType != "vless" {
 		t.Fatalf("unexpected ws config NodeType: got %q", wsConfig.NodeType)
 	}
 }

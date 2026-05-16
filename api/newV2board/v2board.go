@@ -56,13 +56,7 @@ func New(apiConfig *api.Config) *APIClient {
 	})
 	client.SetBaseURL(apiConfig.APIHost)
 
-	var nodeType string
-
-	if apiConfig.NodeType == "V2ray" && apiConfig.EnableVless {
-		nodeType = "vless"
-	} else {
-		nodeType = strings.ToLower(apiConfig.NodeType)
-	}
+	nodeType := panelNodeType(apiConfig.NodeType, apiConfig.EnableVless)
 	// Create Key for each requests
 	client.SetQueryParams(map[string]string{
 		"node_id":   strconv.Itoa(apiConfig.NodeID),
@@ -87,6 +81,13 @@ func New(apiConfig *api.Config) *APIClient {
 	return apiClient
 }
 
+func panelNodeType(nodeType string, enableVless bool) string {
+	if nodeType == "V2ray" && enableVless {
+		return "vless"
+	}
+	return strings.ToLower(nodeType)
+}
+
 func (c *APIClient) wsConfig() *api.WSConfig {
 	if c == nil {
 		return nil
@@ -96,7 +97,7 @@ func (c *APIClient) wsConfig() *api.WSConfig {
 		APIHost:  c.APIHost,
 		NodeID:   c.NodeID,
 		Key:      c.Key,
-		NodeType: c.NodeType,
+		NodeType: panelNodeType(c.NodeType, c.EnableVless),
 	}
 }
 
