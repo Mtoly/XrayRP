@@ -2,7 +2,6 @@ package newV2board
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -84,13 +83,13 @@ func (c *WSClient) readLoop() {
 			if c.isClosing() {
 				return
 			}
-			c.pushError(fmt.Errorf("%w: %v", ErrWSClientTransport, err))
+			c.pushError(errors.Join(ErrWSClientTransport, err))
 			return
 		}
 
 		event, err := ParseWSEvent(data)
 		if err != nil {
-			c.pushError(fmt.Errorf("%w: %v", ErrWSClientParse, err))
+			c.pushError(errors.Join(ErrWSClientParse, err))
 			continue
 		}
 

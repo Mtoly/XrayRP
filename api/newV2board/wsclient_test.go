@@ -98,6 +98,9 @@ func TestWSClient_InvalidMessageDoesNotPanic(t *testing.T) {
 	if !errors.Is(parseErr, newV2board.ErrWSClientParse) {
 		t.Fatalf("expected ErrWSClientParse, got %v", parseErr)
 	}
+	if !errors.Is(parseErr, newV2board.ErrInvalidWSJSON) {
+		t.Fatalf("expected ErrInvalidWSJSON cause, got %v", parseErr)
+	}
 
 	event := receiveEvent(t, client.Events())
 	if event.Event != newV2board.WSEventPing {
@@ -124,6 +127,14 @@ func TestWSClient_ReportsTransportError(t *testing.T) {
 	transportErr := receiveError(t, client.Errors())
 	if !errors.Is(transportErr, newV2board.ErrWSClientTransport) {
 		t.Fatalf("expected ErrWSClientTransport, got %v", transportErr)
+	}
+
+	var closeErr *websocket.CloseError
+	if !errors.As(transportErr, &closeErr) {
+		t.Fatalf("expected websocket.CloseError cause, got %T (%v)", transportErr, transportErr)
+	}
+	if closeErr.Code != websocket.CloseNormalClosure {
+		t.Fatalf("unexpected close code: got %d want %d", closeErr.Code, websocket.CloseNormalClosure)
 	}
 
 	waitDone(t, client.Done())
