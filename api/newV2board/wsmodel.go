@@ -61,14 +61,14 @@ func ParseWSEvent(data []byte) (*WSEvent, error) {
 		return nil, fmt.Errorf("%w: event", ErrWSEventMissingField)
 	}
 
-	payloadBytes := bytes.TrimSpace(raw.Payload)
-	if len(payloadBytes) == 0 || payloadBytes[0] != '{' {
-		return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
-	}
-
 	category, ok := classifyWSEvent(raw.Event)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedWSEvent, raw.Event)
+	}
+
+	payloadBytes := bytes.TrimSpace(raw.Payload)
+	if len(payloadBytes) == 0 || payloadBytes[0] != '{' {
+		return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
 	}
 
 	var payload map[string]any

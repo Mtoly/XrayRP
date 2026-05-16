@@ -106,8 +106,25 @@ func TestParseWSEventRejectsMissingRequiredFields(t *testing.T) {
 func TestParseWSEventRejectsUnsupportedEvent(t *testing.T) {
 	t.Parallel()
 
-	_, err := ParseWSEvent([]byte(`{"event":"totally_new_event","payload":{}}`))
-	if !errors.Is(err, ErrUnsupportedWSEvent) {
-		t.Fatalf("expected ErrUnsupportedWSEvent, got %v", err)
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "payload_object", raw: `{"event":"totally_new_event","payload":{}}`},
+		{name: "payload_missing", raw: `{"event":"totally_new_event"}`},
+		{name: "payload_null", raw: `{"event":"totally_new_event","payload":null}`},
+		{name: "payload_array", raw: `{"event":"totally_new_event","payload":[]}`},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseWSEvent([]byte(tt.raw))
+			if !errors.Is(err, ErrUnsupportedWSEvent) {
+				t.Fatalf("expected ErrUnsupportedWSEvent, got %v", err)
+			}
+		})
 	}
 }
