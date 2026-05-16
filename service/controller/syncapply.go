@@ -190,20 +190,38 @@ func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag
 		return currentNodeInfo, currentTag, false, nil
 	}
 
-	if currentNodeInfo != nil && currentTag != "" {
+	newTag := c.buildNodeTagFrom(nextNodeInfo)
+	removeCurrentRuntime := func() error {
+		if currentNodeInfo == nil || currentTag == "" {
+			return nil
+		}
 		if err := hooks.removeOldTag(currentTag); err != nil {
-			return currentNodeInfo, currentTag, false, err
+			return err
 		}
 		if currentNodeInfo.NodeType == "Shadowsocks-Plugin" {
 			if err := hooks.removeOldTag(fmt.Sprintf("dokodemo-door_%s+1", currentTag)); err != nil {
-				return currentNodeInfo, currentTag, false, err
+				return err
 			}
 		}
+		return nil
 	}
 
-	newTag := c.buildNodeTagFrom(nextNodeInfo)
-	if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
-		return currentNodeInfo, currentTag, false, err
+	// When the runtime tag changes, stage the new runtime before tearing down
+	// the old one so add failures don't drop the currently serving node.
+	if currentNodeInfo != nil && currentTag != "" && newTag != currentTag {
+		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+			return currentNodeInfo, currentTag, false, err
+		}
+		if err := removeCurrentRuntime(); err != nil {
+			return currentNodeInfo, currentTag, false, err
+		}
+	} else {
+		if err := removeCurrentRuntime(); err != nil {
+			return currentNodeInfo, currentTag, false, err
+		}
+		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+			return currentNodeInfo, currentTag, false, err
+		}
 	}
 	if currentNodeInfo != nil && currentTag != "" {
 		if err := hooks.deleteInboundLimiter(currentTag); err != nil {

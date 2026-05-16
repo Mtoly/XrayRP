@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"testing"
 	"time"
@@ -77,6 +78,7 @@ type syncApplyRecorder struct {
 	lastRuleTag         string
 	lastRules           []api.DetectRule
 	appliedCertConfigs  []*api.XrayRCertConfig
+	addTagErr           error
 }
 
 func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecorder) {
@@ -102,6 +104,9 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 		addNewTag: func(nodeInfo *api.NodeInfo, tag string) error {
 			recorder.addedTags = append(recorder.addedTags, tag)
 			recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
+			if recorder.addTagErr != nil {
+				return recorder.addTagErr
+			}
 			return nil
 		},
 		addNewUser: func(_ *[]api.UserInfo, _ *api.NodeInfo, _ string) error {
@@ -518,5 +523,69 @@ func TestSyncApply_WSComplexObjectsUseRestSnapshot(t *testing.T) {
 	}
 	if len(recorder.lastRules) != 1 || recorder.lastRules[0].Pattern.String() != "rest.example" {
 		t.Fatalf("expected REST rule snapshot to drive apply pipeline, got %#v", recorder.lastRules)
+	}
+}
+
+func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
+	restUsers := []api.UserInfo{{UID: 1, Email: "rest@example.com"}}
+	restRules := []api.DetectRule{{ID: 8, Pattern: regexp.MustCompile("new.example")}}
+	fakeAPI := &fakeSyncApplyAPI{
+		nodeInfo: &api.NodeInfo{
+			NodeType:    "V2ray",
+			NodeID:      2,
+			Port:        8443,
+			SpeedLimit:  100,
+			RoutePolicy: routePolicyWithCandidate("new-candidate"),
+		},
+		userList: &restUsers,
+		ruleList: &restRules,
+	}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	recorder.addTagErr = errors.New("add new tag failed")
+
+	currentNode := &api.NodeInfo{
+		NodeType:    "V2ray",
+		NodeID:      1,
+		Port:        443,
+		SpeedLimit:  100,
+		RoutePolicy: routePolicyWithCandidate("old-candidate"),
+	}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&restUsers)
+	controller.setAppliedRuleList([]api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}})
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
+	if !errors.Is(err, recorder.addTagErr) {
+		t.Fatalf("expected addNewTag failure to be returned, got %v", err)
+	}
+	if len(recorder.addedTags) != 1 {
+		t.Fatalf("expected one addNewTag attempt before aborting, got %d", len(recorder.addedTags))
+	}
+	if len(recorder.removedTags) != 0 {
+		t.Fatalf("expected old runtime tag to remain when addNewTag fails, got removed=%v", recorder.removedTags)
+	}
+	if recorder.deleteLimiterCalls != 0 {
+		t.Fatalf("expected old limiter to remain untouched on addNewTag failure, got %d deletions", recorder.deleteLimiterCalls)
+	}
+	if recorder.addUserCalls != 0 || recorder.addLimiterCalls != 0 || recorder.updateRuleCalls != 0 {
+		t.Fatalf("expected pipeline to stop before user/rule apply, got addUsers=%d addLimiter=%d updateRule=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.updateRuleCalls)
+	}
+	if len(recorder.appliedSnapshots) != 0 {
+		t.Fatalf("expected failed apply not to publish applied snapshot, got %d", len(recorder.appliedSnapshots))
+	}
+
+	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
+	if appliedNode != currentNode {
+		t.Fatalf("expected controller node state to remain on old node, got %#v", appliedNode)
+	}
+	if appliedTag != currentTag {
+		t.Fatalf("expected controller tag to remain %q, got %q", currentTag, appliedTag)
+	}
+	if appliedUsers != &restUsers {
+		t.Fatalf("expected controller user state to remain unchanged, got %#v", appliedUsers)
+	}
+	if got := controller.getAppliedRuleTag(); got != currentTag {
+		t.Fatalf("expected rule state to remain bound to old tag %q, got %q", currentTag, got)
 	}
 }
