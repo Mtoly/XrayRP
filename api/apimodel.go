@@ -36,6 +36,19 @@ type NodeStatus struct {
 	Uptime uint64
 }
 
+type OutboundFilterPolicy struct {
+	Candidates []string
+	Include    []string
+	Exclude    []string
+	Fallback   []string
+}
+
+type PanelRoutePolicy struct {
+	HasDirectBypass bool
+	DirectDomains   []string
+	Outbound        OutboundFilterPolicy
+}
+
 type NodeInfo struct {
 	AcceptProxyProtocol bool
 	Authority           string
@@ -82,6 +95,7 @@ type NodeInfo struct {
 	Hysteria2Config     *Hysteria2Config
 	AnyTLSConfig        *AnyTLSConfig
 	TuicConfig          *TuicConfig
+	RoutePolicy         *PanelRoutePolicy
 
 	// XHTTP (SplitHTTP) bypass CDN fields — new in Xray-core v26.2+
 	XHTTPMode             string          // auto, packet-up, stream-up, stream-one

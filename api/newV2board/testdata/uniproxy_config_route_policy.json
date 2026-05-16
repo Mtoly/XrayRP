@@ -1,0 +1,49 @@
+{
+  "server_port": 443,
+  "network": "ws",
+  "tls": 1,
+  "routes": [
+    {
+      "id": 1,
+      "match": ["geosite:cn"],
+      "action": "dns",
+      "action_value": "1.1.1.1"
+    },
+    {
+      "id": 2,
+      "match": ["example-blocked.com"],
+      "action": "block",
+      "action_value": ""
+    },
+    {
+      "id": 3,
+      "match": ["panel.example.com"],
+      "action": "direct",
+      "action_value": ""
+    }
+  ],
+  "custom_outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["hk-auto", "sg-auto", "test-dead"],
+      "include_outbound": ["hk-", "sg-"],
+      "exclude_outbound": ["dead"],
+      "fallback": ["direct", "proxy"]
+    }
+  ],
+  "custom_routes": [
+    {
+      "domain": ["panel.example.com"],
+      "outbound": "direct"
+    }
+  ],
+  "cert_config": {
+    "provider": "alidns",
+    "email": "ops@example.com",
+    "dns_env": {
+      "ALICLOUD_ACCESS_KEY": "ak",
+      "ALICLOUD_SECRET_KEY": "sk"
+    }
+  }
+}

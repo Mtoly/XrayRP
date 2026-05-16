@@ -280,7 +280,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 
 	// If nodeInfo changed
 	if nodeInfoChanged {
-		if !reflect.DeepEqual(currentNodeInfo, newNodeInfo) {
+		if nodeStateChanged(currentNodeInfo, newNodeInfo) {
 			// Remove old tag
 			oldTag := currentTag
 			err := c.removeOldTag(oldTag)
@@ -405,7 +405,7 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 		if err != nil {
 			return err
 		}
-		return c.addOutbound(outBoundConfig, tag)
+		return c.addOutbound(outBoundConfig, tag, newNodeInfo.RoutePolicy)
 	}
 
 	if newNodeInfo.NodeType != "Shadowsocks-Plugin" {
@@ -423,7 +423,7 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 
 			return err
 		}
-		err = c.addOutbound(outBoundConfig, tag)
+		err = c.addOutbound(outBoundConfig, tag, newNodeInfo.RoutePolicy)
 		if err != nil {
 
 			return err
@@ -455,7 +455,7 @@ func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo, tag string)
 
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, tag)
+	err = c.addOutbound(outBoundConfig, tag, fakeNodeInfo.RoutePolicy)
 	if err != nil {
 
 		return err
@@ -479,7 +479,7 @@ func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo, tag string)
 
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, dokodemoTag)
+	err = c.addOutbound(outBoundConfig, dokodemoTag, fakeNodeInfo.RoutePolicy)
 	if err != nil {
 
 		return err
@@ -537,6 +537,10 @@ func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo
 	}
 	c.logger.Printf("Added %d new users", len(*userInfo))
 	return nil
+}
+
+func nodeStateChanged(currentNodeInfo, newNodeInfo *api.NodeInfo) bool {
+	return !reflect.DeepEqual(currentNodeInfo, newNodeInfo)
 }
 
 func compareUserList(old, new *[]api.UserInfo) (deleted, added []api.UserInfo) {
@@ -699,13 +703,13 @@ func (c *Controller) userInfoMonitor() (err error) {
 	}
 	if len(userTraffic) > 0 {
 		c.logger.Printf("Reporting %d user(s) traffic to panel; example: UID=%d up=%d down=%d", len(userTraffic), userTraffic[0].UID, userTraffic[0].Upload, userTraffic[0].Download)
-		var err error // Define an empty error
+		var reportErr error
 		if !c.config.DisableUploadTraffic {
-			err = c.apiClient.ReportUserTraffic(&userTraffic)
+			reportErr = c.apiClient.ReportUserTraffic(&userTraffic)
 		}
 		// If report traffic error, not clear the traffic
-		if err != nil {
-			c.logger.Print(err)
+		if reportErr != nil {
+			c.logger.Print(reportErr)
 		} else {
 			c.resetTraffic(&upCounterList, &downCounterList)
 		}
@@ -733,12 +737,9 @@ func (c *Controller) userInfoMonitor() (err error) {
 	if detectResult, err := c.GetDetectResult(currentTag); err != nil {
 		c.logger.Print(err)
 	} else if len(*detectResult) > 0 {
-		if err = c.apiClient.ReportIllegal(detectResult); err != nil {
+		if err = c.pushIllegalResults(detectResult); err != nil {
 			c.logger.Print(err)
-		} else {
-			c.logger.Printf("Report %d illegal behaviors", len(*detectResult))
 		}
-
 	}
 	return nil
 }
@@ -775,6 +776,18 @@ func (c *Controller) buildNodeTag() string {
 		return ""
 	}
 	return c.buildNodeTagFrom(nodeInfo)
+}
+
+func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error {
+	if detectResult == nil || len(*detectResult) == 0 {
+		return nil
+	}
+	if err := c.apiClient.ReportIllegal(detectResult); err != nil {
+		c.logger.WithError(err).Warn("Report illegal results failed")
+		return err
+	}
+	c.logger.Printf("Report %d illegal behaviors", len(*detectResult))
+	return nil
 }
 
 // func (c *Controller) logPrefix() string {

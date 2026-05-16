@@ -74,6 +74,7 @@ func TestBuildSS(t *testing.T) {
 		SpeedLimit:        0,
 		AlterID:           2,
 		TransportProtocol: "tcp",
+		CypherMethod:      "aes-128-gcm",
 		Host:              "test.test.tk",
 		Path:              "v2ray",
 		EnableTLS:         false,

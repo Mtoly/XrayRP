@@ -1,6 +1,7 @@
 package gov2panel_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -8,6 +9,13 @@ import (
 	"github.com/gogf/gf/v2/encoding/gjson"
 	"github.com/gogf/gf/v2/util/gconv"
 )
+
+func requireGov2panelIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("XRAYRP_RUN_GOV2PANEL_INTEGRATION") != "1" {
+		t.Skip("skipping gov2panel integration test; set XRAYRP_RUN_GOV2PANEL_INTEGRATION=1 to enable")
+	}
+}
 
 func CreateClient() api.API {
 	apiConfig := &api.Config{
@@ -21,10 +29,14 @@ func CreateClient() api.API {
 }
 
 func TestGetNodeInfo(t *testing.T) {
+	requireGov2panelIntegration(t)
 	client := CreateClient()
 	nodeInfo, err := client.GetNodeInfo()
 	if err != nil {
 		t.Error(err)
+	}
+	if nodeInfo == nil {
+		t.Fatal("expected node info, got nil")
 	}
 
 	nodeInfoJson := gjson.New(nodeInfo)
@@ -33,11 +45,16 @@ func TestGetNodeInfo(t *testing.T) {
 }
 
 func TestGetUserList(t *testing.T) {
+	requireGov2panelIntegration(t)
 	client := CreateClient()
 
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 
 	t.Log(len(*userList))
@@ -45,10 +62,15 @@ func TestGetUserList(t *testing.T) {
 }
 
 func TestReportReportUserTraffic(t *testing.T) {
+	requireGov2panelIntegration(t)
 	client := CreateClient()
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 	t.Log(userList)
 	generalUserTraffic := make([]api.UserTraffic, len(*userList))
@@ -66,11 +88,10 @@ func TestReportReportUserTraffic(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	t.Error(err)
 }
 
 func TestGetNodeRule(t *testing.T) {
-
+	requireGov2panelIntegration(t)
 	client := CreateClient()
 	client.Debug()
 

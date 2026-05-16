@@ -18,7 +18,16 @@ import (
 	. "github.com/Mtoly/XrayRP/service/controller"
 )
 
+func requireControllerIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("XRAYRP_RUN_CONTROLLER_INTEGRATION") != "1" {
+		t.Skip("skipping controller integration test; set XRAYRP_RUN_CONTROLLER_INTEGRATION=1 to enable")
+	}
+}
+
 func TestController(t *testing.T) {
+	requireControllerIntegration(t)
+
 	serverConfig := &conf.Config{
 		Stats:     &conf.StatsConfig{},
 		LogConfig: &conf.LogConfig{LogLevel: "debug"},
@@ -30,14 +39,6 @@ func TestController(t *testing.T) {
 	}}
 	serverConfig.Policy = policyConfig
 	config, _ := serverConfig.Build()
-
-	// config := &core.Config{
-	// 	App: []*serial.TypedMessage{
-	// 		serial.ToTypedMessage(&dispatcher.Config{}),
-	// 		serial.ToTypedMessage(&proxyman.InboundConfig{}),
-	// 		serial.ToTypedMessage(&proxyman.OutboundConfig{}),
-	// 		serial.ToTypedMessage(&stats.Config{}),
-	// 	}}
 
 	server, err := core.New(config)
 	defer server.Close()

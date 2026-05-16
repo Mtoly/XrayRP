@@ -3,7 +3,6 @@ package newV2board
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -131,9 +130,39 @@ func (c *APIClient) Describe() api.ClientInfo {
 	return api.ClientInfo{APIHost: c.APIHost, NodeID: c.NodeID, Key: "", NodeType: c.NodeType}
 }
 
-// GetXrayRCertConfig is not provided by newV2board; return nil to indicate absence.
+// GetXrayRCertConfig returns the optional certificate config if present in the UniProxy payload.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	return nil, nil
+	if value := c.resp.Load(); value != nil {
+		if cfg, ok := value.(*serverConfig); ok && cfg != nil && cfg.CertConfig != nil {
+			return &api.XrayRCertConfig{
+				Provider: cfg.CertConfig.Provider,
+				Email:    cfg.CertConfig.Email,
+				DNSEnv:   cfg.CertConfig.DNSEnv,
+			}, nil
+		}
+	}
+
+	path := "/api/v1/server/UniProxy/config"
+	res, err := c.client.R().ForceContentType("application/json").Get(path)
+	cfgResp, err := c.parseResponse(res, path, err)
+	if err != nil {
+		return nil, err
+	}
+
+	server := new(serverConfig)
+	b, _ := cfgResp.Encode()
+	if err := json.Unmarshal(b, server); err != nil {
+		return nil, err
+	}
+	c.resp.Store(server)
+	if server.CertConfig == nil {
+		return nil, nil
+	}
+	return &api.XrayRCertConfig{
+		Provider: server.CertConfig.Provider,
+		Email:    server.CertConfig.Email,
+		DNSEnv:   server.CertConfig.DNSEnv,
+	}, nil
 }
 
 // Debug set the client debug for client
@@ -174,7 +203,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.NodeNotModified)
+		return nil, fmt.Errorf(api.NodeNotModified)
 	}
 	// update etag
 	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["node"] {
@@ -189,7 +218,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	json.Unmarshal(b, server)
 
 	if server.ServerPort == 0 {
-		return nil, errors.New("server port must > 0")
+		return nil, fmt.Errorf("server port must > 0")
 	}
 
 	c.resp.Store(server)
@@ -245,7 +274,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.UserNotModified)
+		return nil, fmt.Errorf(api.UserNotModified)
 	}
 	// update etag
 	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["users"] {
@@ -259,7 +288,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	b, _ := usersResp.Get("users").Encode()
 	json.Unmarshal(b, &users)
 	if len(users) == 0 {
-		return nil, errors.New("users is null")
+		return nil, fmt.Errorf("users is null")
 	}
 
 	userList := make([]api.UserInfo, len(users))
@@ -314,6 +343,9 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 					strIPs := make([]string, 0, len(ipList))
 					for _, ip := range ipList {
 						if ipStr, ok := ip.(string); ok {
+							if host, _, found := strings.Cut(ipStr, "_"); found {
+								ipStr = host
+							}
 							strIPs = append(strIPs, ipStr)
 						}
 					}
@@ -444,7 +476,7 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 
 // ReportIllegal implements the API interface
 func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
-	return nil
+	return api.ErrUnsupportedPanelFeature
 }
 
 // parseTrojanNodeResponse parse the response for the given nodeInfo format
@@ -515,6 +547,8 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		Header:            header,
 		NameServerConfig:  s.parseDNSConfig(),
 	}
+
+	attachRoutePolicy(s, nodeInfo)
 
 	// XHTTP bypass CDN fields for Trojan (same as V2ray/VLESS)
 	if transportProtocol == "xhttp" || transportProtocol == "splithttp" {
@@ -604,7 +638,7 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 		}
 	}
 	// Create GeneralNodeInfo
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:          nodeType,
 		NodeID:            c.NodeID,
 		Port:              port,
@@ -617,7 +651,9 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 		ServiceName:       serviceName,
 		NameServerConfig:  s.parseDNSConfig(),
 		Header:            header,
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseV2rayNodeResponse parse the response for the given nodeInfo format
@@ -710,7 +746,7 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 	}
 
 	// Create GeneralNodeInfo
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:          c.NodeType,
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
@@ -745,13 +781,15 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		UplinkChunkSize:     s.NetworkSettings.UplinkChunkSize,
 		NoGRPCHeader:        s.NetworkSettings.NoGRPCHeader,
 		NoSSEHeader:         s.NetworkSettings.NoSSEHeader,
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseHysteria2NodeResponse parse the response for Hysteria2 nodes.
 func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	if s == nil {
-		return nil, errors.New("server config is nil")
+		return nil, fmt.Errorf("server config is nil")
 	}
 	if s.Version != 0 && s.Version != 2 {
 		return nil, fmt.Errorf("unsupported hysteria version: %d, only v2 is supported", s.Version)
@@ -775,7 +813,7 @@ func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, 
 		sni = s.Host
 	}
 
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:         "Hysteria2",
 		NodeID:           c.NodeID,
 		Port:             uint32(s.ServerPort),
@@ -784,13 +822,15 @@ func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, 
 		EnableTLS:        true,
 		Hysteria2Config:  hy,
 		NameServerConfig: s.parseDNSConfig(),
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseTuicNodeResponse parse the response for TUIC nodes.
 func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	if s == nil {
-		return nil, errors.New("server config is nil")
+		return nil, fmt.Errorf("server config is nil")
 	}
 
 	sni := s.ServerName
@@ -798,7 +838,7 @@ func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error
 		sni = s.Host
 	}
 
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:  "Tuic",
 		NodeID:    c.NodeID,
 		Port:      uint32(s.ServerPort),
@@ -812,13 +852,15 @@ func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error
 			AuthTimeout:       parseHeartbeatSeconds(s.AuthTimeout),
 		},
 		NameServerConfig: s.parseDNSConfig(),
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseAnyTLSNodeResponse parse the response for AnyTLS nodes.
 func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	if s == nil {
-		return nil, errors.New("server config is nil")
+		return nil, fmt.Errorf("server config is nil")
 	}
 
 	sni := s.ServerName
@@ -826,7 +868,7 @@ func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		sni = s.Host
 	}
 
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:         "AnyTLS",
 		NodeID:           c.NodeID,
 		Port:             uint32(s.ServerPort),
@@ -835,40 +877,46 @@ func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		EnableTLS:        true,
 		AnyTLSConfig:     &api.AnyTLSConfig{PaddingScheme: s.PaddingScheme},
 		NameServerConfig: s.parseDNSConfig(),
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseSocksNodeResponse parse the response for Socks proxy nodes.
 func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	if s == nil {
-		return nil, errors.New("server config is nil")
+		return nil, fmt.Errorf("server config is nil")
 	}
 
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:          "Socks",
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
 		TransportProtocol: "tcp",
 		NameServerConfig:  s.parseDNSConfig(),
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 // parseHTTPNodeResponse parse the response for HTTP proxy nodes.
 func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	if s == nil {
-		return nil, errors.New("server config is nil")
+		return nil, fmt.Errorf("server config is nil")
 	}
 
 	enableTLS := s.Tls == 1
 
-	return &api.NodeInfo{
+	nodeInfo := &api.NodeInfo{
 		NodeType:          "HTTP",
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
 		TransportProtocol: "tcp",
 		EnableTLS:         enableTLS,
 		NameServerConfig:  s.parseDNSConfig(),
-	}, nil
+	}
+	attachRoutePolicy(s, nodeInfo)
+	return nodeInfo, nil
 }
 
 func parseHeartbeatSeconds(value string) int {
@@ -965,4 +1013,16 @@ func (s *serverConfig) parseDNSConfig() (nameServerList []*conf.NameServerConfig
 	}
 
 	return
+}
+
+func attachRoutePolicy(s *serverConfig, nodeInfo *api.NodeInfo) {
+	if s == nil || nodeInfo == nil {
+		return
+	}
+	policy, err := s.BuildRoutePolicy()
+	if err != nil {
+		log.Printf("BuildRoutePolicy failed: %v", err)
+		return
+	}
+	nodeInfo.RoutePolicy = policy
 }

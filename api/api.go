@@ -3,6 +3,10 @@
 
 package api
 
+import "errors"
+
+var ErrUnsupportedPanelFeature = errors.New("panel feature unsupported by adapter")
+
 // API is the interface for different panel's api.
 type API interface {
 	GetNodeInfo() (nodeInfo *NodeInfo, err error)

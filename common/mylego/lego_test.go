@@ -1,10 +1,18 @@
 package mylego_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
+
+func requireLegoIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("XRAYRP_RUN_LEGO_INTEGRATION") != "1" {
+		t.Skip("skipping lego integration test; set XRAYRP_RUN_LEGO_INTEGRATION=1 to enable")
+	}
+}
 
 func TestLegoClient(t *testing.T) {
 	_, err := mylego.New(&mylego.CertConfig{})
@@ -14,6 +22,7 @@ func TestLegoClient(t *testing.T) {
 }
 
 func TestLegoDNSCert(t *testing.T) {
+	requireLegoIntegration(t)
 	lego, err := mylego.New(&mylego.CertConfig{
 		CertDomain: "node1.test.com",
 		Provider:   "alidns",
@@ -37,6 +46,7 @@ func TestLegoDNSCert(t *testing.T) {
 }
 
 func TestLegoHTTPCert(t *testing.T) {
+	requireLegoIntegration(t)
 	lego, err := mylego.New(&mylego.CertConfig{
 		CertMode:   "http",
 		CertDomain: "node1.test.com",
@@ -55,6 +65,7 @@ func TestLegoHTTPCert(t *testing.T) {
 }
 
 func TestLegoRenewCert(t *testing.T) {
+	requireLegoIntegration(t)
 	lego, err := mylego.New(&mylego.CertConfig{
 		CertDomain: "node1.test.com",
 		Email:      "test@gmail.com",

@@ -1,11 +1,19 @@
 package newV2board_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 )
+
+func requireIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("XRAYRP_RUN_V2BOARD_INTEGRATION") != "1" {
+		t.Skip("skipping integration test; set XRAYRP_RUN_V2BOARD_INTEGRATION=1 to enable")
+	}
+}
 
 func CreateClient() api.API {
 	apiConfig := &api.Config{
@@ -19,6 +27,7 @@ func CreateClient() api.API {
 }
 
 func TestGetV2rayNodeInfo(t *testing.T) {
+	requireIntegration(t)
 	client := CreateClient()
 	nodeInfo, err := client.GetNodeInfo()
 	if err != nil {
@@ -28,6 +37,7 @@ func TestGetV2rayNodeInfo(t *testing.T) {
 }
 
 func TestGetSSNodeInfo(t *testing.T) {
+	requireIntegration(t)
 	apiConfig := &api.Config{
 		APIHost:  "http://127.0.0.1:668",
 		Key:      "qwertyuiopasdfghjkl",
@@ -43,6 +53,7 @@ func TestGetSSNodeInfo(t *testing.T) {
 }
 
 func TestGetTrojanNodeInfo(t *testing.T) {
+	requireIntegration(t)
 	apiConfig := &api.Config{
 		APIHost:  "http://127.0.0.1:668",
 		Key:      "qwertyuiopasdfghjkl",
@@ -58,6 +69,7 @@ func TestGetTrojanNodeInfo(t *testing.T) {
 }
 
 func TestGetUserList(t *testing.T) {
+	requireIntegration(t)
 	client := CreateClient()
 
 	userList, err := client.GetUserList()
@@ -69,10 +81,15 @@ func TestGetUserList(t *testing.T) {
 }
 
 func TestReportReportUserTraffic(t *testing.T) {
+	requireIntegration(t)
 	client := CreateClient()
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 	generalUserTraffic := make([]api.UserTraffic, len(*userList))
 	for i, userInfo := range *userList {
@@ -90,6 +107,7 @@ func TestReportReportUserTraffic(t *testing.T) {
 }
 
 func TestGetNodeRule(t *testing.T) {
+	requireIntegration(t)
 	client := CreateClient()
 	client.Debug()
 	ruleList, err := client.GetNodeRule()

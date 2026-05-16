@@ -52,9 +52,11 @@ func isXrayRManagedTag(tag string) bool {
 // audit rules and ensure userland path is used for stats.
 type dataPathWrapper struct {
 	outbound.Handler
-	pm      policy.Manager
-	sm      stats.Manager
-	limiter *limiter.Limiter
+	pm          policy.Manager
+	sm          stats.Manager
+	limiter     *limiter.Limiter
+	routePolicy *api.PanelRoutePolicy
+	logger      *log.Entry
 	// ruleMgr provides audit detection
 	ruleMgr interface {
 		Detect(tag string, destination string, email string, srcIP string) bool
@@ -71,6 +73,59 @@ type dataPathWrapper struct {
 // correct routing (same NodeID in, same NodeID out).
 func (w *dataPathWrapper) Tag() string {
 	return w.tag
+}
+
+func (w *dataPathWrapper) targetHostFromContext(ctx context.Context) string {
+	outs := session.OutboundsFromContext(ctx)
+	if len(outs) == 0 {
+		return ""
+	}
+	target := outs[len(outs)-1].Target
+	if !target.IsValid() || target.Address == nil {
+		return ""
+	}
+	return target.Address.String()
+}
+
+func (w *dataPathWrapper) resolveTagToHandler(tag string) (outbound.Handler, bool) {
+	if tag == "" {
+		return nil, false
+	}
+	if tag == w.tag {
+		return w.Handler, true
+	}
+	if isXrayRManagedTag(tag) && tag != w.tag {
+		return nil, false
+	}
+	if w.obm != nil {
+		if handler := w.obm.GetHandler(tag); handler != nil {
+			return handler, true
+		}
+	}
+	if strings.EqualFold(tag, "direct") {
+		return w.Handler, true
+	}
+	return nil, false
+}
+
+func (w *dataPathWrapper) selectDispatchHandler(_ context.Context) (outbound.Handler, error) {
+	candidates := []string{w.tag}
+	if w.routePolicy != nil && len(w.routePolicy.Outbound.Candidates) > 0 {
+		candidates = append([]string(nil), w.routePolicy.Outbound.Candidates...)
+	}
+	tags, err := selectOutboundCandidates(candidates, w.routePolicy)
+	if err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 {
+		tags = []string{w.tag}
+	}
+	for _, tag := range tags {
+		if handler, ok := w.resolveTagToHandler(tag); ok {
+			return handler, nil
+		}
+	}
+	return nil, fmt.Errorf("no outbound handler available for selected tags: %v", tags)
 }
 
 func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
@@ -131,7 +186,17 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 		}
 	}
 
-	w.Handler.Dispatch(ctx, link)
+	handlerToUse, err := w.selectDispatchHandler(ctx)
+	if err != nil {
+		if w.logger != nil {
+			w.logger.WithError(err).Warn("Outbound policy selection failed")
+		}
+		common.Close(link.Writer)
+		common.Interrupt(link.Reader)
+		return
+	}
+
+	handlerToUse.Dispatch(ctx, link)
 }
 
 func (c *Controller) removeOutbound(tag string) error {
@@ -154,7 +219,7 @@ func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
 	return nil
 }
 
-func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string) error {
+func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string, routePolicy *api.PanelRoutePolicy) error {
 	rawHandler, err := core.CreateObject(c.server, config)
 	if err != nil {
 		return err
@@ -164,13 +229,15 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string)
 		return fmt.Errorf("not an InboundHandler: %s", err)
 	}
 	wrapper := &dataPathWrapper{
-		Handler: handler,
-		pm:      c.pm,
-		sm:      c.stm,
-		limiter: c.dispatcher.Limiter,
-		ruleMgr: c.dispatcher.RuleManager,
-		tag:     tag,
-		obm:     c.obm,
+		Handler:     handler,
+		pm:          c.pm,
+		sm:          c.stm,
+		limiter:     c.dispatcher.Limiter,
+		ruleMgr:     c.dispatcher.RuleManager,
+		tag:         tag,
+		obm:         c.obm,
+		routePolicy: routePolicy,
+		logger:      c.logger.WithField("outbound_tag", tag),
 	}
 	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)
 	if err := c.obm.AddHandler(context.Background(), wrapper); err != nil {

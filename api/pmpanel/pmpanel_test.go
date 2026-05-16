@@ -2,11 +2,19 @@ package pmpanel_test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/pmpanel"
 )
+
+func requirePMPanelIntegration(t *testing.T) {
+	t.Helper()
+	if os.Getenv("XRAYRP_RUN_PMPANEL_INTEGRATION") != "1" {
+		t.Skip("skipping pmpanel integration test; set XRAYRP_RUN_PMPANEL_INTEGRATION=1 to enable")
+	}
+}
 
 func CreateClient() api.API {
 	apiConfig := &api.Config{
@@ -20,6 +28,7 @@ func CreateClient() api.API {
 }
 
 func TestGetV2rayNodeinfo(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 	client.Debug()
 	nodeInfo, err := client.GetNodeInfo()
@@ -30,6 +39,7 @@ func TestGetV2rayNodeinfo(t *testing.T) {
 }
 
 func TestGetSSNodeinfo(t *testing.T) {
+	requirePMPanelIntegration(t)
 	apiConfig := &api.Config{
 		APIHost:  "http://webapi.yyds.me",
 		Key:      "123456",
@@ -46,6 +56,7 @@ func TestGetSSNodeinfo(t *testing.T) {
 }
 
 func TestGetTrojanNodeinfo(t *testing.T) {
+	requirePMPanelIntegration(t)
 	apiConfig := &api.Config{
 		APIHost:  "http://webapi.yyds.me",
 		Key:      "123456",
@@ -62,6 +73,7 @@ func TestGetTrojanNodeinfo(t *testing.T) {
 }
 
 func TestGetSSinfo(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 
 	nodeInfo, err := client.GetNodeInfo()
@@ -72,17 +84,23 @@ func TestGetSSinfo(t *testing.T) {
 }
 
 func TestGetUserList(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 
 	t.Log(userList)
 }
 
 func TestReportNodeStatus(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 	nodeStatus := &api.NodeStatus{
 		CPU: 1, Mem: 1, Disk: 1, Uptime: 256,
@@ -94,10 +112,15 @@ func TestReportNodeStatus(t *testing.T) {
 }
 
 func TestReportReportNodeOnlineUsers(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 
 	onlineUserList := make([]api.OnlineUser, len(*userList))
@@ -115,10 +138,15 @@ func TestReportReportNodeOnlineUsers(t *testing.T) {
 }
 
 func TestReportReportUserTraffic(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 	userList, err := client.GetUserList()
 	if err != nil {
 		t.Error(err)
+		return
+	}
+	if userList == nil {
+		t.Fatal("expected user list, got nil")
 	}
 	generalUserTraffic := make([]api.UserTraffic, len(*userList))
 	for i, userInfo := range *userList {
@@ -136,6 +164,7 @@ func TestReportReportUserTraffic(t *testing.T) {
 }
 
 func TestGetNodeRule(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 
 	ruleList, err := client.GetNodeRule()
@@ -147,6 +176,7 @@ func TestGetNodeRule(t *testing.T) {
 }
 
 func TestReportIllegal(t *testing.T) {
+	requirePMPanelIntegration(t)
 	client := CreateClient()
 
 	detectResult := []api.DetectResult{
