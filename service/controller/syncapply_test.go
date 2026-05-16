@@ -66,6 +66,7 @@ type syncApplyRecorder struct {
 	appliedSnapshots    []syncApplySnapshot
 	removedTags         []string
 	addedTags           []string
+	addedNodeInfos      []*api.NodeInfo
 	addUserCalls        int
 	addLimiterCalls     int
 	deleteLimiterCalls  int
@@ -98,8 +99,9 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 			recorder.removedTags = append(recorder.removedTags, tag)
 			return nil
 		},
-		addNewTag: func(_ *api.NodeInfo, tag string) error {
+		addNewTag: func(nodeInfo *api.NodeInfo, tag string) error {
 			recorder.addedTags = append(recorder.addedTags, tag)
+			recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
 			return nil
 		},
 		addNewUser: func(_ *[]api.UserInfo, _ *api.NodeInfo, _ string) error {
@@ -152,6 +154,25 @@ func routePolicyWithCandidate(candidate string) *api.PanelRoutePolicy {
 			Fallback:   []string{"direct"},
 		},
 	}
+}
+
+func cloneRecordedNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
+	if nodeInfo == nil {
+		return nil
+	}
+	cloned := *nodeInfo
+	if nodeInfo.RoutePolicy != nil {
+		routePolicy := *nodeInfo.RoutePolicy
+		routePolicy.DirectDomains = append([]string(nil), nodeInfo.RoutePolicy.DirectDomains...)
+		routePolicy.Outbound = api.OutboundFilterPolicy{
+			Candidates: append([]string(nil), nodeInfo.RoutePolicy.Outbound.Candidates...),
+			Include:    append([]string(nil), nodeInfo.RoutePolicy.Outbound.Include...),
+			Exclude:    append([]string(nil), nodeInfo.RoutePolicy.Outbound.Exclude...),
+			Fallback:   append([]string(nil), nodeInfo.RoutePolicy.Outbound.Fallback...),
+		}
+		cloned.RoutePolicy = &routePolicy
+	}
+	return &cloned
 }
 
 func TestSyncApply_WSTriggeredFetchUsesUnifiedApplyPipeline(t *testing.T) {
@@ -247,6 +268,12 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	if len(recorder.removedTags) != 1 || len(recorder.addedTags) != 1 {
 		t.Fatalf("expected compare-and-apply to rebuild node runtime once, got removed=%d added=%d", len(recorder.removedTags), len(recorder.addedTags))
 	}
+	if len(recorder.addedNodeInfos) != 1 || recorder.addedNodeInfos[0] == nil || recorder.addedNodeInfos[0].RoutePolicy == nil {
+		t.Fatal("expected rebuilt node apply to carry route policy into addNewTag")
+	}
+	if got := recorder.addedNodeInfos[0].RoutePolicy.Outbound.Candidates[0]; got != "new-candidate" {
+		t.Fatalf("expected addNewTag to receive updated route policy candidate, got %q", got)
+	}
 	if recorder.addUserCalls != 1 || recorder.addLimiterCalls != 1 || recorder.deleteLimiterCalls != 1 {
 		t.Fatalf("expected node re-apply to re-add users and limiter once, got addUsers=%d addLimiter=%d deleteLimiter=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.deleteLimiterCalls)
 	}
@@ -261,6 +288,69 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	}
 	if got := controller.config.CertConfig.DNSEnv["CF_API_TOKEN"]; got != "token" {
 		t.Fatalf("expected DNS env to be updated from REST snapshot, got %q", got)
+	}
+}
+
+func TestSyncApply_RoutePolicyOnlyChangeRebuildsThroughUnifiedApply(t *testing.T) {
+	restUsers := []api.UserInfo{{UID: 1, Email: "same@example.com"}}
+	currentRoutePolicy := routePolicyWithCandidate("old-candidate")
+	nextRoutePolicy := routePolicyWithCandidate("route-only-candidate")
+	fakeAPI := &fakeSyncApplyAPI{
+		nodeInfo: &api.NodeInfo{
+			NodeType:    "V2ray",
+			NodeID:      1,
+			Port:        443,
+			SpeedLimit:  100,
+			RoutePolicy: nextRoutePolicy,
+		},
+		ruleList: &[]api.DetectRule{},
+	}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	currentNode := &api.NodeInfo{
+		NodeType:    "V2ray",
+		NodeID:      1,
+		Port:        443,
+		SpeedLimit:  100,
+		RoutePolicy: currentRoutePolicy,
+	}
+	currentUsers := append([]api.UserInfo(nil), restUsers...)
+	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	controller.setUserList(&currentUsers)
+
+	action := newSyncAction(syncActionTypeSyncRoutesAndOutbounds, syncActionSourceWS, syncActionMetadata{Trigger: "routes_changed"})
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction returned error: %v", err)
+	}
+
+	if fakeAPI.getNodeInfoCalls != 1 {
+		t.Fatalf("expected route policy sync to fetch node info once, got %d", fakeAPI.getNodeInfoCalls)
+	}
+	if fakeAPI.getUserListCalls != 0 {
+		t.Fatalf("expected route policy only sync to skip user fetch, got %d", fakeAPI.getUserListCalls)
+	}
+	if len(recorder.removedTags) != 1 || len(recorder.addedTags) != 1 {
+		t.Fatalf("expected route policy only change to rebuild node runtime once, got removed=%d added=%d", len(recorder.removedTags), len(recorder.addedTags))
+	}
+	if recorder.addUserCalls != 1 || recorder.addLimiterCalls != 1 || recorder.deleteLimiterCalls != 1 {
+		t.Fatalf("expected route policy only rebuild to re-apply users and limiter once, got addUsers=%d addLimiter=%d deleteLimiter=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.deleteLimiterCalls)
+	}
+	if recorder.updateRuleCalls != 0 {
+		t.Fatalf("expected no rule update when fetched rules are unchanged/empty, got %d", recorder.updateRuleCalls)
+	}
+	if len(recorder.addedNodeInfos) != 1 || recorder.addedNodeInfos[0] == nil || recorder.addedNodeInfos[0].RoutePolicy == nil {
+		t.Fatal("expected route policy only rebuild to carry route policy into addNewTag")
+	}
+	if got := recorder.addedNodeInfos[0].RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
+		t.Fatalf("expected addNewTag to receive route-only candidate, got %q", got)
+	}
+	if len(recorder.appliedSnapshots) != 1 || recorder.appliedSnapshots[0].NodeInfo == nil || recorder.appliedSnapshots[0].NodeInfo.RoutePolicy == nil {
+		t.Fatal("expected unified apply snapshot to include updated route policy")
+	}
+	if got := recorder.appliedSnapshots[0].NodeInfo.RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
+		t.Fatalf("expected unified apply snapshot to carry route-only candidate, got %q", got)
+	}
+	if got := controller.nodeInfo.RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
+		t.Fatalf("expected controller node state to persist updated route policy, got %q", got)
 	}
 }
 
