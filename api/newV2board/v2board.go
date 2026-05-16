@@ -87,6 +87,19 @@ func New(apiConfig *api.Config) *APIClient {
 	return apiClient
 }
 
+func (c *APIClient) wsConfig() *api.WSConfig {
+	if c == nil {
+		return nil
+	}
+
+	return &api.WSConfig{
+		APIHost:  c.APIHost,
+		NodeID:   c.NodeID,
+		Key:      c.Key,
+		NodeType: c.NodeType,
+	}
+}
+
 // readLocalRuleList reads the local rule list file
 func readLocalRuleList(path string) (LocalRuleList []api.DetectRule) {
 	LocalRuleList = make([]api.DetectRule, 0)
