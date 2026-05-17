@@ -86,13 +86,13 @@ func waitForAppliedSnapshots(t *testing.T, recorder *syncApplyRecorder, want int
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(recorder.appliedSnapshots) >= want {
+		if recorder.appliedSnapshotCount() >= want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatalf("timed out waiting for %d applied snapshot(s), got %d", want, len(recorder.appliedSnapshots))
+	t.Fatalf("timed out waiting for %d applied snapshot(s), got %d", want, recorder.appliedSnapshotCount())
 }
 
 func TestDualActive_WSTriggerThenPollingConverges(t *testing.T) {
@@ -138,8 +138,12 @@ func TestDualActive_WSTriggerThenPollingConverges(t *testing.T) {
 	if stateUsers == nil || !reflect.DeepEqual(*stateUsers, wsUsers) {
 		t.Fatalf("expected ws user sync to apply websocket snapshot users, got %#v", stateUsers)
 	}
-	if recorder.appliedSnapshots[0].Action.Source != syncActionSourceWS || recorder.appliedSnapshots[0].Action.Type != syncActionTypeSyncUsers {
-		t.Fatalf("expected first apply from ws user sync, got source=%q type=%q", recorder.appliedSnapshots[0].Action.Source, recorder.appliedSnapshots[0].Action.Type)
+	firstSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected first applied snapshot")
+	}
+	if firstSnapshot.Action.Source != syncActionSourceWS || firstSnapshot.Action.Type != syncActionTypeSyncUsers {
+		t.Fatalf("expected first apply from ws user sync, got source=%q type=%q", firstSnapshot.Action.Source, firstSnapshot.Action.Type)
 	}
 
 	fakeAPI.nodeInfo = pollNode
@@ -159,8 +163,12 @@ func TestDualActive_WSTriggerThenPollingConverges(t *testing.T) {
 	if stateUsers == nil || !reflect.DeepEqual(*stateUsers, pollUsers) {
 		t.Fatalf("expected polling resync to converge users to latest snapshot, got %#v", stateUsers)
 	}
-	if recorder.appliedSnapshots[1].Action.Source != syncActionSourcePolling || recorder.appliedSnapshots[1].Action.Type != syncActionTypeResyncAll {
-		t.Fatalf("expected second apply from polling resync, got source=%q type=%q", recorder.appliedSnapshots[1].Action.Source, recorder.appliedSnapshots[1].Action.Type)
+	secondSnapshot, ok := recorder.appliedSnapshotAt(1)
+	if !ok {
+		t.Fatal("expected second applied snapshot")
+	}
+	if secondSnapshot.Action.Source != syncActionSourcePolling || secondSnapshot.Action.Type != syncActionTypeResyncAll {
+		t.Fatalf("expected second apply from polling resync, got source=%q type=%q", secondSnapshot.Action.Source, secondSnapshot.Action.Type)
 	}
 	if recorder.lastRuleTag != controller.Tag || len(recorder.lastRules) != 1 || recorder.lastRules[0].Pattern.String() != "poll.example" {
 		t.Fatalf("expected polling correction to update rules on converged runtime, got tag=%q rules=%#v", recorder.lastRuleTag, recorder.lastRules)
@@ -199,6 +207,7 @@ func TestDualActive_DuplicateWSAndPollingDoNotRunInfiniteConcurrentSyncs(t *test
 		}
 	}
 
+	runtime.Stop()
 	close(releaseFirst)
 	waitForCoordinatorIdle(t, coordinator)
 
@@ -245,11 +254,15 @@ func TestDualActive_HandshakeFailureDegradesToPollingOnly(t *testing.T) {
 	waitForAppliedSnapshots(t, recorder, 1)
 	waitForCoordinatorIdle(t, coordinator)
 
-	if len(recorder.appliedSnapshots) != 1 {
-		t.Fatalf("expected polling-only degradation to still apply one snapshot, got %d", len(recorder.appliedSnapshots))
+	if recorder.appliedSnapshotCount() != 1 {
+		t.Fatalf("expected polling-only degradation to still apply one snapshot, got %d", recorder.appliedSnapshotCount())
 	}
-	if recorder.appliedSnapshots[0].Action.Source != syncActionSourcePolling || recorder.appliedSnapshots[0].Action.Type != syncActionTypeResyncAll {
-		t.Fatalf("expected polling to stay active after handshake failure, got source=%q type=%q", recorder.appliedSnapshots[0].Action.Source, recorder.appliedSnapshots[0].Action.Type)
+	pollingSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected polling snapshot after degradation")
+	}
+	if pollingSnapshot.Action.Source != syncActionSourcePolling || pollingSnapshot.Action.Type != syncActionTypeResyncAll {
+		t.Fatalf("expected polling to stay active after handshake failure, got source=%q type=%q", pollingSnapshot.Action.Source, pollingSnapshot.Action.Type)
 	}
 	if !runtime.Degraded() {
 		t.Fatal("expected runtime to remain degraded after handshake failure")
@@ -287,11 +300,15 @@ func TestDualActive_ParseErrorDoesNotKillWSChannel(t *testing.T) {
 	waitForAppliedSnapshots(t, recorder, 1)
 	waitForCoordinatorIdle(t, coordinator)
 
-	if len(recorder.appliedSnapshots) != 1 {
-		t.Fatalf("expected subsequent websocket event to still be applied, got %d snapshots", len(recorder.appliedSnapshots))
+	if recorder.appliedSnapshotCount() != 1 {
+		t.Fatalf("expected subsequent websocket event to still be applied, got %d snapshots", recorder.appliedSnapshotCount())
 	}
-	if recorder.appliedSnapshots[0].Action.Source != syncActionSourceWS || recorder.appliedSnapshots[0].Action.Type != syncActionTypeSyncUsers {
-		t.Fatalf("expected subsequent websocket event to remain on ws path, got source=%q type=%q", recorder.appliedSnapshots[0].Action.Source, recorder.appliedSnapshots[0].Action.Type)
+	wsSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected websocket snapshot after parse error")
+	}
+	if wsSnapshot.Action.Source != syncActionSourceWS || wsSnapshot.Action.Type != syncActionTypeSyncUsers {
+		t.Fatalf("expected subsequent websocket event to remain on ws path, got source=%q type=%q", wsSnapshot.Action.Source, wsSnapshot.Action.Type)
 	}
 }
 
@@ -342,10 +359,14 @@ func TestDualActive_ReconnectForcesResyncAll(t *testing.T) {
 	waitForAppliedSnapshots(t, recorder, 1)
 	waitForCoordinatorIdle(t, coordinator)
 
-	if len(recorder.appliedSnapshots) != 1 {
-		t.Fatalf("expected reconnect recovery to apply one resync snapshot, got %d", len(recorder.appliedSnapshots))
+	if recorder.appliedSnapshotCount() != 1 {
+		t.Fatalf("expected reconnect recovery to apply one resync snapshot, got %d", recorder.appliedSnapshotCount())
 	}
-	if recorder.appliedSnapshots[0].Action.Source != syncActionSourceReconnect || recorder.appliedSnapshots[0].Action.Type != syncActionTypeResyncAll {
-		t.Fatalf("expected reconnect to force ResyncAll, got source=%q type=%q", recorder.appliedSnapshots[0].Action.Source, recorder.appliedSnapshots[0].Action.Type)
+	reconnectSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected reconnect snapshot")
+	}
+	if reconnectSnapshot.Action.Source != syncActionSourceReconnect || reconnectSnapshot.Action.Type != syncActionTypeResyncAll {
+		t.Fatalf("expected reconnect to force ResyncAll, got source=%q type=%q", reconnectSnapshot.Action.Source, reconnectSnapshot.Action.Type)
 	}
 }

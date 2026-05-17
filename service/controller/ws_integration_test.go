@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"reflect"
 	"testing"
 	"time"
 
@@ -19,13 +18,14 @@ func TestWSIntegration_ControlEventTriggersRESTFetchAndApply(t *testing.T) {
 
 	runtime := waitForControllerWSRuntime(t, harness.controller)
 	waitForWSRuntimeDegradedState(t, runtime, false)
+	harness.resetObservedState(t)
 
 	wantUsers := []api.UserInfo{{UID: 1, Email: "ws@example.com"}, {UID: 2, Email: "new@example.com"}}
 	harness.api.SetUserList(wantUsers)
-	harness.api.ResetCalls()
+	baselineSnapshots := harness.snapshots.Count()
 	harness.server.sendEvent(t, newV2board.WSEventUsersChanged, map[string]any{"revision": 2})
 
-	waitForIntegrationSnapshotCount(t, harness.recorder, 1)
+	waitForIntegrationSnapshotCount(t, harness.snapshots, baselineSnapshots+1)
 	waitForControllerSyncIdle(t, harness.controller)
 
 	calls := harness.api.SnapshotCalls()
@@ -36,15 +36,13 @@ func TestWSIntegration_ControlEventTriggersRESTFetchAndApply(t *testing.T) {
 		t.Fatalf("expected websocket users_changed to avoid node fetches, got %d", calls.NodeInfo)
 	}
 
-	snapshot := harness.recorder.appliedSnapshots[0]
+	snapshot := harness.lastAppliedSnapshot(t)
 	if snapshot.Action.Source != syncActionSourceWS || snapshot.Action.Type != syncActionTypeSyncUsers {
 		t.Fatalf("expected websocket users_changed apply action, got source=%q type=%q", snapshot.Action.Source, snapshot.Action.Type)
 	}
 
 	_, _, gotUsers := harness.controller.getStateSnapshot()
-	if gotUsers == nil || !reflect.DeepEqual(*gotUsers, wantUsers) {
-		t.Fatalf("expected controller user state to match websocket-triggered REST snapshot, got %#v", gotUsers)
-	}
+	assertIntegrationUsersEqual(t, gotUsers, wantUsers)
 }
 
 func TestWSIntegration_DisconnectReconnectTriggersResyncAll(t *testing.T) {
@@ -56,18 +54,19 @@ func TestWSIntegration_DisconnectReconnectTriggersResyncAll(t *testing.T) {
 	_ = harness.server.waitForHandshake(t)
 	runtime := waitForControllerWSRuntime(t, harness.controller)
 	waitForWSRuntimeDegradedState(t, runtime, false)
+	harness.resetObservedState(t)
 
 	wantNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 9443, SpeedLimit: 200}
 	wantUsers := []api.UserInfo{{UID: 1, Email: "reconnect@example.com"}}
 	harness.api.SetNodeInfo(wantNode)
 	harness.api.SetUserList(wantUsers)
-	harness.api.ResetCalls()
+	baselineSnapshots := harness.snapshots.Count()
 
 	harness.server.closeCurrentConnection(t)
 	_ = harness.server.waitForHandshake(t)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
-	waitForIntegrationSnapshotCount(t, harness.recorder, 1)
+	waitForIntegrationSnapshotCount(t, harness.snapshots, baselineSnapshots+1)
 	waitForControllerSyncIdle(t, harness.controller)
 
 	calls := harness.api.SnapshotCalls()
@@ -75,7 +74,7 @@ func TestWSIntegration_DisconnectReconnectTriggersResyncAll(t *testing.T) {
 		t.Fatalf("expected reconnect resync to fetch node+users once, got node=%d users=%d", calls.NodeInfo, calls.UserList)
 	}
 
-	snapshot := harness.recorder.appliedSnapshots[0]
+	snapshot := harness.lastAppliedSnapshot(t)
 	if snapshot.Action.Source != syncActionSourceReconnect || snapshot.Action.Type != syncActionTypeResyncAll {
 		t.Fatalf("expected reconnect apply action to be ResyncAll from reconnect, got source=%q type=%q", snapshot.Action.Source, snapshot.Action.Type)
 	}
@@ -84,9 +83,7 @@ func TestWSIntegration_DisconnectReconnectTriggersResyncAll(t *testing.T) {
 	if gotNode == nil || gotNode.Port != wantNode.Port || gotNode.SpeedLimit != wantNode.SpeedLimit {
 		t.Fatalf("expected controller node state to refresh after reconnect, got %#v", gotNode)
 	}
-	if gotUsers == nil || !reflect.DeepEqual(*gotUsers, wantUsers) {
-		t.Fatalf("expected controller users to refresh after reconnect, got %#v", gotUsers)
-	}
+	assertIntegrationUsersEqual(t, gotUsers, wantUsers)
 }
 
 func TestWSIntegration_BadEndpointDegradesToPollingOnly(t *testing.T) {
@@ -98,22 +95,22 @@ func TestWSIntegration_BadEndpointDegradesToPollingOnly(t *testing.T) {
 
 	runtime := waitForControllerWSRuntime(t, harness.controller)
 	waitForWSRuntimeDegradedState(t, runtime, true)
+	harness.resetObservedState(t)
 
 	wantNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 7443, SpeedLimit: 300}
 	wantUsers := []api.UserInfo{{UID: 9, Email: "poll@example.com"}}
 	harness.api.SetNodeInfo(wantNode)
 	harness.api.SetUserList(wantUsers)
-	harness.api.ResetCalls()
+	baselineSnapshots := harness.snapshots.Count()
 
-	harness.controller.startAt = time.Now().Add(-2 * time.Hour)
-	if err := harness.controller.nodeInfoMonitor(); err != nil {
-		t.Fatalf("nodeInfoMonitor returned error: %v", err)
+	if err := harness.controller.submitSyncAction(syncActionFromPollingTick(time.Now())); err != nil {
+		t.Fatalf("submitSyncAction returned error: %v", err)
 	}
 
-	waitForIntegrationSnapshotCount(t, harness.recorder, 1)
+	waitForIntegrationSnapshotCount(t, harness.snapshots, baselineSnapshots+1)
 	waitForControllerSyncIdle(t, harness.controller)
 
-	snapshot := harness.recorder.appliedSnapshots[0]
+	snapshot := harness.lastAppliedSnapshot(t)
 	if snapshot.Action.Source != syncActionSourcePolling || snapshot.Action.Type != syncActionTypeResyncAll {
 		t.Fatalf("expected degraded mode to keep polling ResyncAll active, got source=%q type=%q", snapshot.Action.Source, snapshot.Action.Type)
 	}
@@ -122,7 +119,5 @@ func TestWSIntegration_BadEndpointDegradesToPollingOnly(t *testing.T) {
 	if gotNode == nil || gotNode.Port != wantNode.Port {
 		t.Fatalf("expected polling-only node refresh after websocket handshake failure, got %#v", gotNode)
 	}
-	if gotUsers == nil || !reflect.DeepEqual(*gotUsers, wantUsers) {
-		t.Fatalf("expected polling-only user refresh after websocket handshake failure, got %#v", gotUsers)
-	}
+	assertIntegrationUsersEqual(t, gotUsers, wantUsers)
 }

@@ -100,10 +100,7 @@ func (f *fakeLifecycleWSRuntime) Stop() {
 }
 
 func waitForControllerPeriodicBootstrap() {
-	// Controller.Start() launches periodic tasks in goroutines and each Periodic
-	// executes once immediately. Give that bootstrap execute a moment to observe
-	// the future startAt guard before tests mutate controller state.
-	time.Sleep(30 * time.Millisecond)
+	// No-op retained for legacy callers; tests now avoid bootstrap timing assumptions.
 }
 
 func newLifecycleTestController(apiClient api.API, enableWS bool) *Controller {
@@ -152,7 +149,6 @@ func TestController_WSStartInitializesRuntimeWhenCapableAndEnabled(t *testing.T)
 	if err := controller.Start(); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	waitForControllerPeriodicBootstrap()
 	defer controller.Close()
 
 	if controller.syncCoordinator != coordinator {
@@ -187,12 +183,10 @@ func TestController_DualActivePollingAndWSShareCoordinator(t *testing.T) {
 	if err := controller.Start(); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	waitForControllerPeriodicBootstrap()
 	defer controller.Close()
 
-	controller.startAt = time.Now().Add(-2 * time.Hour)
-	if err := controller.nodeInfoMonitor(); err != nil {
-		t.Fatalf("nodeInfoMonitor returned error: %v", err)
+	if err := controller.submitSyncAction(syncActionFromPollingTick(time.Now())); err != nil {
+		t.Fatalf("submitSyncAction returned error: %v", err)
 	}
 
 	if len(coordinator.actions) != 2 {
@@ -227,7 +221,6 @@ func TestController_DualActiveCloseStopsRuntimeAndCoordinator(t *testing.T) {
 	if err := controller.Start(); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	waitForControllerPeriodicBootstrap()
 
 	if err := controller.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
@@ -261,7 +254,6 @@ func TestController_WSDisabledStaysPollingOnly(t *testing.T) {
 	if err := controller.Start(); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	waitForControllerPeriodicBootstrap()
 	defer controller.Close()
 
 	if wsFactoryCalled {
@@ -271,9 +263,8 @@ func TestController_WSDisabledStaysPollingOnly(t *testing.T) {
 		t.Fatal("expected controller to remain polling-only when websocket is disabled")
 	}
 
-	controller.startAt = time.Now().Add(-2 * time.Hour)
-	if err := controller.nodeInfoMonitor(); err != nil {
-		t.Fatalf("nodeInfoMonitor returned error: %v", err)
+	if err := controller.submitSyncAction(syncActionFromPollingTick(time.Now())); err != nil {
+		t.Fatalf("submitSyncAction returned error: %v", err)
 	}
 	if len(coordinator.actions) != 1 {
 		t.Fatalf("expected polling-only mode to submit one polling action, got %d", len(coordinator.actions))

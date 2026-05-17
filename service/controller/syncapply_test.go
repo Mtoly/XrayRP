@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +65,7 @@ func (f *fakeSyncApplyAPI) ReportIllegal(*[]api.DetectResult) error { return nil
 func (f *fakeSyncApplyAPI) Debug()                                  {}
 
 type syncApplyRecorder struct {
+	appliedSnapshotsMu  sync.Mutex
 	appliedSnapshots    []syncApplySnapshot
 	removedTags         []string
 	addedTags           []string
@@ -85,6 +87,27 @@ type syncApplyRecorder struct {
 	activeLimiterTags   map[string]bool
 	removedInboundTags  []string
 	removedOutboundTags []string
+}
+
+func (r *syncApplyRecorder) recordAppliedSnapshot(snapshot syncApplySnapshot) {
+	r.appliedSnapshotsMu.Lock()
+	defer r.appliedSnapshotsMu.Unlock()
+	r.appliedSnapshots = append(r.appliedSnapshots, snapshot)
+}
+
+func (r *syncApplyRecorder) appliedSnapshotCount() int {
+	r.appliedSnapshotsMu.Lock()
+	defer r.appliedSnapshotsMu.Unlock()
+	return len(r.appliedSnapshots)
+}
+
+func (r *syncApplyRecorder) appliedSnapshotAt(index int) (syncApplySnapshot, bool) {
+	r.appliedSnapshotsMu.Lock()
+	defer r.appliedSnapshotsMu.Unlock()
+	if index < 0 || index >= len(r.appliedSnapshots) {
+		return syncApplySnapshot{}, false
+	}
+	return r.appliedSnapshots[index], true
 }
 
 func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecorder) {
@@ -174,7 +197,7 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 			return nil
 		},
 		onSnapshotApplied: func(snapshot syncApplySnapshot) {
-			recorder.appliedSnapshots = append(recorder.appliedSnapshots, snapshot)
+			recorder.recordAppliedSnapshot(snapshot)
 		},
 		onCertConfigApplied: func(cert *api.XrayRCertConfig) {
 			recorder.appliedCertConfigs = append(recorder.appliedCertConfigs, clonePanelCertConfig(cert))

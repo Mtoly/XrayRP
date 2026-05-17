@@ -15,7 +15,11 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
-const v2boardWSIntegrationEnv = "XRAYRP_RUN_V2BOARD_WS_INTEGRATION"
+const (
+	v2boardWSIntegrationEnv        = "XRAYRP_RUN_V2BOARD_WS_INTEGRATION"
+	wsIntegrationReconnectBackoff  = 10 * time.Millisecond
+	wsIntegrationReconnectBackoffS = 1
+)
 
 func requireV2boardWSIntegration(t *testing.T) {
 	t.Helper()
@@ -152,6 +156,38 @@ func cloneIntegrationRules(rules *[]api.DetectRule) []api.DetectRule {
 	copied := make([]api.DetectRule, len(*rules))
 	copy(copied, *rules)
 	return copied
+}
+
+type integrationSnapshotRecorder struct {
+	mu               sync.Mutex
+	appliedSnapshots []syncApplySnapshot
+}
+
+func (r *integrationSnapshotRecorder) Record(snapshot syncApplySnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.appliedSnapshots = append(r.appliedSnapshots, snapshot)
+}
+
+func (r *integrationSnapshotRecorder) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.appliedSnapshots = nil
+}
+
+func (r *integrationSnapshotRecorder) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.appliedSnapshots)
+}
+
+func (r *integrationSnapshotRecorder) Last() (syncApplySnapshot, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.appliedSnapshots) == 0 {
+		return syncApplySnapshot{}, false
+	}
+	return r.appliedSnapshots[len(r.appliedSnapshots)-1], true
 }
 
 type wsIntegrationHandshake struct {
@@ -303,6 +339,7 @@ func (s *mockV2boardWSServer) Close() {
 type v2boardWSIntegrationHarness struct {
 	controller  *Controller
 	recorder    *syncApplyRecorder
+	snapshots   *integrationSnapshotRecorder
 	api         *fakeV2boardWSIntegrationAPI
 	server      *mockV2boardWSServer
 	coordinator *syncCoordinator
@@ -314,6 +351,10 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 	server := newMockV2boardWSServer(t)
 	apiClient := newFakeV2boardWSIntegrationAPI(server.server.URL)
 	controller, recorder := newTestSyncApplyController(apiClient)
+	snapshots := &integrationSnapshotRecorder{}
+	controller.syncApplyHooks.onSnapshotApplied = func(snapshot syncApplySnapshot) {
+		snapshots.Record(snapshot)
+	}
 	controller.panelType = "NewV2board"
 	controller.config.DisableGetRule = true
 	controller.config.UpdatePeriodic = 3600
@@ -321,7 +362,7 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 		Enable:            true,
 		Endpoint:          server.endpoint(),
 		HeartbeatInterval: 0,
-		ReconnectBackoff:  0,
+		ReconnectBackoff:  wsIntegrationReconnectBackoffS,
 		ResyncOnReconnect: true,
 	}
 	controller.startAt = time.Now().Add(time.Hour)
@@ -329,6 +370,7 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 	harness := &v2boardWSIntegrationHarness{
 		controller: controller,
 		recorder:   recorder,
+		snapshots:  snapshots,
 		api:        apiClient,
 		server:     server,
 	}
@@ -336,7 +378,18 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 		harness.coordinator = newSyncCoordinator(executor)
 		return harness.coordinator
 	}
-	controller.wsRuntimeFactory = controller.newConfiguredWSRuntime
+	controller.wsRuntimeFactory = func(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+		runtime, err := controller.newConfiguredWSRuntime(submitter)
+		if err != nil {
+			return nil, err
+		}
+		configured, ok := runtime.(*wsRuntime)
+		if !ok || configured == nil {
+			return runtime, nil
+		}
+		configured.reconnectBackoff = wsIntegrationReconnectBackoff
+		return configured, nil
+	}
 
 	return harness
 }
@@ -346,13 +399,28 @@ func (h *v2boardWSIntegrationHarness) start(t *testing.T) {
 	if err := h.controller.Start(); err != nil {
 		t.Fatalf("controller.Start returned error: %v", err)
 	}
-	waitForControllerPeriodicBootstrap()
 	t.Cleanup(func() {
 		if err := h.controller.Close(); err != nil {
 			t.Fatalf("controller.Close returned error: %v", err)
 		}
 		h.server.Close()
 	})
+}
+
+func (h *v2boardWSIntegrationHarness) resetObservedState(t *testing.T) {
+	t.Helper()
+	waitForControllerSyncIdle(t, h.controller)
+	h.snapshots.Reset()
+	h.api.ResetCalls()
+}
+
+func (h *v2boardWSIntegrationHarness) lastAppliedSnapshot(t *testing.T) syncApplySnapshot {
+	t.Helper()
+	snapshot, ok := h.snapshots.Last()
+	if !ok {
+		t.Fatal("expected at least one applied snapshot")
+	}
+	return snapshot
 }
 
 func assertWSIntegrationHandshake(t *testing.T, handshake wsIntegrationHandshake) {
@@ -384,9 +452,17 @@ func waitForControllerWSRuntime(t *testing.T, controller *Controller) *wsRuntime
 	return nil
 }
 
-func waitForIntegrationSnapshotCount(t *testing.T, recorder *syncApplyRecorder, want int) {
+func waitForIntegrationSnapshotCount(t *testing.T, recorder *integrationSnapshotRecorder, want int) {
 	t.Helper()
-	waitForAppliedSnapshots(t, recorder, want)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorder.Count() >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for %d applied snapshot(s), got %d", want, recorder.Count())
 }
 
 func waitForControllerSyncIdle(t *testing.T, controller *Controller) {
