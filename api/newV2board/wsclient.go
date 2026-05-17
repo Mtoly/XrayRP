@@ -3,6 +3,7 @@ package newV2board
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -20,6 +21,7 @@ type WSClient struct {
 	done      chan struct{}
 	closing   chan struct{}
 	closeOnce sync.Once
+	writeMu   sync.Mutex
 }
 
 // NewWSClient dials the websocket endpoint and starts the read loop.
@@ -57,6 +59,29 @@ func (c *WSClient) Done() <-chan struct{} {
 	return c.done
 }
 
+// KeepAlive sends a websocket ping control frame to keep the connection active.
+func (c *WSClient) KeepAlive() error {
+	if c == nil {
+		return nil
+	}
+	if c.isClosing() {
+		return nil
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if c.isClosing() {
+		return nil
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	if err := c.conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+		return errors.Join(ErrWSClientTransport, err)
+	}
+	return nil
+}
+
 // Close stops the client and closes the underlying websocket connection.
 func (c *WSClient) Close() error {
 	if c == nil {
@@ -66,6 +91,8 @@ func (c *WSClient) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closing)
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
 		err = c.conn.Close()
 	})
 

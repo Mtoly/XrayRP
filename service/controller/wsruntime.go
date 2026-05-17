@@ -15,6 +15,7 @@ type wsRuntimeClient interface {
 	Events() <-chan *newV2board.WSEvent
 	Errors() <-chan error
 	Done() <-chan struct{}
+	KeepAlive() error
 	Close() error
 }
 
@@ -29,6 +30,13 @@ type wsRuntimeLifecycle interface {
 	Stop()
 }
 
+type wsRuntimeTicker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type wsRuntimeTickerFactory func(time.Duration) wsRuntimeTicker
+
 type wsRuntimeOptions struct {
 	ReconnectBackoff  time.Duration
 	HeartbeatInterval time.Duration
@@ -42,6 +50,7 @@ type wsRuntime struct {
 	heartbeatInterval time.Duration
 	resyncOnReconnect bool
 	sleep             func(context.Context, time.Duration) bool
+	tickerFactory     wsRuntimeTickerFactory
 
 	mu       sync.RWMutex
 	started  bool
@@ -72,6 +81,7 @@ func newWSRuntime(factory wsRuntimeClientFactory, submitter syncActionSubmitter,
 		heartbeatInterval: options.HeartbeatInterval,
 		resyncOnReconnect: options.ResyncOnReconnect,
 		sleep:             sleepWithContext,
+		tickerFactory:     newRealWSRuntimeTicker,
 		done:              make(chan struct{}),
 	}
 }
@@ -195,10 +205,29 @@ func (r *wsRuntime) connect(ctx context.Context) (wsRuntimeClient, error) {
 }
 
 func (r *wsRuntime) consumeClient(ctx context.Context, client wsRuntimeClient) bool {
+	var (
+		heartbeat <-chan time.Time
+		ticker    wsRuntimeTicker
+	)
+	if r.heartbeatInterval > 0 && r.tickerFactory != nil {
+		ticker = r.tickerFactory(r.heartbeatInterval)
+		heartbeat = ticker.C()
+		defer ticker.Stop()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return false
+		case <-heartbeat:
+			select {
+			case <-ctx.Done():
+				return false
+			default:
+			}
+			if err := client.KeepAlive(); err != nil {
+				return true
+			}
 		case event, ok := <-client.Events():
 			if !ok {
 				return true
@@ -299,4 +328,20 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+type realWSRuntimeTicker struct {
+	ticker *time.Ticker
+}
+
+func newRealWSRuntimeTicker(interval time.Duration) wsRuntimeTicker {
+	return &realWSRuntimeTicker{ticker: time.NewTicker(interval)}
+}
+
+func (t *realWSRuntimeTicker) C() <-chan time.Time {
+	return t.ticker.C
+}
+
+func (t *realWSRuntimeTicker) Stop() {
+	t.ticker.Stop()
 }

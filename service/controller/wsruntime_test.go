@@ -12,20 +12,24 @@ import (
 )
 
 type stubWSRuntimeClient struct {
-	mu        sync.Mutex
-	events    chan *newV2board.WSEvent
-	errs      chan error
-	done      chan struct{}
-	closed    chan struct{}
-	closeOnce sync.Once
+	mu             sync.Mutex
+	events         chan *newV2board.WSEvent
+	errs           chan error
+	done           chan struct{}
+	closed         chan struct{}
+	keepAliveCh    chan struct{}
+	keepAliveCount int
+	keepAliveErr   error
+	closeOnce      sync.Once
 }
 
 func newStubWSRuntimeClient() *stubWSRuntimeClient {
 	return &stubWSRuntimeClient{
-		events: make(chan *newV2board.WSEvent, 8),
-		errs:   make(chan error, 8),
-		done:   make(chan struct{}),
-		closed: make(chan struct{}),
+		events:      make(chan *newV2board.WSEvent, 8),
+		errs:        make(chan error, 8),
+		done:        make(chan struct{}),
+		closed:      make(chan struct{}),
+		keepAliveCh: make(chan struct{}, 16),
 	}
 }
 
@@ -41,6 +45,18 @@ func (c *stubWSRuntimeClient) Done() <-chan struct{} {
 	return c.done
 }
 
+func (c *stubWSRuntimeClient) KeepAlive() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.keepAliveCount++
+	select {
+	case c.keepAliveCh <- struct{}{}:
+	default:
+	}
+	return c.keepAliveErr
+}
+
 func (c *stubWSRuntimeClient) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
@@ -49,6 +65,12 @@ func (c *stubWSRuntimeClient) Close() error {
 		close(c.closed)
 	})
 	return nil
+}
+
+func (c *stubWSRuntimeClient) KeepAliveCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.keepAliveCount
 }
 
 func (c *stubWSRuntimeClient) emitControlEvent(event string) {
@@ -138,6 +160,42 @@ func (s *recordingWSRuntimeSubmitter) ExpectNoAction(t *testing.T, wait time.Dur
 	case action := <-s.ch:
 		t.Fatalf("expected no sync action, got %#v", action)
 	case <-time.After(wait):
+	}
+}
+
+type stubWSRuntimeTicker struct {
+	ch       chan time.Time
+	stopped  chan struct{}
+	stopOnce sync.Once
+}
+
+func newStubWSRuntimeTicker() *stubWSRuntimeTicker {
+	return &stubWSRuntimeTicker{
+		ch:      make(chan time.Time, 16),
+		stopped: make(chan struct{}),
+	}
+}
+
+func (t *stubWSRuntimeTicker) C() <-chan time.Time {
+	return t.ch
+}
+
+func (t *stubWSRuntimeTicker) Stop() {
+	t.stopOnce.Do(func() {
+		close(t.stopped)
+	})
+}
+
+func (t *stubWSRuntimeTicker) Tick() {
+	select {
+	case <-t.stopped:
+		return
+	default:
+	}
+
+	select {
+	case t.ch <- time.Now():
+	case <-t.stopped:
 	}
 }
 
@@ -283,6 +341,89 @@ func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSub
 	runtime.Stop()
 }
 
+func TestWSRuntime_HeartbeatEnabledTriggersKeepAlive(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 25 * time.Millisecond})
+	ticker := newStubWSRuntimeTicker()
+	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker { return ticker }
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	ticker.Tick()
+	waitForKeepAlive(t, client)
+
+	if got := client.KeepAliveCount(); got != 1 {
+		t.Fatalf("unexpected keepalive count: got %d want 1", got)
+	}
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_HeartbeatDisabledDoesNotTriggerKeepAlive(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 0})
+	createdTicker := make(chan struct{}, 1)
+	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker {
+		createdTicker <- struct{}{}
+		return newStubWSRuntimeTicker()
+	}
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	select {
+	case <-createdTicker:
+		t.Fatal("expected heartbeat ticker not to be created when disabled")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	expectNoKeepAlive(t, client, 100*time.Millisecond)
+	if got := client.KeepAliveCount(); got != 0 {
+		t.Fatalf("unexpected keepalive count when heartbeat disabled: got %d want 0", got)
+	}
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_StopStopsHeartbeatLoop(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 25 * time.Millisecond})
+	ticker := newStubWSRuntimeTicker()
+	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker { return ticker }
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	ticker.Tick()
+	waitForKeepAlive(t, client)
+	baseline := client.KeepAliveCount()
+
+	runtime.Stop()
+	waitForChannelClosed(t, runtime.Done())
+
+	ticker.Tick()
+	expectNoKeepAlive(t, client, 100*time.Millisecond)
+	if got := client.KeepAliveCount(); got != baseline {
+		t.Fatalf("keepalive count changed after stop: got %d want %d", got, baseline)
+	}
+}
+
 func TestWSRuntime_CanRestartAfterStop(t *testing.T) {
 	t.Parallel()
 
@@ -327,6 +468,26 @@ func TestWSRuntime_CanRestartAfterStop(t *testing.T) {
 
 	runtime.Stop()
 	waitForChannelClosed(t, secondDone)
+}
+
+func waitForKeepAlive(t *testing.T, client *stubWSRuntimeClient) {
+	t.Helper()
+
+	select {
+	case <-client.keepAliveCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for keepalive")
+	}
+}
+
+func expectNoKeepAlive(t *testing.T, client *stubWSRuntimeClient, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case <-client.keepAliveCh:
+		t.Fatal("expected no keepalive")
+	case <-time.After(wait):
+	}
 }
 
 func waitForWSRuntimeAttempt(t *testing.T, factory *scriptedWSRuntimeFactory, want int) {

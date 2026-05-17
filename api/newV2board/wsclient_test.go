@@ -71,6 +71,44 @@ func TestWSClient_CloseStopsReadLoop(t *testing.T) {
 	waitDone(t, client.Done())
 }
 
+func TestWSClient_KeepAliveSendsPingControlFrame(t *testing.T) {
+	t.Parallel()
+
+	pingReceived := make(chan struct{}, 1)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		conn.SetPingHandler(func(appData string) error {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	if err := client.KeepAlive(); err != nil {
+		t.Fatalf("KeepAlive returned error: %v", err)
+	}
+
+	select {
+	case <-pingReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for websocket ping")
+	}
+}
+
 func TestWSClient_InvalidMessageDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
