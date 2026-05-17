@@ -59,6 +59,10 @@ func (c *stubWSRuntimeClient) emitControlEvent(event string) {
 	}
 }
 
+func (c *stubWSRuntimeClient) emitParseError() {
+	c.errs <- errors.Join(newV2board.ErrWSClientParse, errors.New("invalid websocket payload"))
+}
+
 func (c *stubWSRuntimeClient) failTransport() {
 	c.errs <- errors.Join(newV2board.ErrWSClientTransport, io.EOF)
 }
@@ -238,6 +242,93 @@ func TestWSRuntime_DegradesToPollingOnlyWhenWebSocketUnavailable(t *testing.T) {
 	runtime.Stop()
 }
 
+func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSubmit(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, 25*time.Millisecond)
+
+	backoffCalled := make(chan time.Duration, 1)
+	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
+		backoffCalled <- d
+		<-ctx.Done()
+		return false
+	}
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	client.emitParseError()
+	waitForWSRuntimeDegradedState(t, runtime, false)
+	submitter.ExpectNoAction(t, 50*time.Millisecond)
+	expectNoWSRuntimeBackoff(t, backoffCalled, 50*time.Millisecond)
+	expectNoWSRuntimeAttempt(t, factory, 2, 50*time.Millisecond)
+
+	client.emitControlEvent(newV2board.WSEventUsersChanged)
+
+	action := submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncUsers {
+		t.Fatalf("unexpected action type after parse error: got %q want %q", action.Type, syncActionTypeSyncUsers)
+	}
+	if action.Source != syncActionSourceWS {
+		t.Fatalf("unexpected action source after parse error: got %q want %q", action.Source, syncActionSourceWS)
+	}
+	if action.Metadata.Trigger != newV2board.WSEventUsersChanged {
+		t.Fatalf("unexpected action trigger after parse error: got %q want %q", action.Metadata.Trigger, newV2board.WSEventUsersChanged)
+	}
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_CanRestartAfterStop(t *testing.T) {
+	t.Parallel()
+
+	firstClient := newStubWSRuntimeClient()
+	secondClient := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(
+		wsRuntimeFactoryResult{client: firstClient},
+		wsRuntimeFactoryResult{client: secondClient},
+	)
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, time.Second)
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	firstDone := runtime.Done()
+	runtime.Stop()
+	waitForChannelClosed(t, firstDone)
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 2)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	secondDone := runtime.Done()
+	if firstDone == secondDone {
+		t.Fatal("expected restart to allocate a fresh done channel")
+	}
+
+	secondClient.emitControlEvent(newV2board.WSEventNodeChanged)
+
+	action := submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncNodeConfig {
+		t.Fatalf("unexpected action type after restart: got %q want %q", action.Type, syncActionTypeSyncNodeConfig)
+	}
+	if action.Source != syncActionSourceWS {
+		t.Fatalf("unexpected action source after restart: got %q want %q", action.Source, syncActionSourceWS)
+	}
+	if action.Metadata.Trigger != newV2board.WSEventNodeChanged {
+		t.Fatalf("unexpected action trigger after restart: got %q want %q", action.Metadata.Trigger, newV2board.WSEventNodeChanged)
+	}
+
+	runtime.Stop()
+	waitForChannelClosed(t, secondDone)
+}
+
 func waitForWSRuntimeAttempt(t *testing.T, factory *scriptedWSRuntimeFactory, want int) {
 	t.Helper()
 
@@ -261,6 +352,36 @@ func waitForWSRuntimeBackoff(t *testing.T, called <-chan time.Duration, want tim
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for backoff %v", want)
+	}
+}
+
+func expectNoWSRuntimeBackoff(t *testing.T, called <-chan time.Duration, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case got := <-called:
+		t.Fatalf("expected no backoff, got %v", got)
+	case <-time.After(wait):
+	}
+}
+
+func expectNoWSRuntimeAttempt(t *testing.T, factory *scriptedWSRuntimeFactory, want int, wait time.Duration) {
+	t.Helper()
+
+	select {
+	case got := <-factory.called:
+		t.Fatalf("expected no connect attempt %d, got attempt %d", want, got)
+	case <-time.After(wait):
+	}
+}
+
+func waitForChannelClosed(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for channel close")
 	}
 }
 

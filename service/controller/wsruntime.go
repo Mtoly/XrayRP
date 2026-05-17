@@ -64,13 +64,19 @@ func (r *wsRuntime) Start() {
 		r.mu.Unlock()
 		return
 	}
+	if r.done == nil || doneClosed(r.done) {
+		r.done = make(chan struct{})
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := r.done
 	r.started = true
+	r.degraded = false
 	r.cancel = cancel
+	r.client = nil
 	r.mu.Unlock()
 
-	go r.run(ctx)
+	go r.run(ctx, done)
 }
 
 func (r *wsRuntime) Stop() {
@@ -90,8 +96,9 @@ func (r *wsRuntime) Stop() {
 	if client != nil {
 		_ = client.Close()
 	}
-
-	<-done
+	if done != nil {
+		<-done
+	}
 }
 
 func (r *wsRuntime) Done() <-chan struct{} {
@@ -106,8 +113,17 @@ func (r *wsRuntime) Degraded() bool {
 	return r.degraded
 }
 
-func (r *wsRuntime) run(ctx context.Context) {
-	defer close(r.done)
+func (r *wsRuntime) run(ctx context.Context, done chan struct{}) {
+	defer func() {
+		r.mu.Lock()
+		if r.done == done {
+			close(done)
+			r.started = false
+			r.cancel = nil
+			r.client = nil
+		}
+		r.mu.Unlock()
+	}()
 
 	needsResyncOnConnect := false
 
@@ -231,6 +247,15 @@ func (r *wsRuntime) clearClient(client wsRuntimeClient) {
 		r.client = nil
 	}
 	r.mu.Unlock()
+}
+
+func doneClosed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) bool {
