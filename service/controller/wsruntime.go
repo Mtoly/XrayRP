@@ -1,0 +1,255 @@
+package controller
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/Mtoly/XrayRP/api/newV2board"
+)
+
+const wsRuntimeReconnectTrigger = "ws_reconnect"
+
+type wsRuntimeClient interface {
+	Events() <-chan *newV2board.WSEvent
+	Errors() <-chan error
+	Done() <-chan struct{}
+	Close() error
+}
+
+type wsRuntimeClientFactory func(context.Context) (wsRuntimeClient, error)
+
+type syncActionSubmitter interface {
+	Submit(syncAction)
+}
+
+type wsRuntime struct {
+	factory          wsRuntimeClientFactory
+	submitter        syncActionSubmitter
+	reconnectBackoff time.Duration
+	sleep            func(context.Context, time.Duration) bool
+
+	mu       sync.RWMutex
+	started  bool
+	degraded bool
+	cancel   context.CancelFunc
+	done     chan struct{}
+	client   wsRuntimeClient
+}
+
+func newWSRuntime(factory wsRuntimeClientFactory, submitter syncActionSubmitter, reconnectBackoff time.Duration) *wsRuntime {
+	if factory == nil {
+		panic("controller: nil websocket runtime factory")
+	}
+	if submitter == nil {
+		panic("controller: nil websocket runtime submitter")
+	}
+	if reconnectBackoff < 0 {
+		reconnectBackoff = 0
+	}
+
+	return &wsRuntime{
+		factory:          factory,
+		submitter:        submitter,
+		reconnectBackoff: reconnectBackoff,
+		sleep:            sleepWithContext,
+		done:             make(chan struct{}),
+	}
+}
+
+func (r *wsRuntime) Start() {
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.started = true
+	r.cancel = cancel
+	r.mu.Unlock()
+
+	go r.run(ctx)
+}
+
+func (r *wsRuntime) Stop() {
+	r.mu.RLock()
+	if !r.started {
+		r.mu.RUnlock()
+		return
+	}
+	cancel := r.cancel
+	client := r.client
+	done := r.done
+	r.mu.RUnlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+
+	<-done
+}
+
+func (r *wsRuntime) Done() <-chan struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.done
+}
+
+func (r *wsRuntime) Degraded() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.degraded
+}
+
+func (r *wsRuntime) run(ctx context.Context) {
+	defer close(r.done)
+
+	needsResyncOnConnect := false
+
+	for {
+		client, err := r.connect(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+
+			r.setDegraded(true)
+			needsResyncOnConnect = true
+			if !r.sleep(ctx, r.reconnectBackoff) {
+				return
+			}
+			continue
+		}
+
+		r.setClient(client)
+		r.setDegraded(false)
+		if needsResyncOnConnect {
+			r.submitReconnectResync()
+			needsResyncOnConnect = false
+		}
+
+		disconnected := r.consumeClient(ctx, client)
+		r.clearClient(client)
+		_ = client.Close()
+
+		if ctx.Err() != nil || !disconnected {
+			return
+		}
+
+		r.setDegraded(true)
+		needsResyncOnConnect = true
+		if !r.sleep(ctx, r.reconnectBackoff) {
+			return
+		}
+	}
+}
+
+func (r *wsRuntime) connect(ctx context.Context) (wsRuntimeClient, error) {
+	client, err := r.factory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, errors.New("controller: websocket runtime factory returned nil client")
+	}
+	return client, nil
+}
+
+func (r *wsRuntime) consumeClient(ctx context.Context, client wsRuntimeClient) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case event, ok := <-client.Events():
+			if !ok {
+				return true
+			}
+			r.handleEvent(event)
+		case err, ok := <-client.Errors():
+			if !ok {
+				return true
+			}
+			if r.shouldContinueAfterError(err) {
+				continue
+			}
+			return true
+		case <-client.Done():
+			return true
+		}
+	}
+}
+
+func (r *wsRuntime) handleEvent(event *newV2board.WSEvent) {
+	if event == nil {
+		return
+	}
+
+	action, ok := syncActionFromWSEvent(event.Event, time.Now())
+	if !ok {
+		return
+	}
+
+	r.submitter.Submit(action)
+}
+
+func (r *wsRuntime) shouldContinueAfterError(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	return errors.Is(err, newV2board.ErrWSClientParse)
+}
+
+func (r *wsRuntime) submitReconnectResync() {
+	r.submitter.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{
+		Trigger:    wsRuntimeReconnectTrigger,
+		OccurredAt: time.Now(),
+		Reason:     "websocket runtime reconnected",
+	}))
+}
+
+func (r *wsRuntime) setDegraded(degraded bool) {
+	r.mu.Lock()
+	r.degraded = degraded
+	r.mu.Unlock()
+}
+
+func (r *wsRuntime) setClient(client wsRuntimeClient) {
+	r.mu.Lock()
+	r.client = client
+	r.mu.Unlock()
+}
+
+func (r *wsRuntime) clearClient(client wsRuntimeClient) {
+	r.mu.Lock()
+	if r.client == client {
+		r.client = nil
+	}
+	r.mu.Unlock()
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
