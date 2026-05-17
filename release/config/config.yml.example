@@ -36,6 +36,12 @@ Nodes:
       DisableUploadTraffic: false # Disable upload traffic reporting
       DisableGetRule: false # Disable fetching rules from panel
       DisableIVCheck: false # Disable Shadowsocks IV check (legacy compatibility only; keep false unless required)
+      WebSocketConfig:
+        Enable: false # Enable websocket dual-active control plane. false keeps polling-only mode.
+        Endpoint: # Optional websocket endpoint override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws
+        HeartbeatInterval: 30 # Websocket heartbeat interval in seconds
+        ReconnectBackoff: 5 # Websocket reconnect backoff in seconds
+        ResyncOnReconnect: true # Submit a full resync after websocket reconnects
       EnableProxyProtocol: false # Only works for WebSocket and TCP
       AutoSpeedLimitConfig:
         Limit: 0 # Warned speed. Set to 0 to disable AutoSpeedLimit (mbps)
@@ -105,6 +111,12 @@ Nodes:
 #      UpdatePeriodic: 60 # Time to update the nodeinfo, how many sec.
 #      EnableDNS: false # Use custom DNS config, Please ensure that you set the dns.json well
 #      DNSType: AsIs # AsIs, UseIP, UseIPv4, UseIPv6, DNS strategy
+#      WebSocketConfig:
+#        Enable: false # false keeps polling-only mode even if panel supports websocket
+#        Endpoint: # Optional websocket endpoint override
+#        HeartbeatInterval: 30 # seconds
+#        ReconnectBackoff: 5 # seconds
+#        ResyncOnReconnect: true # submit a full resync after reconnect
 #      EnableProxyProtocol: false # Only works for WebSocket and TCP
 #      AutoSpeedLimitConfig:
 #        Limit: 0 # Warned speed. Set to 0 to disable AutoSpeedLimit (mbps)

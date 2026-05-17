@@ -102,6 +102,11 @@ func waitForCoordinatorIdle(t *testing.T, coordinator *syncCoordinator) {
 	}
 }
 
+func stopCoordinator(t *testing.T, coordinator *syncCoordinator) {
+	t.Helper()
+	coordinator.Stop()
+}
+
 func TestSyncCoordinator_DedupeQueuedActions(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	releaseFirst := executor.blockCall(1)
@@ -121,6 +126,7 @@ func TestSyncCoordinator_DedupeQueuedActions(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected execution order: got %v want %v", got, want)
 	}
+	stopCoordinator(t, coordinator)
 }
 
 func TestSyncCoordinator_DirtyRequeuesInflightAction(t *testing.T) {
@@ -141,6 +147,7 @@ func TestSyncCoordinator_DirtyRequeuesInflightAction(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected execution order: got %v want %v", got, want)
 	}
+	stopCoordinator(t, coordinator)
 }
 
 func TestSyncCoordinator_PrioritizesPendingActionsByPriority(t *testing.T) {
@@ -178,6 +185,7 @@ func TestSyncCoordinator_PrioritizesPendingActionsByPriority(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected execution order: got %v want %v", got, want)
 	}
+	stopCoordinator(t, coordinator)
 }
 
 func TestSyncCoordinator_ResyncAllOverridesPendingPartialActions(t *testing.T) {
@@ -203,6 +211,7 @@ func TestSyncCoordinator_ResyncAllOverridesPendingPartialActions(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected execution order: got %v want %v", got, want)
 	}
+	stopCoordinator(t, coordinator)
 }
 
 func TestSyncCoordinator_DirtyDoesNotRunConcurrentDuplicateActions(t *testing.T) {
@@ -228,4 +237,5 @@ func TestSyncCoordinator_DirtyDoesNotRunConcurrentDuplicateActions(t *testing.T)
 	if maxConcurrent := executor.MaxActive(syncActionTypeSyncUsers); maxConcurrent != 1 {
 		t.Fatalf("unexpected concurrent sync user actions: got %d want %d", maxConcurrent, 1)
 	}
+	stopCoordinator(t, coordinator)
 }

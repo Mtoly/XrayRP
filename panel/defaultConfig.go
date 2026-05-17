@@ -26,5 +26,11 @@ func getDefaultControllerConfig() *controller.Config {
 		SendIP:         "0.0.0.0",
 		UpdatePeriodic: 60,
 		DNSType:        "AsIs",
+		WebSocketConfig: &controller.WebSocketConfig{
+			Enable:            false,
+			HeartbeatInterval: 30,
+			ReconnectBackoff:  5,
+			ResyncOnReconnect: true,
+		},
 	}
 }

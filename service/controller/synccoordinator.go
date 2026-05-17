@@ -9,6 +9,11 @@ type syncActionExecutor interface {
 	ExecuteSyncAction(context.Context, syncAction) error
 }
 
+type syncCoordinatorLifecycle interface {
+	Submit(syncAction)
+	Stop()
+}
+
 type queuedSyncAction struct {
 	action syncAction
 	seq    uint64
@@ -25,6 +30,8 @@ type syncCoordinator struct {
 
 	inflight *syncAction
 	nextSeq  uint64
+	stopped  bool
+	done     chan struct{}
 }
 
 func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
@@ -36,6 +43,7 @@ func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
 		executor: executor,
 		pending:  make(map[syncActionType]queuedSyncAction),
 		dirty:    make(map[syncActionType]syncAction),
+		done:     make(chan struct{}),
 	}
 	coordinator.cond = sync.NewCond(&coordinator.mu)
 
@@ -47,6 +55,10 @@ func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
 func (c *syncCoordinator) Submit(action syncAction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.stopped {
+		return
+	}
 
 	switch {
 	case c.inflight != nil && c.inflight.Type == syncActionTypeResyncAll:
@@ -77,25 +89,51 @@ func (c *syncCoordinator) WaitIdle() {
 	}
 }
 
+func (c *syncCoordinator) Stop() {
+	c.mu.Lock()
+	if c.stopped {
+		done := c.done
+		c.mu.Unlock()
+		<-done
+		return
+	}
+	c.stopped = true
+	c.pending = make(map[syncActionType]queuedSyncAction)
+	c.dirty = make(map[syncActionType]syncAction)
+	done := c.done
+	c.cond.Broadcast()
+	c.mu.Unlock()
+
+	<-done
+}
+
 func (c *syncCoordinator) run() {
+	defer close(c.done)
+
 	for {
-		action := c.takeNextAction()
+		action, ok := c.takeNextAction()
+		if !ok {
+			return
+		}
 		_ = c.executor.ExecuteSyncAction(context.Background(), action)
 		c.finishAction(action)
 	}
 }
 
-func (c *syncCoordinator) takeNextAction() syncAction {
+func (c *syncCoordinator) takeNextAction() (syncAction, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for len(c.pending) == 0 {
+		if c.stopped {
+			return syncAction{}, false
+		}
 		c.cond.Wait()
 	}
 
 	next := c.popNextLocked()
 	c.inflight = &next
-	return next
+	return next, true
 }
 
 func (c *syncCoordinator) finishAction(finished syncAction) {
@@ -103,7 +141,9 @@ func (c *syncCoordinator) finishAction(finished syncAction) {
 	defer c.mu.Unlock()
 
 	c.inflight = nil
-	c.requeueDirtyLocked(finished)
+	if !c.stopped {
+		c.requeueDirtyLocked(finished)
+	}
 	c.cond.Broadcast()
 }
 

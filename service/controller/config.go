@@ -24,6 +24,15 @@ type Config struct {
 	DisableLocalREALITYConfig bool                             `mapstructure:"DisableLocalREALITYConfig"`
 	EnableREALITY             bool                             `mapstructure:"EnableREALITY"`
 	REALITYConfigs            *REALITYConfig                   `mapstructure:"REALITYConfigs"`
+	WebSocketConfig           *WebSocketConfig                 `mapstructure:"WebSocketConfig"`
+}
+
+type WebSocketConfig struct {
+	Enable            bool   `mapstructure:"Enable"`
+	Endpoint          string `mapstructure:"Endpoint"`
+	HeartbeatInterval int    `mapstructure:"HeartbeatInterval"`
+	ReconnectBackoff  int    `mapstructure:"ReconnectBackoff"`
+	ResyncOnReconnect bool   `mapstructure:"ResyncOnReconnect"`
 }
 
 type AutoSpeedLimitConfig struct {

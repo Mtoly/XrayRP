@@ -24,11 +24,24 @@ type syncActionSubmitter interface {
 	Submit(syncAction)
 }
 
+type wsRuntimeLifecycle interface {
+	Start()
+	Stop()
+}
+
+type wsRuntimeOptions struct {
+	ReconnectBackoff  time.Duration
+	HeartbeatInterval time.Duration
+	ResyncOnReconnect bool
+}
+
 type wsRuntime struct {
-	factory          wsRuntimeClientFactory
-	submitter        syncActionSubmitter
-	reconnectBackoff time.Duration
-	sleep            func(context.Context, time.Duration) bool
+	factory           wsRuntimeClientFactory
+	submitter         syncActionSubmitter
+	reconnectBackoff  time.Duration
+	heartbeatInterval time.Duration
+	resyncOnReconnect bool
+	sleep             func(context.Context, time.Duration) bool
 
 	mu       sync.RWMutex
 	started  bool
@@ -38,23 +51,28 @@ type wsRuntime struct {
 	client   wsRuntimeClient
 }
 
-func newWSRuntime(factory wsRuntimeClientFactory, submitter syncActionSubmitter, reconnectBackoff time.Duration) *wsRuntime {
+func newWSRuntime(factory wsRuntimeClientFactory, submitter syncActionSubmitter, options wsRuntimeOptions) *wsRuntime {
 	if factory == nil {
 		panic("controller: nil websocket runtime factory")
 	}
 	if submitter == nil {
 		panic("controller: nil websocket runtime submitter")
 	}
-	if reconnectBackoff < 0 {
-		reconnectBackoff = 0
+	if options.ReconnectBackoff < 0 {
+		options.ReconnectBackoff = 0
+	}
+	if options.HeartbeatInterval < 0 {
+		options.HeartbeatInterval = 0
 	}
 
 	return &wsRuntime{
-		factory:          factory,
-		submitter:        submitter,
-		reconnectBackoff: reconnectBackoff,
-		sleep:            sleepWithContext,
-		done:             make(chan struct{}),
+		factory:           factory,
+		submitter:         submitter,
+		reconnectBackoff:  options.ReconnectBackoff,
+		heartbeatInterval: options.HeartbeatInterval,
+		resyncOnReconnect: options.ResyncOnReconnect,
+		sleep:             sleepWithContext,
+		done:              make(chan struct{}),
 	}
 }
 
@@ -222,6 +240,10 @@ func (r *wsRuntime) shouldContinueAfterError(err error) bool {
 }
 
 func (r *wsRuntime) submitReconnectResync() {
+	if !r.resyncOnReconnect {
+		return
+	}
+
 	r.submitter.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{
 		Trigger:    wsRuntimeReconnectTrigger,
 		OccurredAt: time.Now(),

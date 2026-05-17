@@ -147,7 +147,7 @@ func TestWSRuntime_StartsClientAndConsumesEvents(t *testing.T) {
 	client := newStubWSRuntimeClient()
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, time.Second)
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: time.Second, ResyncOnReconnect: true})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
@@ -179,7 +179,7 @@ func TestWSRuntime_ReconnectsWithBackoffAndResyncsAllOnRecovery(t *testing.T) {
 		wsRuntimeFactoryResult{client: secondClient},
 	)
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, 25*time.Millisecond)
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
 
 	backoffCalled := make(chan time.Duration, 1)
 	releaseBackoff := make(chan struct{})
@@ -224,7 +224,7 @@ func TestWSRuntime_DegradesToPollingOnlyWhenWebSocketUnavailable(t *testing.T) {
 
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{err: errors.New("dial failed")})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, 25*time.Millisecond)
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
 
 	backoffCalled := make(chan time.Duration, 1)
 	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
@@ -248,7 +248,7 @@ func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSub
 	client := newStubWSRuntimeClient()
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, 25*time.Millisecond)
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
 
 	backoffCalled := make(chan time.Duration, 1)
 	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
@@ -293,7 +293,7 @@ func TestWSRuntime_CanRestartAfterStop(t *testing.T) {
 		wsRuntimeFactoryResult{client: secondClient},
 	)
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, time.Second)
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: time.Second, ResyncOnReconnect: true})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)

@@ -2,8 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/xtls/xray-core/features/stats"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/app/mydispatcher"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
@@ -30,28 +34,32 @@ type LimitInfo struct {
 }
 
 type Controller struct {
-	server          *core.Instance
-	config          *Config
-	clientInfo      api.ClientInfo
-	apiClient       api.API
-	stateMu         sync.RWMutex
-	nodeInfo        *api.NodeInfo
-	Tag             string
-	userList        *[]api.UserInfo
-	appliedRuleTag  string
-	appliedRuleList []api.DetectRule
-	syncApplyHooks  syncApplyHooks
-	tasks           []periodicTask
-	limitedUsers    map[api.UserInfo]LimitInfo
-	warnedUsers     map[api.UserInfo]int
-	panelType       string
-	ibm             inbound.Manager
-	obm             outbound.Manager
-	stm             stats.Manager
-	pm              policy.Manager
-	dispatcher      *mydispatcher.DefaultDispatcher
-	startAt         time.Time
-	logger          *log.Entry
+	server                 *core.Instance
+	config                 *Config
+	clientInfo             api.ClientInfo
+	apiClient              api.API
+	stateMu                sync.RWMutex
+	nodeInfo               *api.NodeInfo
+	Tag                    string
+	userList               *[]api.UserInfo
+	appliedRuleTag         string
+	appliedRuleList        []api.DetectRule
+	syncApplyHooks         syncApplyHooks
+	tasks                  []periodicTask
+	limitedUsers           map[api.UserInfo]LimitInfo
+	warnedUsers            map[api.UserInfo]int
+	panelType              string
+	ibm                    inbound.Manager
+	obm                    outbound.Manager
+	stm                    stats.Manager
+	pm                     policy.Manager
+	dispatcher             *mydispatcher.DefaultDispatcher
+	startAt                time.Time
+	logger                 *log.Entry
+	syncCoordinator        syncCoordinatorLifecycle
+	wsRuntime              wsRuntimeLifecycle
+	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
+	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
 
 type periodicTask struct {
@@ -105,6 +113,10 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 		startAt:    time.Now(),
 		logger:     logger,
 	}
+	controller.syncCoordinatorFactory = func(executor syncActionExecutor) syncCoordinatorLifecycle {
+		return newSyncCoordinator(executor)
+	}
+	controller.wsRuntimeFactory = controller.newConfiguredWSRuntime
 
 	return controller
 }
@@ -128,6 +140,110 @@ func (c *Controller) setUserList(userList *[]api.UserInfo) {
 	c.stateMu.Unlock()
 }
 
+func (c *Controller) buildSyncCoordinator() syncCoordinatorLifecycle {
+	if c.syncCoordinatorFactory == nil {
+		return nil
+	}
+	return c.syncCoordinatorFactory(c)
+}
+
+func (c *Controller) buildWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	if c.wsRuntimeFactory == nil {
+		return nil, errors.New("controller: websocket runtime factory not configured")
+	}
+	return c.wsRuntimeFactory(submitter)
+}
+
+func (c *Controller) shouldStartWSRuntime() bool {
+	if c.config == nil || c.config.WebSocketConfig == nil || !c.config.WebSocketConfig.Enable {
+		return false
+	}
+	_, ok := c.apiClient.(api.WSCapable)
+	return ok
+}
+
+func (c *Controller) submitSyncAction(action syncAction) error {
+	if c.syncCoordinator != nil {
+		c.syncCoordinator.Submit(action)
+		return nil
+	}
+	return c.ExecuteSyncAction(context.Background(), action)
+}
+
+func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	capable, ok := c.apiClient.(api.WSCapable)
+	if !ok {
+		return nil, api.ErrUnsupportedPanelFeature
+	}
+	wsConfig := capable.GetWSConfig()
+	if wsConfig == nil {
+		return nil, errors.New("controller: websocket config unavailable")
+	}
+	endpoint, err := buildWSEndpoint(wsConfig, c.config.WebSocketConfig)
+	if err != nil {
+		return nil, err
+	}
+	options := wsRuntimeOptions{
+		ReconnectBackoff:  time.Duration(c.config.WebSocketConfig.ReconnectBackoff) * time.Second,
+		HeartbeatInterval: time.Duration(c.config.WebSocketConfig.HeartbeatInterval) * time.Second,
+		ResyncOnReconnect: c.config.WebSocketConfig.ResyncOnReconnect,
+	}
+	factory := func(context.Context) (wsRuntimeClient, error) {
+		return newV2board.NewWSClient(endpoint)
+	}
+	return newWSRuntime(factory, submitter, options), nil
+}
+
+func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	if wsConfig == nil {
+		return "", errors.New("controller: websocket config unavailable")
+	}
+
+	rawEndpoint := ""
+	if runtimeConfig != nil {
+		rawEndpoint = strings.TrimSpace(runtimeConfig.Endpoint)
+	}
+	if rawEndpoint == "" {
+		rawEndpoint = strings.TrimRight(wsConfig.APIHost, "/") + "/api/v1/server/UniProxy/ws"
+	}
+
+	parsed, err := url.Parse(rawEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("controller: parse websocket endpoint: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		base, err := url.Parse(wsConfig.APIHost)
+		if err != nil {
+			return "", fmt.Errorf("controller: parse panel api host: %w", err)
+		}
+		parsed = base.ResolveReference(parsed)
+	}
+
+	switch parsed.Scheme {
+	case "http":
+		parsed.Scheme = "ws"
+	case "https":
+		parsed.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("controller: unsupported websocket endpoint scheme %q", parsed.Scheme)
+	}
+
+	query := parsed.Query()
+	if query.Get("node_id") == "" {
+		query.Set("node_id", strconv.Itoa(wsConfig.NodeID))
+	}
+	if query.Get("node_type") == "" {
+		query.Set("node_type", wsConfig.NodeType)
+	}
+	if query.Get("token") == "" {
+		query.Set("token", wsConfig.Key)
+	}
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String(), nil
+}
+
 func (c *Controller) withStateLock(fn func()) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -137,6 +253,7 @@ func (c *Controller) withStateLock(fn func()) {
 // Start implement the Start() function of the service interface
 func (c *Controller) Start() error {
 	c.clientInfo = c.apiClient.Describe()
+	hooks := c.resolveSyncApplyHooks()
 	// First fetch Node Info
 	newNodeInfo, err := c.apiClient.GetNodeInfo()
 	if err != nil {
@@ -149,7 +266,7 @@ func (c *Controller) Start() error {
 	c.setNodeState(newNodeInfo, tag)
 
 	// Add new tag
-	err = c.addNewTag(newNodeInfo, tag)
+	err = hooks.addNewTag(newNodeInfo, tag)
 	if err != nil {
 		c.logger.Panic(err)
 		return err
@@ -163,13 +280,13 @@ func (c *Controller) Start() error {
 	// sync controller userList
 	c.setUserList(userInfo)
 
-	err = c.addNewUser(userInfo, newNodeInfo, tag)
+	err = hooks.addNewUser(userInfo, newNodeInfo, tag)
 	if err != nil {
 		return err
 	}
 
 	// Add Limiter
-	if err := c.AddInboundLimiter(tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+	if err := hooks.addInboundLimiter(tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
 		c.logger.Print(err)
 	}
 
@@ -178,7 +295,7 @@ func (c *Controller) Start() error {
 		if ruleList, err := c.apiClient.GetNodeRule(); err != nil {
 			c.logger.Printf("Get rule list filed: %s", err)
 		} else if len(*ruleList) > 0 {
-			if err := c.UpdateRule(tag, *ruleList); err != nil {
+			if err := hooks.updateRule(tag, *ruleList); err != nil {
 				c.logger.Print(err)
 			} else {
 				c.setAppliedRuleState(tag, *ruleList)
@@ -193,6 +310,22 @@ func (c *Controller) Start() error {
 	if c.config.AutoSpeedLimitConfig.Limit > 0 {
 		c.limitedUsers = make(map[api.UserInfo]LimitInfo)
 		c.warnedUsers = make(map[api.UserInfo]int)
+	}
+
+	c.syncCoordinator = c.buildSyncCoordinator()
+	if c.syncCoordinator == nil {
+		return errors.New("controller: sync coordinator not configured")
+	}
+
+	if c.shouldStartWSRuntime() {
+		wsRuntime, err := c.buildWSRuntime(c.syncCoordinator)
+		if err != nil {
+			c.syncCoordinator.Stop()
+			c.syncCoordinator = nil
+			return err
+		}
+		c.wsRuntime = wsRuntime
+		c.wsRuntime.Start()
 	}
 
 	// Add periodic tasks
@@ -244,6 +377,15 @@ func (c *Controller) Close() error {
 		}
 	}
 
+	if c.wsRuntime != nil {
+		c.wsRuntime.Stop()
+		c.wsRuntime = nil
+	}
+	if c.syncCoordinator != nil {
+		c.syncCoordinator.Stop()
+		c.syncCoordinator = nil
+	}
+
 	return nil
 }
 
@@ -254,7 +396,7 @@ func (c *Controller) nodeInfoMonitor() error {
 	}
 
 	action := syncActionFromPollingTick(time.Now())
-	if err := c.ExecuteSyncAction(context.Background(), action); err != nil {
+	if err := c.submitSyncAction(action); err != nil {
 		c.logger.Print(err)
 		return nil
 	}
