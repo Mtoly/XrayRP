@@ -79,6 +79,12 @@ type syncApplyRecorder struct {
 	lastRules           []api.DetectRule
 	appliedCertConfigs  []*api.XrayRCertConfig
 	addTagErr           error
+	addTagErrAtCall     int
+	addTagCalls         int
+	activeRuntimes      map[string]*api.NodeInfo
+	activeLimiterTags   map[string]bool
+	removedInboundTags  []string
+	removedOutboundTags []string
 }
 
 func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecorder) {
@@ -99,30 +105,57 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 	controller.syncApplyHooks = syncApplyHooks{
 		removeOldTag: func(tag string) error {
 			recorder.removedTags = append(recorder.removedTags, tag)
+			if recorder.activeRuntimes != nil {
+				delete(recorder.activeRuntimes, tag)
+			}
+			return nil
+		},
+		removeInboundTag: func(tag string) error {
+			recorder.removedInboundTags = append(recorder.removedInboundTags, tag)
+			return nil
+		},
+		removeOutboundTag: func(tag string) error {
+			recorder.removedOutboundTags = append(recorder.removedOutboundTags, tag)
 			return nil
 		},
 		addNewTag: func(nodeInfo *api.NodeInfo, tag string) error {
+			recorder.addTagCalls++
 			recorder.addedTags = append(recorder.addedTags, tag)
 			recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
-			if recorder.addTagErr != nil {
+			if recorder.addTagErr != nil && (recorder.addTagErrAtCall == 0 || recorder.addTagErrAtCall == recorder.addTagCalls) {
 				return recorder.addTagErr
 			}
+			if recorder.activeRuntimes == nil {
+				recorder.activeRuntimes = make(map[string]*api.NodeInfo)
+			}
+			recorder.activeRuntimes[tag] = cloneRecordedNodeInfo(nodeInfo)
 			return nil
 		},
 		addNewUser: func(_ *[]api.UserInfo, _ *api.NodeInfo, _ string) error {
 			recorder.addUserCalls++
 			return nil
 		},
-		addInboundLimiter: func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error {
+		addInboundLimiter: func(tag string, _ uint64, _ *[]api.UserInfo, _ *limiter.GlobalDeviceLimitConfig) error {
 			recorder.addLimiterCalls++
+			if recorder.activeLimiterTags == nil {
+				recorder.activeLimiterTags = make(map[string]bool)
+			}
+			recorder.activeLimiterTags[tag] = true
 			return nil
 		},
-		deleteInboundLimiter: func(string) error {
+		deleteInboundLimiter: func(tag string) error {
 			recorder.deleteLimiterCalls++
+			if recorder.activeLimiterTags != nil {
+				delete(recorder.activeLimiterTags, tag)
+			}
 			return nil
 		},
-		updateInboundLimiter: func(string, *[]api.UserInfo) error {
+		updateInboundLimiter: func(tag string, _ *[]api.UserInfo) error {
 			recorder.updateLimiterCalls++
+			if recorder.activeLimiterTags == nil {
+				recorder.activeLimiterTags = make(map[string]bool)
+			}
+			recorder.activeLimiterTags[tag] = true
 			return nil
 		},
 		rebuildInboundWithUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error {
@@ -554,6 +587,8 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	controller.setNodeState(currentNode, currentTag)
 	controller.setUserList(&restUsers)
 	controller.setAppliedRuleList([]api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}})
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.activeLimiterTags = map[string]bool{currentTag: true}
 
 	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
 	if !errors.Is(err, recorder.addTagErr) {
@@ -574,6 +609,15 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	if len(recorder.appliedSnapshots) != 0 {
 		t.Fatalf("expected failed apply not to publish applied snapshot, got %d", len(recorder.appliedSnapshots))
 	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || runtime.NodeID != currentNode.NodeID || runtime.Port != currentNode.Port {
+		t.Fatalf("expected old runtime to stay active after add failure, got %#v", runtime)
+	}
+	if len(recorder.activeRuntimes) != 1 {
+		t.Fatalf("expected only old runtime to remain active, got %d runtimes", len(recorder.activeRuntimes))
+	}
+	if !recorder.activeLimiterTags[currentTag] || len(recorder.activeLimiterTags) != 1 {
+		t.Fatalf("expected old limiter to stay active after add failure, got %#v", recorder.activeLimiterTags)
+	}
 
 	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
 	if appliedNode != currentNode {
@@ -587,5 +631,82 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	}
 	if got := controller.getAppliedRuleTag(); got != currentTag {
 		t.Fatalf("expected rule state to remain bound to old tag %q, got %q", currentTag, got)
+	}
+}
+
+func TestSyncApply_SameTagRebuildAddFailureRestoresOldRuntimeState(t *testing.T) {
+	restUsers := []api.UserInfo{{UID: 1, Email: "same@example.com"}}
+	restRules := []api.DetectRule{{ID: 9, Pattern: regexp.MustCompile("same-tag.example")}}
+	currentNode := &api.NodeInfo{
+		NodeType:    "V2ray",
+		NodeID:      1,
+		Port:        443,
+		SpeedLimit:  100,
+		RoutePolicy: routePolicyWithCandidate("old-candidate"),
+	}
+	nextNode := &api.NodeInfo{
+		NodeType:    "V2ray",
+		NodeID:      1,
+		Port:        443,
+		SpeedLimit:  200,
+		RoutePolicy: routePolicyWithCandidate("new-candidate"),
+	}
+	fakeAPI := &fakeSyncApplyAPI{
+		nodeInfo: nextNode,
+		userList: &restUsers,
+		ruleList: &restRules,
+	}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	recorder.addTagErr = errors.New("same tag rebuild add failed")
+	recorder.addTagErrAtCall = 1
+
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&restUsers)
+	controller.setAppliedRuleList([]api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}})
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.activeLimiterTags = map[string]bool{currentTag: true}
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
+	if !errors.Is(err, recorder.addTagErr) {
+		t.Fatalf("expected same-tag addNewTag failure to be returned, got %v", err)
+	}
+	if recorder.addTagCalls != 2 {
+		t.Fatalf("expected same-tag rebuild failure to attempt add then restore, got %d add calls", recorder.addTagCalls)
+	}
+	if len(recorder.removedTags) != 1 || recorder.removedTags[0] != currentTag {
+		t.Fatalf("expected same-tag rebuild to remove old runtime once before restore, got %v", recorder.removedTags)
+	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || runtime.NodeID != currentNode.NodeID || runtime.SpeedLimit != currentNode.SpeedLimit {
+		t.Fatalf("expected old runtime to be restored after same-tag add failure, got %#v", runtime)
+	}
+	if len(recorder.activeRuntimes) != 1 {
+		t.Fatalf("expected only restored old runtime to remain active, got %d runtimes", len(recorder.activeRuntimes))
+	}
+	if recorder.deleteLimiterCalls != 0 {
+		t.Fatalf("expected old limiter to remain untouched during failed same-tag rebuild, got %d deletions", recorder.deleteLimiterCalls)
+	}
+	if !recorder.activeLimiterTags[currentTag] || len(recorder.activeLimiterTags) != 1 {
+		t.Fatalf("expected old limiter to stay active after same-tag add failure, got %#v", recorder.activeLimiterTags)
+	}
+	if recorder.addUserCalls != 1 || recorder.addLimiterCalls != 0 || recorder.updateRuleCalls != 0 {
+		t.Fatalf("expected only rollback user restore before aborting downstream apply on same-tag failure, got addUsers=%d addLimiter=%d updateRule=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.updateRuleCalls)
+	}
+	if len(recorder.appliedSnapshots) != 0 {
+		t.Fatalf("expected failed same-tag apply not to publish applied snapshot, got %d", len(recorder.appliedSnapshots))
+	}
+
+	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
+	if appliedNode != currentNode {
+		t.Fatalf("expected controller node state to remain on old node after same-tag failure, got %#v", appliedNode)
+	}
+	if appliedTag != currentTag {
+		t.Fatalf("expected controller tag to remain %q after same-tag failure, got %q", currentTag, appliedTag)
+	}
+	if appliedUsers != &restUsers {
+		t.Fatalf("expected controller user state to remain unchanged after same-tag failure, got %#v", appliedUsers)
+	}
+	if got := controller.getAppliedRuleTag(); got != currentTag {
+		t.Fatalf("expected rule state to remain bound to old tag %q after same-tag failure, got %q", currentTag, got)
 	}
 }

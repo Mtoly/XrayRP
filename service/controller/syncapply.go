@@ -10,6 +10,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
+	xraycommon "github.com/xtls/xray-core/common"
 )
 
 type syncApplySnapshot struct {
@@ -23,6 +24,8 @@ type syncApplySnapshot struct {
 
 type syncApplyHooks struct {
 	removeOldTag            func(string) error
+	removeInboundTag        func(string) error
+	removeOutboundTag       func(string) error
 	addNewTag               func(*api.NodeInfo, string) error
 	addNewUser              func(*[]api.UserInfo, *api.NodeInfo, string) error
 	addInboundLimiter       func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
@@ -142,7 +145,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	nodeChanged := false
 	if snapshot.NodeInfo != nil {
 		var err error
-		currentNodeInfo, currentTag, nodeChanged, err = c.applyNodeSnapshot(currentNodeInfo, currentTag, snapshot.NodeInfo, hooks)
+		currentNodeInfo, currentTag, nodeChanged, err = c.applyNodeSnapshot(currentNodeInfo, currentTag, currentUserList, snapshot.NodeInfo, hooks)
 		if err != nil {
 			return err
 		}
@@ -179,7 +182,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	return nil
 }
 
-func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag string, nextNodeInfo *api.NodeInfo, hooks syncApplyHooks) (*api.NodeInfo, string, bool, error) {
+func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag string, currentUserList *[]api.UserInfo, nextNodeInfo *api.NodeInfo, hooks syncApplyHooks) (*api.NodeInfo, string, bool, error) {
 	if nextNodeInfo == nil {
 		return currentNodeInfo, currentTag, false, nil
 	}
@@ -205,22 +208,88 @@ func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag
 		}
 		return nil
 	}
+	ignoreNoClue := func(err error) error {
+		if err == nil || errors.Is(err, xraycommon.ErrNoClue) {
+			return nil
+		}
+		return err
+	}
+	cleanupRuntimeTag := func(nodeInfo *api.NodeInfo, tag string) error {
+		if nodeInfo == nil || tag == "" {
+			return nil
+		}
+		var cleanupErrs []error
+		if err := ignoreNoClue(hooks.removeInboundTag(tag)); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", tag, err))
+		}
+		if err := ignoreNoClue(hooks.removeOutboundTag(tag)); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", tag, err))
+		}
+		if nodeInfo.NodeType == "Shadowsocks-Plugin" {
+			dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
+			if err := ignoreNoClue(hooks.removeInboundTag(dokodemoTag)); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", dokodemoTag, err))
+			}
+			if err := ignoreNoClue(hooks.removeOutboundTag(dokodemoTag)); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", dokodemoTag, err))
+			}
+		}
+		return errors.Join(cleanupErrs...)
+	}
+	restoreCurrentRuntime := func() error {
+		if currentNodeInfo == nil || currentTag == "" {
+			return nil
+		}
+		if err := hooks.addNewTag(currentNodeInfo, currentTag); err != nil {
+			return err
+		}
+		if currentUserList == nil {
+			return nil
+		}
+		if err := hooks.addNewUser(currentUserList, currentNodeInfo, currentTag); err != nil {
+			if cleanupErr := cleanupRuntimeTag(currentNodeInfo, currentTag); cleanupErr != nil {
+				return errors.Join(err, fmt.Errorf("cleanup restored runtime after user restore failure: %w", cleanupErr))
+			}
+			return err
+		}
+		return nil
+	}
 
-	// When the runtime tag changes, stage the new runtime before tearing down
-	// the old one so add failures don't drop the currently serving node.
-	if currentNodeInfo != nil && currentTag != "" && newTag != currentTag {
+	switch {
+	case currentNodeInfo == nil || currentTag == "":
+		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+			return currentNodeInfo, currentTag, false, err
+		}
+	case newTag != currentTag:
+		// When the runtime tag changes, stage the new runtime before tearing down
+		// the old one so add failures don't drop the currently serving node.
 		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 		if err := removeCurrentRuntime(); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
-	} else {
+	default:
+		// Same-tag rebuilds cannot pre-stage another runtime without introducing
+		// dual-active behavior. Remove the old runtime, then fully restore the
+		// previous runtime if replacement add fails so the controller/runtime state
+		// stays on the last known-good node.
 		if err := removeCurrentRuntime(); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
-			return currentNodeInfo, currentTag, false, err
+			cleanupErr := cleanupRuntimeTag(nextNodeInfo, newTag)
+			restoreErr := restoreCurrentRuntime()
+			switch {
+			case cleanupErr != nil && restoreErr != nil:
+				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("cleanup partial same-tag rebuild runtime: %w", cleanupErr), fmt.Errorf("restore old runtime after failed same-tag rebuild: %w", restoreErr))
+			case cleanupErr != nil:
+				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("cleanup partial same-tag rebuild runtime: %w", cleanupErr))
+			case restoreErr != nil:
+				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("restore old runtime after failed same-tag rebuild: %w", restoreErr))
+			default:
+				return currentNodeInfo, currentTag, false, err
+			}
 		}
 	}
 	if currentNodeInfo != nil && currentTag != "" {
@@ -321,6 +390,12 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	hooks := c.syncApplyHooks
 	if hooks.removeOldTag == nil {
 		hooks.removeOldTag = c.removeOldTag
+	}
+	if hooks.removeInboundTag == nil {
+		hooks.removeInboundTag = c.removeInbound
+	}
+	if hooks.removeOutboundTag == nil {
+		hooks.removeOutboundTag = c.removeOutbound
 	}
 	if hooks.addNewTag == nil {
 		hooks.addNewTag = c.addNewTag
