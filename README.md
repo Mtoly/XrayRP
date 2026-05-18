@@ -13,6 +13,12 @@
 
 A Xray backend framework that can easily support many panels.
 
+## 当前版本
+
+当前预发布版本：`0.9-alpha`
+
+本版本的主要更新内容请见 [CHANGELOG.md](./CHANGELOG.md)。
+
 一个基于Xray的后端框架，支持V2ay,Trojan,Shadowsocks协议，极易扩展，支持多面板对接。
 
 如果您喜欢本项目，可以右上角点个star+watch，持续关注本项目的进展。
