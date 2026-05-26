@@ -21,10 +21,6 @@ type wsRuntimeClient interface {
 
 type wsRuntimeClientFactory func(context.Context) (wsRuntimeClient, error)
 
-type syncActionSubmitter interface {
-	Submit(syncAction)
-}
-
 type wsRuntimeLifecycle interface {
 	Start()
 	Stop()

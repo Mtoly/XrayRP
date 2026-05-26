@@ -143,14 +143,6 @@ func (c *Controller) shouldStartWSRuntime() bool {
 	return ok
 }
 
-func (c *Controller) submitSyncAction(action syncAction) error {
-	if c.syncCoordinator != nil {
-		c.syncCoordinator.Submit(action)
-		return nil
-	}
-	return c.ExecuteSyncAction(context.Background(), action)
-}
-
 func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
 	capable, ok := c.apiClient.(api.WSCapable)
 	if !ok {
