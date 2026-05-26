@@ -121,25 +121,6 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 	return controller
 }
 
-func (c *Controller) getStateSnapshot() (nodeInfo *api.NodeInfo, tag string, userList *[]api.UserInfo) {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	return c.nodeInfo, c.Tag, c.userList
-}
-
-func (c *Controller) setNodeState(nodeInfo *api.NodeInfo, tag string) {
-	c.stateMu.Lock()
-	c.nodeInfo = nodeInfo
-	c.Tag = tag
-	c.stateMu.Unlock()
-}
-
-func (c *Controller) setUserList(userList *[]api.UserInfo) {
-	c.stateMu.Lock()
-	c.userList = userList
-	c.stateMu.Unlock()
-}
-
 func (c *Controller) buildSyncCoordinator() syncCoordinatorLifecycle {
 	if c.syncCoordinatorFactory == nil {
 		return nil
@@ -242,12 +223,6 @@ func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (st
 	parsed.RawQuery = query.Encode()
 
 	return parsed.String(), nil
-}
-
-func (c *Controller) withStateLock(fn func()) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	fn()
 }
 
 // Start implement the Start() function of the service interface

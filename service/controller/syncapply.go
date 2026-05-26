@@ -440,45 +440,6 @@ func panelCertConfigMayBeCleared(panelType string) bool {
 	}
 }
 
-func (c *Controller) getAppliedRuleTag() string {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	return c.appliedRuleTag
-}
-
-func (c *Controller) setAppliedRuleState(tag string, rules []api.DetectRule) {
-	c.stateMu.Lock()
-	c.appliedRuleTag = tag
-	if len(rules) == 0 {
-		c.appliedRuleList = nil
-	} else {
-		c.appliedRuleList = make([]api.DetectRule, len(rules))
-		copy(c.appliedRuleList, rules)
-	}
-	c.stateMu.Unlock()
-}
-
-func (c *Controller) getAppliedRuleList() []api.DetectRule {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	if len(c.appliedRuleList) == 0 {
-		return nil
-	}
-	rules := make([]api.DetectRule, len(c.appliedRuleList))
-	copy(rules, c.appliedRuleList)
-	return rules
-}
-
-func (c *Controller) setAppliedRuleList(rules []api.DetectRule) {
-	c.stateMu.RLock()
-	tag := c.appliedRuleTag
-	if tag == "" {
-		tag = c.Tag
-	}
-	c.stateMu.RUnlock()
-	c.setAppliedRuleState(tag, rules)
-}
-
 func detectRuleListsEqual(current, next []api.DetectRule) bool {
 	if len(current) != len(next) {
 		return false
