@@ -104,6 +104,47 @@ func TestGetNodeRuleReturnsErrorWhenSnapshotMissing(t *testing.T) {
 	}
 }
 
+func TestNodeInfoFromUniProxySnapshotRejectsMissingSnapshot(t *testing.T) {
+	client := &APIClient{NodeType: "V2ray"}
+	nodeInfo, err := client.nodeInfoFromUniProxySnapshot(nil)
+	if err == nil {
+		t.Fatal("expected error when snapshot is missing")
+	}
+	if nodeInfo != nil {
+		t.Fatalf("expected nil node info when snapshot is missing, got %#v", nodeInfo)
+	}
+}
+
+func TestNodeInfoFromUniProxySnapshotRejectsUnsupportedNodeType(t *testing.T) {
+	client := &APIClient{NodeType: "Mieru"}
+	nodeInfo, err := client.nodeInfoFromUniProxySnapshot(&serverConfig{ServerPort: 443})
+	if err == nil {
+		t.Fatal("expected unsupported node type error")
+	}
+	if nodeInfo != nil {
+		t.Fatalf("expected nil node info for unsupported node type, got %#v", nodeInfo)
+	}
+}
+
+func TestNodeInfoFromUniProxySnapshotDispatchesV2ray(t *testing.T) {
+	client := &APIClient{NodeID: 1, NodeType: "V2ray"}
+	snapshot := &serverConfig{ServerPort: 443}
+	snapshot.Network = "tcp"
+	nodeInfo, err := client.nodeInfoFromUniProxySnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("nodeInfoFromUniProxySnapshot returned error: %v", err)
+	}
+	if nodeInfo == nil {
+		t.Fatal("expected node info from snapshot")
+	}
+	if nodeInfo.Port != 443 {
+		t.Fatalf("expected derived node port 443, got %d", nodeInfo.Port)
+	}
+	if nodeInfo.TransportProtocol != "tcp" {
+		t.Fatalf("expected derived transport tcp, got %q", nodeInfo.TransportProtocol)
+	}
+}
+
 func TestFetchUniProxySnapshotWithoutETagDoesNotSendOrStoreETag(t *testing.T) {
 	var gotIfNoneMatch string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

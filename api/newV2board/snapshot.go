@@ -66,6 +66,44 @@ func rulesFromUniProxySnapshot(snapshot *serverConfig, localRules []api.DetectRu
 	return &ruleList, nil
 }
 
+func nodeInfoUnsupportedTypeError(nodeType string) error {
+	switch nodeType {
+	case "Naive", "naive":
+		return fmt.Errorf("node type 'naive' (NaïveProxy) is not supported by xray-core backend, please use a dedicated NaïveProxy backend")
+	case "Mieru", "mieru":
+		return fmt.Errorf("node type 'mieru' is not supported by xray-core backend, please use a dedicated Mieru backend")
+	default:
+		return fmt.Errorf("unsupported node type: %s", nodeType)
+	}
+}
+
+func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
+	if snapshot == nil {
+		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving node info")
+	}
+
+	switch c.NodeType {
+	case "V2ray", "Vmess", "Vless":
+		return c.parseV2rayNodeResponse(snapshot)
+	case "Trojan":
+		return c.parseTrojanNodeResponse(snapshot)
+	case "Shadowsocks":
+		return c.parseSSNodeResponse(snapshot)
+	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
+		return c.parseHysteria2NodeResponse(snapshot)
+	case "Tuic", "tuic":
+		return c.parseTuicNodeResponse(snapshot)
+	case "AnyTLS", "anytls":
+		return c.parseAnyTLSNodeResponse(snapshot)
+	case "Socks", "socks":
+		return c.parseSocksNodeResponse(snapshot)
+	case "HTTP", "http":
+		return c.parseHTTPNodeResponse(snapshot)
+	default:
+		return nil, nodeInfoUnsupportedTypeError(c.NodeType)
+	}
+}
+
 func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 	req := c.client.R().ForceContentType("application/json")
 	if useETag {

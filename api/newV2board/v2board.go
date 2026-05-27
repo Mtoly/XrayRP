@@ -196,31 +196,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("server port must > 0")
 	}
 
-	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless":
-		nodeInfo, err = c.parseV2rayNodeResponse(server)
-	case "Trojan":
-		nodeInfo, err = c.parseTrojanNodeResponse(server)
-	case "Shadowsocks":
-		nodeInfo, err = c.parseSSNodeResponse(server)
-	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
-		nodeInfo, err = c.parseHysteria2NodeResponse(server)
-	case "Tuic", "tuic":
-		nodeInfo, err = c.parseTuicNodeResponse(server)
-	case "AnyTLS", "anytls":
-		nodeInfo, err = c.parseAnyTLSNodeResponse(server)
-	case "Socks", "socks":
-		nodeInfo, err = c.parseSocksNodeResponse(server)
-	case "HTTP", "http":
-		nodeInfo, err = c.parseHTTPNodeResponse(server)
-	case "Naive", "naive":
-		return nil, fmt.Errorf("node type 'naive' (NaïveProxy) is not supported by xray-core backend, please use a dedicated NaïveProxy backend")
-	case "Mieru", "mieru":
-		return nil, fmt.Errorf("node type 'mieru' is not supported by xray-core backend, please use a dedicated Mieru backend")
-	default:
-		return nil, fmt.Errorf("unsupported node type: %s", c.NodeType)
-	}
-
+	nodeInfo, err = c.nodeInfoFromUniProxySnapshot(server)
 	if err != nil {
 		return nil, fmt.Errorf("parse node info failed: %v", err)
 	}
