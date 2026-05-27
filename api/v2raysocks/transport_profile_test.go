@@ -4,8 +4,110 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/bitly/go-simplejson"
+
 	"github.com/Mtoly/XrayRP/api"
 )
+
+func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"streamSettings": {
+			"xhttpSettings": {
+				"mode": "stream-one",
+				"xPaddingObfsMode": true,
+				"xPaddingKey": "x-padding-key",
+				"xPaddingHeader": "x-padding-header",
+				"xPaddingPlacement": "header",
+				"xPaddingMethod": "random",
+				"uplinkHTTPMethod": "POST",
+				"sessionPlacement": "query",
+				"sessionKey": "session-key",
+				"seqPlacement": "path",
+				"seqKey": "seq-key",
+				"uplinkDataPlacement": "body",
+				"uplinkDataKey": "data-key",
+				"uplinkChunkSize": 4096,
+				"noGRPCHeader": true,
+				"noSSEHeader": true,
+				"extra": {"scMaxEachPostBytes": "1000"}
+			},
+			"splithttpSettings": {
+				"mode": "fallback"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{}
+
+	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
+	enrichTransportProfileWithXHTTPSettings(nil, inboundInfo, "xhttp")
+	enrichTransportProfileWithXHTTPSettings(&profile, nil, "xhttp")
+
+	if profile.XHTTPMode != "stream-one" {
+		t.Fatalf("expected xhttpSettings to be preferred, got mode %q", profile.XHTTPMode)
+	}
+	if !profile.XPaddingObfsMode || profile.XPaddingKey != "x-padding-key" || profile.XPaddingHeader != "x-padding-header" {
+		t.Fatalf("unexpected padding fields: %#v", profile)
+	}
+	if profile.UplinkHTTPMethod != "POST" || profile.SessionPlacement != "query" || profile.SeqPlacement != "path" {
+		t.Fatalf("unexpected placement fields: %#v", profile)
+	}
+	if profile.UplinkDataKey != "data-key" || profile.UplinkChunkSize != 4096 {
+		t.Fatalf("unexpected uplink fields: %#v", profile)
+	}
+	if !profile.NoGRPCHeader || !profile.NoSSEHeader {
+		t.Fatal("expected header suppression flags to be copied")
+	}
+	if string(profile.XHTTPExtra) != `{"scMaxEachPostBytes":"1000"}` {
+		t.Fatalf("unexpected extra payload: %s", string(profile.XHTTPExtra))
+	}
+}
+
+func TestEnrichTransportProfileWithXHTTPSettingsFallsBackToSplitHTTP(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"streamSettings": {
+			"splithttpSettings": {
+				"mode": "auto",
+				"uplinkChunkSize": 1024
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{}
+
+	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
+
+	if profile.XHTTPMode != "auto" {
+		t.Fatalf("expected splithttpSettings fallback, got mode %q", profile.XHTTPMode)
+	}
+	if profile.UplinkChunkSize != 1024 {
+		t.Fatalf("unexpected fallback uplink chunk size: %d", profile.UplinkChunkSize)
+	}
+}
+
+func TestEnrichTransportProfileWithXHTTPSettingsIgnoresOtherTransports(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"streamSettings": {
+			"splithttpSettings": {
+				"mode": "auto"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{XHTTPMode: "existing"}
+
+	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "ws")
+
+	if profile.XHTTPMode != "existing" {
+		t.Fatalf("expected non-XHTTP transport to be ignored, got mode %q", profile.XHTTPMode)
+	}
+}
 
 func TestTransportProfileApplyToNodeInfo(t *testing.T) {
 	header := json.RawMessage(`{"type":"http"}`)

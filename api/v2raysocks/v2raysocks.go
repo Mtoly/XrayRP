@@ -546,6 +546,44 @@ func (p transportProfile) applyToNodeInfo(nodeInfo *api.NodeInfo) {
 	nodeInfo.NoSSEHeader = p.NoSSEHeader
 }
 
+func enrichTransportProfileWithXHTTPSettings(profile *transportProfile, inboundInfo *simplejson.Json, transportProtocol string) {
+	if profile == nil || inboundInfo == nil {
+		return
+	}
+	if transportProtocol != "splithttp" && transportProtocol != "xhttp" {
+		return
+	}
+
+	settingsKey := "splithttpSettings"
+	if transportProtocol == "xhttp" {
+		if _, ok := inboundInfo.Get("streamSettings").CheckGet("xhttpSettings"); ok {
+			settingsKey = "xhttpSettings"
+		}
+	}
+	ss := inboundInfo.Get("streamSettings").Get(settingsKey)
+	profile.XHTTPMode = ss.Get("mode").MustString()
+	profile.XPaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
+	profile.XPaddingKey = ss.Get("xPaddingKey").MustString()
+	profile.XPaddingHeader = ss.Get("xPaddingHeader").MustString()
+	profile.XPaddingPlacement = ss.Get("xPaddingPlacement").MustString()
+	profile.XPaddingMethod = ss.Get("xPaddingMethod").MustString()
+	profile.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
+	profile.SessionPlacement = ss.Get("sessionPlacement").MustString()
+	profile.SessionKey = ss.Get("sessionKey").MustString()
+	profile.SeqPlacement = ss.Get("seqPlacement").MustString()
+	profile.SeqKey = ss.Get("seqKey").MustString()
+	profile.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
+	profile.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
+	profile.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
+	profile.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
+	profile.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
+	if extra := ss.Get("extra"); extra.Interface() != nil {
+		if extraBytes, err := extra.MarshalJSON(); err == nil {
+			profile.XHTTPExtra = extraBytes
+		}
+	}
+}
+
 // ParseV2rayNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*api.NodeInfo, error) {
 	var path, host, serviceName string
@@ -649,37 +687,7 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 		REALITYConfig:     realityConfig,
 	}
 
-	// Parse XHTTP settings if transport is splithttp/xhttp
-	if transportProtocol == "splithttp" || transportProtocol == "xhttp" {
-		settingsKey := "splithttpSettings"
-		if transportProtocol == "xhttp" {
-			if _, ok := inboundInfo.Get("streamSettings").CheckGet("xhttpSettings"); ok {
-				settingsKey = "xhttpSettings"
-			}
-		}
-		ss := inboundInfo.Get("streamSettings").Get(settingsKey)
-		profile.XHTTPMode = ss.Get("mode").MustString()
-		profile.XPaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
-		profile.XPaddingKey = ss.Get("xPaddingKey").MustString()
-		profile.XPaddingHeader = ss.Get("xPaddingHeader").MustString()
-		profile.XPaddingPlacement = ss.Get("xPaddingPlacement").MustString()
-		profile.XPaddingMethod = ss.Get("xPaddingMethod").MustString()
-		profile.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
-		profile.SessionPlacement = ss.Get("sessionPlacement").MustString()
-		profile.SessionKey = ss.Get("sessionKey").MustString()
-		profile.SeqPlacement = ss.Get("seqPlacement").MustString()
-		profile.SeqKey = ss.Get("seqKey").MustString()
-		profile.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
-		profile.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
-		profile.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
-		profile.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
-		profile.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
-		if extra := ss.Get("extra"); extra.Interface() != nil {
-			if extraBytes, err := extra.MarshalJSON(); err == nil {
-				profile.XHTTPExtra = extraBytes
-			}
-		}
-	}
+	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, transportProtocol)
 
 	// Create GeneralNodeInfo
 	// AlterID will be updated after next sync
