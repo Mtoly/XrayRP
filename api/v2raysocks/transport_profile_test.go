@@ -9,6 +9,102 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+func TestEnrichTransportProfileWithSecurityTLS(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"protocol": "vmess",
+		"streamSettings": {
+			"security": "tls"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{TransportProtocol: "ws"}
+
+	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
+	enrichTransportProfileWithSecurity(nil, inboundInfo, "fallback-flow")
+	enrichTransportProfileWithSecurity(&profile, nil, "fallback-flow")
+
+	if !profile.EnableTLS {
+		t.Fatal("expected TLS to be enabled")
+	}
+	if profile.EnableVless || profile.EnableREALITY {
+		t.Fatalf("unexpected VLESS/REALITY flags: %#v", profile)
+	}
+	if profile.VlessFlow != "fallback-flow" {
+		t.Fatalf("expected fallback VLESS flow, got %q", profile.VlessFlow)
+	}
+	if profile.REALITYConfig == nil {
+		t.Fatal("expected empty REALITY config to preserve previous behavior")
+	}
+}
+
+func TestEnrichTransportProfileWithSecurityRealityTCPUsesVision(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"protocol": "vless",
+		"streamSettings": {
+			"security": "reality",
+			"realitySettings": {
+				"dest": "example.com:443",
+				"xver": 1,
+				"serverNames": ["example.com"],
+				"privateKey": "private-key",
+				"minClientVer": "1.0.0",
+				"maxClientVer": "2.0.0",
+				"maxTimeDiff": 60,
+				"shortIds": ["abcd"]
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{TransportProtocol: "tcp"}
+
+	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
+
+	if profile.EnableTLS || !profile.EnableVless || !profile.EnableREALITY {
+		t.Fatalf("unexpected security flags: %#v", profile)
+	}
+	if profile.VlessFlow != "xtls-rprx-vision" {
+		t.Fatalf("expected REALITY TCP to use vision flow, got %q", profile.VlessFlow)
+	}
+	if profile.REALITYConfig == nil {
+		t.Fatal("expected REALITY config to be populated")
+	}
+	if profile.REALITYConfig.Dest != "example.com:443" || profile.REALITYConfig.ProxyProtocolVer != 1 {
+		t.Fatalf("unexpected REALITY config: %#v", profile.REALITYConfig)
+	}
+	if len(profile.REALITYConfig.ServerNames) != 1 || profile.REALITYConfig.ServerNames[0] != "example.com" {
+		t.Fatalf("unexpected REALITY server names: %#v", profile.REALITYConfig.ServerNames)
+	}
+	if profile.REALITYConfig.PrivateKey != "private-key" || profile.REALITYConfig.MaxTimeDiff != 60 {
+		t.Fatalf("unexpected REALITY key/time config: %#v", profile.REALITYConfig)
+	}
+	if len(profile.REALITYConfig.ShortIds) != 1 || profile.REALITYConfig.ShortIds[0] != "abcd" {
+		t.Fatalf("unexpected REALITY short ids: %#v", profile.REALITYConfig.ShortIds)
+	}
+}
+
+func TestEnrichTransportProfileWithSecurityRealityGRPCClearsFlow(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"protocol": "vless",
+		"streamSettings": {
+			"security": "reality"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{TransportProtocol: "grpc"}
+
+	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
+
+	if !profile.EnableREALITY || profile.VlessFlow != "" {
+		t.Fatalf("expected REALITY grpc to clear flow, got %#v", profile)
+	}
+}
+
 func TestEnrichTransportProfileWithEndpoint(t *testing.T) {
 	tests := []struct {
 		name              string

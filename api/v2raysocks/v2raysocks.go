@@ -624,13 +624,43 @@ func enrichTransportProfileWithEndpoint(profile *transportProfile, inboundInfo *
 	return nil
 }
 
+func enrichTransportProfileWithSecurity(profile *transportProfile, inboundInfo *simplejson.Json, fallbackVlessFlow string) {
+	if profile == nil || inboundInfo == nil {
+		return
+	}
+
+	security := inboundInfo.Get("streamSettings").Get("security").MustString()
+	profile.EnableTLS = security == "tls"
+	profile.EnableVless = inboundInfo.Get("protocol").MustString() == "vless"
+	profile.EnableREALITY = security == "reality"
+
+	profile.REALITYConfig = new(api.REALITYConfig)
+	if profile.EnableVless {
+		// parse reality config
+		profile.REALITYConfig = &api.REALITYConfig{
+			Dest:             inboundInfo.Get("streamSettings").Get("realitySettings").Get("dest").MustString(),
+			ProxyProtocolVer: inboundInfo.Get("streamSettings").Get("realitySettings").Get("xver").MustUint64(),
+			ServerNames:      inboundInfo.Get("streamSettings").Get("realitySettings").Get("serverNames").MustStringArray(),
+			PrivateKey:       inboundInfo.Get("streamSettings").Get("realitySettings").Get("privateKey").MustString(),
+			MinClientVer:     inboundInfo.Get("streamSettings").Get("realitySettings").Get("minClientVer").MustString(),
+			MaxClientVer:     inboundInfo.Get("streamSettings").Get("realitySettings").Get("maxClientVer").MustString(),
+			MaxTimeDiff:      inboundInfo.Get("streamSettings").Get("realitySettings").Get("maxTimeDiff").MustUint64(),
+			ShortIds:         inboundInfo.Get("streamSettings").Get("realitySettings").Get("shortIds").MustStringArray(),
+		}
+	}
+
+	// XTLS only supports TLS and REALITY directly for now
+	if (profile.TransportProtocol == "grpc" || profile.TransportProtocol == "h2") && profile.EnableREALITY {
+		profile.VlessFlow = ""
+	} else if profile.TransportProtocol == "tcp" && profile.EnableREALITY {
+		profile.VlessFlow = "xtls-rprx-vision"
+	} else {
+		profile.VlessFlow = fallbackVlessFlow
+	}
+}
+
 // ParseV2rayNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*api.NodeInfo, error) {
-	var enableTLS bool
-	var enableVless bool
-	var enableReality bool
-	var vlessFlow string
-
 	tmpInboundInfo := nodeInfoResponse.Get("inbounds").MustArray()
 	if len(tmpInboundInfo) == 0 {
 		return nil, fmt.Errorf("no inbound info in response")
@@ -651,42 +681,10 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 	port := uint32(inboundInfo.Get("port").MustUint64())
 	transportProtocol := inboundInfo.Get("streamSettings").Get("network").MustString()
 
-	enableTLS = inboundInfo.Get("streamSettings").Get("security").MustString() == "tls"
-	enableVless = inboundInfo.Get("protocol").MustString() == "vless"
-	enableReality = inboundInfo.Get("streamSettings").Get("security").MustString() == "reality"
-
-	realityConfig := new(api.REALITYConfig)
-	if enableVless {
-		// parse reality config
-		realityConfig = &api.REALITYConfig{
-			Dest:             inboundInfo.Get("streamSettings").Get("realitySettings").Get("dest").MustString(),
-			ProxyProtocolVer: inboundInfo.Get("streamSettings").Get("realitySettings").Get("xver").MustUint64(),
-			ServerNames:      inboundInfo.Get("streamSettings").Get("realitySettings").Get("serverNames").MustStringArray(),
-			PrivateKey:       inboundInfo.Get("streamSettings").Get("realitySettings").Get("privateKey").MustString(),
-			MinClientVer:     inboundInfo.Get("streamSettings").Get("realitySettings").Get("minClientVer").MustString(),
-			MaxClientVer:     inboundInfo.Get("streamSettings").Get("realitySettings").Get("maxClientVer").MustString(),
-			MaxTimeDiff:      inboundInfo.Get("streamSettings").Get("realitySettings").Get("maxTimeDiff").MustUint64(),
-			ShortIds:         inboundInfo.Get("streamSettings").Get("realitySettings").Get("shortIds").MustStringArray(),
-		}
-	}
-
-	// XTLS only supports TLS and REALITY directly for now
-	if (transportProtocol == "grpc" || transportProtocol == "h2") && enableReality {
-		vlessFlow = ""
-	} else if transportProtocol == "tcp" && enableReality {
-		vlessFlow = "xtls-rprx-vision"
-	} else {
-		vlessFlow = c.VlessFlow
-	}
-
 	profile := transportProfile{
 		TransportProtocol: transportProtocol,
-		EnableTLS:         enableTLS,
-		EnableVless:       enableVless,
-		VlessFlow:         vlessFlow,
-		EnableREALITY:     enableReality,
-		REALITYConfig:     realityConfig,
 	}
+	enrichTransportProfileWithSecurity(&profile, inboundInfo, c.VlessFlow)
 	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, transportProtocol); err != nil {
 		return nil, err
 	}
