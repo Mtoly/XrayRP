@@ -15,3 +15,7 @@ _Avoid_: Sync control plane, websocket sync, polling sync
 **Runtime config contract**:
 The configuration surface that must parse from documented YAML into the runtime structures used to run panel-managed nodes.
 _Avoid_: Config loader, example config, viper config
+
+**Runtime routing selection**:
+The runtime decision that turns a node route policy and available outbound handlers into the outbound handler used for a connection.
+_Avoid_: Route engine, Xray router, outbound policy only

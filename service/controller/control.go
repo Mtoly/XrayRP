@@ -87,45 +87,13 @@ func (w *dataPathWrapper) targetHostFromContext(ctx context.Context) string {
 	return target.Address.String()
 }
 
-func (w *dataPathWrapper) resolveTagToHandler(tag string) (outbound.Handler, bool) {
-	if tag == "" {
-		return nil, false
-	}
-	if tag == w.tag {
-		return w.Handler, true
-	}
-	if isXrayRManagedTag(tag) && tag != w.tag {
-		return nil, false
-	}
-	if w.obm != nil {
-		if handler := w.obm.GetHandler(tag); handler != nil {
-			return handler, true
-		}
-	}
-	if strings.EqualFold(tag, "direct") {
-		return w.Handler, true
-	}
-	return nil, false
-}
-
-func (w *dataPathWrapper) selectDispatchHandler(_ context.Context) (outbound.Handler, error) {
-	candidates := []string{w.tag}
-	if w.routePolicy != nil && len(w.routePolicy.Outbound.Candidates) > 0 {
-		candidates = append([]string(nil), w.routePolicy.Outbound.Candidates...)
-	}
-	tags, err := selectOutboundCandidates(candidates, w.routePolicy)
-	if err != nil {
-		return nil, err
-	}
-	if len(tags) == 0 {
-		tags = []string{w.tag}
-	}
-	for _, tag := range tags {
-		if handler, ok := w.resolveTagToHandler(tag); ok {
-			return handler, nil
-		}
-	}
-	return nil, fmt.Errorf("no outbound handler available for selected tags: %v", tags)
+func (w *dataPathWrapper) selectDispatchHandler(ctx context.Context) (outbound.Handler, error) {
+	return runtimeRoutingSelector{
+		baseTag:     w.tag,
+		baseHandler: w.Handler,
+		routePolicy: w.routePolicy,
+		obm:         w.obm,
+	}.selectHandler(ctx)
 }
 
 func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {

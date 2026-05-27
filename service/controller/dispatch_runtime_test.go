@@ -18,13 +18,15 @@ type fakeOutboundHandler struct {
 	dispatched bool
 }
 
-func (f *fakeOutboundHandler) Start() error                                      { return nil }
-func (f *fakeOutboundHandler) Close() error                                      { return nil }
-func (f *fakeOutboundHandler) Type() interface{}                                 { return (*fakeOutboundHandler)(nil) }
-func (f *fakeOutboundHandler) Tag() string                                       { return f.tag }
-func (f *fakeOutboundHandler) Dispatch(ctx context.Context, link *transport.Link) { f.dispatched = true }
-func (f *fakeOutboundHandler) SenderSettings() *serial.TypedMessage              { return nil }
-func (f *fakeOutboundHandler) ProxySettings() *serial.TypedMessage               { return nil }
+func (f *fakeOutboundHandler) Start() error      { return nil }
+func (f *fakeOutboundHandler) Close() error      { return nil }
+func (f *fakeOutboundHandler) Type() interface{} { return (*fakeOutboundHandler)(nil) }
+func (f *fakeOutboundHandler) Tag() string       { return f.tag }
+func (f *fakeOutboundHandler) Dispatch(ctx context.Context, link *transport.Link) {
+	f.dispatched = true
+}
+func (f *fakeOutboundHandler) SenderSettings() *serial.TypedMessage { return nil }
+func (f *fakeOutboundHandler) ProxySettings() *serial.TypedMessage  { return nil }
 
 var _ outbound.Handler = (*fakeOutboundHandler)(nil)
 var _ features.Feature = (*fakeOutboundHandler)(nil)
@@ -33,9 +35,9 @@ type fakeOutboundManager struct {
 	handlers map[string]outbound.Handler
 }
 
-func (m *fakeOutboundManager) Start() error                     { return nil }
-func (m *fakeOutboundManager) Close() error                     { return nil }
-func (m *fakeOutboundManager) Type() interface{}                { return (*fakeOutboundManager)(nil) }
+func (m *fakeOutboundManager) Start() error      { return nil }
+func (m *fakeOutboundManager) Close() error      { return nil }
+func (m *fakeOutboundManager) Type() interface{} { return (*fakeOutboundManager)(nil) }
 func (m *fakeOutboundManager) GetHandler(tag string) outbound.Handler {
 	if m.handlers == nil {
 		return nil
@@ -60,6 +62,56 @@ func (m *fakeOutboundManager) ListHandlers(ctx context.Context) []outbound.Handl
 		result = append(result, h)
 	}
 	return result
+}
+
+func TestRuntimeRoutingSelectorUsesDirectHandlerFromOutboundManager(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "proxy-node"}
+	direct := &fakeOutboundHandler{tag: "direct"}
+	selector := runtimeRoutingSelector{
+		baseTag:     "proxy-node",
+		baseHandler: base,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			"direct": direct,
+		}},
+		routePolicy: &api.PanelRoutePolicy{
+			Outbound: api.OutboundFilterPolicy{
+				Candidates: []string{"test-dead", "direct"},
+				Include:    []string{"hk-"},
+				Exclude:    []string{"dead"},
+				Fallback:   []string{"direct"},
+			},
+		},
+	}
+
+	handler, err := selector.selectHandler(context.Background())
+	if err != nil {
+		t.Fatalf("selectHandler returned error: %v", err)
+	}
+	if handler != direct {
+		t.Fatalf("expected selector to return outbound manager direct handler, got %s", handler.Tag())
+	}
+}
+
+func TestRuntimeRoutingSelectorRejectsOtherManagedNodeTag(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	otherNode := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_2"}
+	selector := runtimeRoutingSelector{
+		baseTag:     "VLESS_10.0.0.1_443_1",
+		baseHandler: base,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			"VLESS_10.0.0.1_443_2": otherNode,
+		}},
+		routePolicy: &api.PanelRoutePolicy{
+			Outbound: api.OutboundFilterPolicy{
+				Candidates: []string{"VLESS_10.0.0.1_443_2"},
+			},
+		},
+	}
+
+	_, err := selector.selectHandler(context.Background())
+	if err == nil {
+		t.Fatal("expected selector to reject another XrayR-managed node tag")
+	}
 }
 
 func TestSelectDispatchHandlerUsesFallbackHandler(t *testing.T) {

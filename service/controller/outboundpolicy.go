@@ -1,11 +1,62 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
+	"github.com/xtls/xray-core/features/outbound"
+
 	"github.com/Mtoly/XrayRP/api"
 )
+
+type runtimeRoutingSelector struct {
+	baseTag     string
+	baseHandler outbound.Handler
+	routePolicy *api.PanelRoutePolicy
+	obm         outbound.Manager
+}
+
+func (s runtimeRoutingSelector) resolveTagToHandler(tag string) (outbound.Handler, bool) {
+	if tag == "" {
+		return nil, false
+	}
+	if tag == s.baseTag {
+		return s.baseHandler, true
+	}
+	if isXrayRManagedTag(tag) && tag != s.baseTag {
+		return nil, false
+	}
+	if s.obm != nil {
+		if handler := s.obm.GetHandler(tag); handler != nil {
+			return handler, true
+		}
+	}
+	if strings.EqualFold(tag, "direct") {
+		return s.baseHandler, true
+	}
+	return nil, false
+}
+
+func (s runtimeRoutingSelector) selectHandler(_ context.Context) (outbound.Handler, error) {
+	candidates := []string{s.baseTag}
+	if s.routePolicy != nil && len(s.routePolicy.Outbound.Candidates) > 0 {
+		candidates = append([]string(nil), s.routePolicy.Outbound.Candidates...)
+	}
+	tags, err := selectOutboundCandidates(candidates, s.routePolicy)
+	if err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 {
+		tags = []string{s.baseTag}
+	}
+	for _, tag := range tags {
+		if handler, ok := s.resolveTagToHandler(tag); ok {
+			return handler, nil
+		}
+	}
+	return nil, fmt.Errorf("no outbound handler available for selected tags: %v", tags)
+}
 
 func selectOutboundCandidates(candidates []string, policy *api.PanelRoutePolicy) ([]string, error) {
 	if len(candidates) == 0 {
