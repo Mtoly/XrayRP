@@ -9,6 +9,149 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+func TestEnrichTransportProfileWithEndpoint(t *testing.T) {
+	tests := []struct {
+		name              string
+		transportProtocol string
+		fixture           string
+		wantHost          string
+		wantPath          string
+		wantServiceName   string
+		wantHeader        string
+	}{
+		{
+			name:              "ws",
+			transportProtocol: "ws",
+			fixture: `{
+				"streamSettings": {
+					"wsSettings": {
+						"path": "/ws",
+						"headers": {"Host": "ws.example.com"}
+					}
+				}
+			}`,
+			wantHost: "ws.example.com",
+			wantPath: "/ws",
+		},
+		{
+			name:              "httpupgrade",
+			transportProtocol: "httpupgrade",
+			fixture: `{
+				"streamSettings": {
+					"httpupgradeSettings": {
+						"Host": "upgrade.example.com",
+						"path": "/upgrade"
+					}
+				}
+			}`,
+			wantHost: "upgrade.example.com",
+			wantPath: "/upgrade",
+		},
+		{
+			name:              "splithttp",
+			transportProtocol: "splithttp",
+			fixture: `{
+				"streamSettings": {
+					"splithttpSettings": {
+						"Host": "split.example.com",
+						"path": "/split"
+					}
+				}
+			}`,
+			wantHost: "split.example.com",
+			wantPath: "/split",
+		},
+		{
+			name:              "grpc",
+			transportProtocol: "grpc",
+			fixture: `{
+				"streamSettings": {
+					"grpcSettings": {
+						"serviceName": "grpc-service"
+					}
+				}
+			}`,
+			wantServiceName: "grpc-service",
+		},
+		{
+			name:              "tcp",
+			transportProtocol: "tcp",
+			fixture: `{
+				"streamSettings": {
+					"tcpSettings": {
+						"header": {"type": "http"}
+					}
+				}
+			}`,
+			wantHeader: `{"type":"http"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inboundInfo, err := simplejson.NewJson([]byte(tt.fixture))
+			if err != nil {
+				t.Fatalf("parse inbound fixture: %v", err)
+			}
+			profile := transportProfile{}
+
+			if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, tt.transportProtocol); err != nil {
+				t.Fatalf("enrich endpoint: %v", err)
+			}
+
+			if profile.Host != tt.wantHost || profile.Path != tt.wantPath || profile.ServiceName != tt.wantServiceName {
+				t.Fatalf("unexpected endpoint profile: %#v", profile)
+			}
+			if tt.wantHeader != "" && string(profile.Header) != tt.wantHeader {
+				t.Fatalf("unexpected tcp header: %s", string(profile.Header))
+			}
+		})
+	}
+}
+
+func TestEnrichTransportProfileWithEndpointXHTTPFallsBackToSplitHTTP(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"streamSettings": {
+			"xhttpSettings": {},
+			"splithttpSettings": {
+				"Host": "split.example.com",
+				"path": "/split"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{}
+
+	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, "xhttp"); err != nil {
+		t.Fatalf("enrich endpoint: %v", err)
+	}
+
+	if profile.Host != "split.example.com" || profile.Path != "/split" {
+		t.Fatalf("expected XHTTP endpoint fallback to SplitHTTP, got %#v", profile)
+	}
+}
+
+func TestEnrichTransportProfileWithEndpointIgnoresNilInputs(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{"streamSettings": {}}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+	profile := transportProfile{Host: "existing"}
+
+	if err := enrichTransportProfileWithEndpoint(nil, inboundInfo, "ws"); err != nil {
+		t.Fatalf("nil profile should not error: %v", err)
+	}
+	if err := enrichTransportProfileWithEndpoint(&profile, nil, "ws"); err != nil {
+		t.Fatalf("nil inbound should not error: %v", err)
+	}
+
+	if profile.Host != "existing" {
+		t.Fatalf("expected nil inputs to leave profile unchanged, got %#v", profile)
+	}
+}
+
 func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
 	inboundInfo, err := simplejson.NewJson([]byte(`{
 		"streamSettings": {

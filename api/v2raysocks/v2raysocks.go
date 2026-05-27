@@ -584,10 +584,48 @@ func enrichTransportProfileWithXHTTPSettings(profile *transportProfile, inboundI
 	}
 }
 
+func enrichTransportProfileWithEndpoint(profile *transportProfile, inboundInfo *simplejson.Json, transportProtocol string) error {
+	if profile == nil || inboundInfo == nil {
+		return nil
+	}
+
+	switch transportProtocol {
+	case "ws":
+		profile.Path = inboundInfo.Get("streamSettings").Get("wsSettings").Get("path").MustString()
+		profile.Host = inboundInfo.Get("streamSettings").Get("wsSettings").Get("headers").Get("Host").MustString()
+	case "httpupgrade":
+		profile.Host = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("Host").MustString()
+		profile.Path = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("path").MustString()
+	case "splithttp":
+		profile.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
+		profile.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
+	case "xhttp":
+		profile.Host = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("Host").MustString()
+		if profile.Host == "" {
+			profile.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
+		}
+		profile.Path = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("path").MustString()
+		if profile.Path == "" {
+			profile.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
+		}
+	case "grpc":
+		if data, ok := inboundInfo.Get("streamSettings").Get("grpcSettings").CheckGet("serviceName"); ok {
+			profile.ServiceName = data.MustString()
+		}
+	case "tcp":
+		if data, ok := inboundInfo.Get("streamSettings").Get("tcpSettings").CheckGet("header"); ok {
+			header, err := data.MarshalJSON()
+			if err != nil {
+				return err
+			}
+			profile.Header = header
+		}
+	}
+	return nil
+}
+
 // ParseV2rayNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*api.NodeInfo, error) {
-	var path, host, serviceName string
-	var header json.RawMessage
 	var enableTLS bool
 	var enableVless bool
 	var enableReality bool
@@ -612,39 +650,6 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 
 	port := uint32(inboundInfo.Get("port").MustUint64())
 	transportProtocol := inboundInfo.Get("streamSettings").Get("network").MustString()
-
-	switch transportProtocol {
-	case "ws":
-		path = inboundInfo.Get("streamSettings").Get("wsSettings").Get("path").MustString()
-		host = inboundInfo.Get("streamSettings").Get("wsSettings").Get("headers").Get("Host").MustString()
-	case "httpupgrade":
-		host = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("Host").MustString()
-		path = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("path").MustString()
-	case "splithttp":
-		host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
-		path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
-	case "xhttp":
-		host = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("Host").MustString()
-		if host == "" {
-			host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
-		}
-		path = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("path").MustString()
-		if path == "" {
-			path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
-		}
-	case "grpc":
-		if data, ok := inboundInfo.Get("streamSettings").Get("grpcSettings").CheckGet("serviceName"); ok {
-			serviceName = data.MustString()
-		}
-	case "tcp":
-		if data, ok := inboundInfo.Get("streamSettings").Get("tcpSettings").CheckGet("header"); ok {
-			if httpHeader, err := data.MarshalJSON(); err != nil {
-				return nil, err
-			} else {
-				header = httpHeader
-			}
-		}
-	}
 
 	enableTLS = inboundInfo.Get("streamSettings").Get("security").MustString() == "tls"
 	enableVless = inboundInfo.Get("protocol").MustString() == "vless"
@@ -677,16 +682,14 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 	profile := transportProfile{
 		TransportProtocol: transportProtocol,
 		EnableTLS:         enableTLS,
-		Path:              path,
-		Host:              host,
 		EnableVless:       enableVless,
 		VlessFlow:         vlessFlow,
-		ServiceName:       serviceName,
-		Header:            header,
 		EnableREALITY:     enableReality,
 		REALITYConfig:     realityConfig,
 	}
-
+	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, transportProtocol); err != nil {
+		return nil, err
+	}
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, transportProtocol)
 
 	// Create GeneralNodeInfo
