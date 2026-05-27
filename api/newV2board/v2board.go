@@ -146,26 +146,17 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig returns the optional certificate config if present in the UniProxy payload.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	if cfg, ok := c.cachedUniProxySnapshot(); ok && cfg.CertConfig != nil {
-		return &api.XrayRCertConfig{
-			Provider: cfg.CertConfig.Provider,
-			Email:    cfg.CertConfig.Email,
-			DNSEnv:   cfg.CertConfig.DNSEnv,
-		}, nil
+	if snapshot, ok := c.cachedUniProxySnapshot(); ok {
+		if cert := certConfigFromUniProxySnapshot(snapshot); cert != nil {
+			return cert, nil
+		}
 	}
 
-	server, err := c.fetchUniProxySnapshot(false)
+	snapshot, err := c.fetchUniProxySnapshot(false)
 	if err != nil {
 		return nil, err
 	}
-	if server.CertConfig == nil {
-		return nil, nil
-	}
-	return &api.XrayRCertConfig{
-		Provider: server.CertConfig.Provider,
-		Email:    server.CertConfig.Email,
-		DNSEnv:   server.CertConfig.DNSEnv,
-	}, nil
+	return certConfigFromUniProxySnapshot(snapshot), nil
 }
 
 // Debug set the client debug for client
@@ -361,25 +352,11 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
-	routes := c.resp.Load().(*serverConfig).Routes
-
-	ruleList := c.LocalRuleList
-
-	for i := range routes {
-		if routes[i].Action == "block" {
-			pattern, err := common.SafeCompileRegex(strings.Join(routes[i].Match, "|"))
-			if err != nil {
-				log.Printf("Invalid route rule regex (index=%d): %s, skipping", i, err)
-				continue
-			}
-			ruleList = append(ruleList, api.DetectRule{
-				ID:      i,
-				Pattern: pattern,
-			})
-		}
+	snapshot, ok := c.cachedUniProxySnapshot()
+	if !ok {
+		return nil, fmt.Errorf("UniProxy snapshot unavailable before GetNodeRule")
 	}
-
-	return &ruleList, nil
+	return rulesFromUniProxySnapshot(snapshot, c.LocalRuleList)
 }
 
 // ReportNodeStatus implements the API interface

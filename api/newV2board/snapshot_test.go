@@ -3,6 +3,7 @@ package newV2board
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -19,6 +20,87 @@ func TestUniProxySnapshotCacheRoundTrip(t *testing.T) {
 	}
 	if cached != snapshot {
 		t.Fatalf("expected cached snapshot pointer %p, got %p", snapshot, cached)
+	}
+}
+
+func mustCompileRegex(t *testing.T, pattern string) *regexp.Regexp {
+	t.Helper()
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("compile regex %q: %v", pattern, err)
+	}
+	return re
+}
+
+func TestCertConfigFromUniProxySnapshot(t *testing.T) {
+	if cert := certConfigFromUniProxySnapshot(nil); cert != nil {
+		t.Fatalf("expected nil cert config from nil snapshot, got %#v", cert)
+	}
+	if cert := certConfigFromUniProxySnapshot(&serverConfig{}); cert != nil {
+		t.Fatalf("expected nil cert config without cert payload, got %#v", cert)
+	}
+
+	snapshot := &serverConfig{CertConfig: &certConfig{
+		Provider: "alidns",
+		Email:    "ops@example.com",
+		DNSEnv: map[string]string{
+			"ALICLOUD_ACCESS_KEY": "ak",
+			"ALICLOUD_SECRET_KEY": "sk",
+		},
+	}}
+	cert := certConfigFromUniProxySnapshot(snapshot)
+	if cert == nil {
+		t.Fatal("expected cert config from snapshot")
+	}
+	if cert.Provider != "alidns" || cert.Email != "ops@example.com" {
+		t.Fatalf("unexpected cert config: %#v", cert)
+	}
+	if cert.DNSEnv["ALICLOUD_ACCESS_KEY"] != "ak" || cert.DNSEnv["ALICLOUD_SECRET_KEY"] != "sk" {
+		t.Fatalf("unexpected cert env: %#v", cert.DNSEnv)
+	}
+}
+
+func TestRulesFromUniProxySnapshotIncludesLocalAndBlockRoutes(t *testing.T) {
+	localPattern := mustCompileRegex(t, "local-allow")
+	snapshot := &serverConfig{Routes: []route{
+		{Id: 10, Action: "dns", Match: []string{"1.1.1.1"}, ActionValue: "dns.example"},
+		{Id: 11, Action: "block", Match: []string{"example-blocked.com", "ads.example"}},
+		{Id: 12, Action: "direct", Match: []string{"direct.example"}},
+	}}
+
+	rules, err := rulesFromUniProxySnapshot(snapshot, []api.DetectRule{{ID: -1, Pattern: localPattern}})
+	if err != nil {
+		t.Fatalf("rulesFromUniProxySnapshot returned error: %v", err)
+	}
+	if len(*rules) != 2 {
+		t.Fatalf("expected one local rule and one block rule, got %d", len(*rules))
+	}
+	if (*rules)[0].ID != -1 || !(*rules)[0].Pattern.MatchString("local-allow") {
+		t.Fatalf("unexpected local rule entry: %#v", (*rules)[0])
+	}
+	if (*rules)[1].ID != 1 {
+		t.Fatalf("expected block rule to use route index 1, got %d", (*rules)[1].ID)
+	}
+	if !(*rules)[1].Pattern.MatchString("example-blocked.com") || !(*rules)[1].Pattern.MatchString("ads.example") {
+		t.Fatalf("expected block pattern to match route domains, got %s", (*rules)[1].Pattern.String())
+	}
+}
+
+func TestRulesFromUniProxySnapshotRejectsMissingSnapshot(t *testing.T) {
+	_, err := rulesFromUniProxySnapshot(nil, nil)
+	if err == nil {
+		t.Fatal("expected error when snapshot is missing")
+	}
+}
+
+func TestGetNodeRuleReturnsErrorWhenSnapshotMissing(t *testing.T) {
+	client := &APIClient{}
+	rules, err := client.GetNodeRule()
+	if err == nil {
+		t.Fatal("expected GetNodeRule to fail when snapshot is missing")
+	}
+	if rules != nil {
+		t.Fatalf("expected nil rules when snapshot is missing, got %#v", rules)
 	}
 }
 
