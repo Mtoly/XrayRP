@@ -23,3 +23,7 @@ _Avoid_: Route engine, Xray router, outbound policy only
 **UniProxy snapshot**:
 The Xboard/NewV2board server config snapshot fetched from the UniProxy config endpoint and normalized into node, route, rule, and certificate state.
 _Avoid_: raw server config, v2board cache, API response
+
+**Transport profile**:
+The normalized transport and security shape derived from panel node data before it is applied to local Xray inbound and user configuration.
+_Avoid_: protocol helper, transport config, node parser utility

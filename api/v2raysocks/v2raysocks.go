@@ -481,6 +481,71 @@ func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *simplejson.Json) (*api
 	return nodeInfo, nil
 }
 
+type transportProfile struct {
+	TransportProtocol string
+	EnableTLS         bool
+	EnableVless       bool
+	EnableREALITY     bool
+	VlessFlow         string
+	Path              string
+	Host              string
+	ServiceName       string
+	Header            json.RawMessage
+	REALITYConfig     *api.REALITYConfig
+
+	XHTTPMode           string
+	XHTTPExtra          json.RawMessage
+	XPaddingObfsMode    bool
+	XPaddingKey         string
+	XPaddingHeader      string
+	XPaddingPlacement   string
+	XPaddingMethod      string
+	UplinkHTTPMethod    string
+	SessionPlacement    string
+	SessionKey          string
+	SeqPlacement        string
+	SeqKey              string
+	UplinkDataPlacement string
+	UplinkDataKey       string
+	UplinkChunkSize     uint32
+	NoGRPCHeader        bool
+	NoSSEHeader         bool
+}
+
+func (p transportProfile) applyToNodeInfo(nodeInfo *api.NodeInfo) {
+	if nodeInfo == nil {
+		return
+	}
+	nodeInfo.TransportProtocol = p.TransportProtocol
+	nodeInfo.EnableTLS = p.EnableTLS
+	nodeInfo.Path = p.Path
+	nodeInfo.Host = p.Host
+	nodeInfo.EnableVless = p.EnableVless
+	nodeInfo.VlessFlow = p.VlessFlow
+	nodeInfo.ServiceName = p.ServiceName
+	nodeInfo.Header = p.Header
+	nodeInfo.EnableREALITY = p.EnableREALITY
+	nodeInfo.REALITYConfig = p.REALITYConfig
+
+	nodeInfo.XHTTPMode = p.XHTTPMode
+	nodeInfo.XHTTPExtra = p.XHTTPExtra
+	nodeInfo.XPaddingObfsMode = p.XPaddingObfsMode
+	nodeInfo.XPaddingKey = p.XPaddingKey
+	nodeInfo.XPaddingHeader = p.XPaddingHeader
+	nodeInfo.XPaddingPlacement = p.XPaddingPlacement
+	nodeInfo.XPaddingMethod = p.XPaddingMethod
+	nodeInfo.UplinkHTTPMethod = p.UplinkHTTPMethod
+	nodeInfo.SessionPlacement = p.SessionPlacement
+	nodeInfo.SessionKey = p.SessionKey
+	nodeInfo.SeqPlacement = p.SeqPlacement
+	nodeInfo.SeqKey = p.SeqKey
+	nodeInfo.UplinkDataPlacement = p.UplinkDataPlacement
+	nodeInfo.UplinkDataKey = p.UplinkDataKey
+	nodeInfo.UplinkChunkSize = p.UplinkChunkSize
+	nodeInfo.NoGRPCHeader = p.NoGRPCHeader
+	nodeInfo.NoSSEHeader = p.NoSSEHeader
+}
+
 // ParseV2rayNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*api.NodeInfo, error) {
 	var path, host, serviceName string
@@ -571,13 +636,7 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 		vlessFlow = c.VlessFlow
 	}
 
-	// Create GeneralNodeInfo
-	// AlterID will be updated after next sync
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              port,
-		AlterID:           0,
+	profile := transportProfile{
 		TransportProtocol: transportProtocol,
 		EnableTLS:         enableTLS,
 		Path:              path,
@@ -599,28 +658,37 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 			}
 		}
 		ss := inboundInfo.Get("streamSettings").Get(settingsKey)
-		nodeInfo.XHTTPMode = ss.Get("mode").MustString()
-		nodeInfo.XPaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
-		nodeInfo.XPaddingKey = ss.Get("xPaddingKey").MustString()
-		nodeInfo.XPaddingHeader = ss.Get("xPaddingHeader").MustString()
-		nodeInfo.XPaddingPlacement = ss.Get("xPaddingPlacement").MustString()
-		nodeInfo.XPaddingMethod = ss.Get("xPaddingMethod").MustString()
-		nodeInfo.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
-		nodeInfo.SessionPlacement = ss.Get("sessionPlacement").MustString()
-		nodeInfo.SessionKey = ss.Get("sessionKey").MustString()
-		nodeInfo.SeqPlacement = ss.Get("seqPlacement").MustString()
-		nodeInfo.SeqKey = ss.Get("seqKey").MustString()
-		nodeInfo.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
-		nodeInfo.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
-		nodeInfo.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
-		nodeInfo.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
-		nodeInfo.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
+		profile.XHTTPMode = ss.Get("mode").MustString()
+		profile.XPaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
+		profile.XPaddingKey = ss.Get("xPaddingKey").MustString()
+		profile.XPaddingHeader = ss.Get("xPaddingHeader").MustString()
+		profile.XPaddingPlacement = ss.Get("xPaddingPlacement").MustString()
+		profile.XPaddingMethod = ss.Get("xPaddingMethod").MustString()
+		profile.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
+		profile.SessionPlacement = ss.Get("sessionPlacement").MustString()
+		profile.SessionKey = ss.Get("sessionKey").MustString()
+		profile.SeqPlacement = ss.Get("seqPlacement").MustString()
+		profile.SeqKey = ss.Get("seqKey").MustString()
+		profile.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
+		profile.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
+		profile.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
+		profile.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
+		profile.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
 		if extra := ss.Get("extra"); extra.Interface() != nil {
 			if extraBytes, err := extra.MarshalJSON(); err == nil {
-				nodeInfo.XHTTPExtra = extraBytes
+				profile.XHTTPExtra = extraBytes
 			}
 		}
 	}
 
+	// Create GeneralNodeInfo
+	// AlterID will be updated after next sync
+	nodeInfo := &api.NodeInfo{
+		NodeType: c.NodeType,
+		NodeID:   c.NodeID,
+		Port:     port,
+		AlterID:  0,
+	}
+	profile.applyToNodeInfo(nodeInfo)
 	return nodeInfo, nil
 }
