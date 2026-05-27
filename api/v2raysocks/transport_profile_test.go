@@ -9,8 +9,17 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+func mustSimpleJSON(t *testing.T, raw string) *simplejson.Json {
+	t.Helper()
+	jsonData, err := simplejson.NewJson([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse JSON fixture: %v", err)
+	}
+	return jsonData
+}
+
 func TestDeriveTransportProfileFromInbound(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"protocol": "vless",
 		"streamSettings": {
 			"network": "xhttp",
@@ -32,10 +41,7 @@ func TestDeriveTransportProfileFromInbound(t *testing.T) {
 				"uplinkChunkSize": 4096
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 
 	profile, err := deriveTransportProfileFromInbound(inboundInfo, "fallback-flow")
 	if err != nil {
@@ -73,15 +79,12 @@ func TestDeriveTransportProfileFromInboundNil(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithSecurityTLS(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"protocol": "vmess",
 		"streamSettings": {
 			"security": "tls"
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{TransportProtocol: "ws"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
@@ -103,7 +106,7 @@ func TestEnrichTransportProfileWithSecurityTLS(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithSecurityRealityTCPUsesVision(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"protocol": "vless",
 		"streamSettings": {
 			"security": "reality",
@@ -118,10 +121,7 @@ func TestEnrichTransportProfileWithSecurityRealityTCPUsesVision(t *testing.T) {
 				"shortIds": ["abcd"]
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{TransportProtocol: "tcp"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
@@ -150,15 +150,12 @@ func TestEnrichTransportProfileWithSecurityRealityTCPUsesVision(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithSecurityRealityGRPCClearsFlow(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"protocol": "vless",
 		"streamSettings": {
 			"security": "reality"
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{TransportProtocol: "grpc"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
@@ -248,10 +245,7 @@ func TestEnrichTransportProfileWithEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inboundInfo, err := simplejson.NewJson([]byte(tt.fixture))
-			if err != nil {
-				t.Fatalf("parse inbound fixture: %v", err)
-			}
+			inboundInfo := mustSimpleJSON(t, tt.fixture)
 			profile := transportProfile{}
 
 			if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, tt.transportProtocol); err != nil {
@@ -269,7 +263,7 @@ func TestEnrichTransportProfileWithEndpoint(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithEndpointXHTTPFallsBackToSplitHTTP(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"streamSettings": {
 			"xhttpSettings": {},
 			"splithttpSettings": {
@@ -277,10 +271,7 @@ func TestEnrichTransportProfileWithEndpointXHTTPFallsBackToSplitHTTP(t *testing.
 				"path": "/split"
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{}
 
 	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, "xhttp"); err != nil {
@@ -293,10 +284,7 @@ func TestEnrichTransportProfileWithEndpointXHTTPFallsBackToSplitHTTP(t *testing.
 }
 
 func TestEnrichTransportProfileWithEndpointIgnoresNilInputs(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{"streamSettings": {}}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	inboundInfo := mustSimpleJSON(t, `{"streamSettings": {}}`)
 	profile := transportProfile{Host: "existing"}
 
 	if err := enrichTransportProfileWithEndpoint(nil, inboundInfo, "ws"); err != nil {
@@ -312,7 +300,7 @@ func TestEnrichTransportProfileWithEndpointIgnoresNilInputs(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"streamSettings": {
 			"xhttpSettings": {
 				"mode": "stream-one",
@@ -337,10 +325,7 @@ func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
 				"mode": "fallback"
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
@@ -368,17 +353,14 @@ func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
 }
 
 func TestEnrichTransportProfileWithXHTTPSettingsFallsBackToSplitHTTP(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"streamSettings": {
 			"splithttpSettings": {
 				"mode": "auto",
 				"uplinkChunkSize": 1024
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
@@ -392,16 +374,13 @@ func TestEnrichTransportProfileWithXHTTPSettingsFallsBackToSplitHTTP(t *testing.
 }
 
 func TestEnrichTransportProfileWithXHTTPSettingsIgnoresOtherTransports(t *testing.T) {
-	inboundInfo, err := simplejson.NewJson([]byte(`{
+	inboundInfo := mustSimpleJSON(t, `{
 		"streamSettings": {
 			"splithttpSettings": {
 				"mode": "auto"
 			}
 		}
-	}`))
-	if err != nil {
-		t.Fatalf("parse inbound fixture: %v", err)
-	}
+	}`)
 	profile := transportProfile{XHTTPMode: "existing"}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "ws")
