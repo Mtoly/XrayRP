@@ -146,29 +146,18 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig returns the optional certificate config if present in the UniProxy payload.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	if value := c.resp.Load(); value != nil {
-		if cfg, ok := value.(*serverConfig); ok && cfg != nil && cfg.CertConfig != nil {
-			return &api.XrayRCertConfig{
-				Provider: cfg.CertConfig.Provider,
-				Email:    cfg.CertConfig.Email,
-				DNSEnv:   cfg.CertConfig.DNSEnv,
-			}, nil
-		}
+	if cfg, ok := c.cachedUniProxySnapshot(); ok && cfg.CertConfig != nil {
+		return &api.XrayRCertConfig{
+			Provider: cfg.CertConfig.Provider,
+			Email:    cfg.CertConfig.Email,
+			DNSEnv:   cfg.CertConfig.DNSEnv,
+		}, nil
 	}
 
-	path := "/api/v1/server/UniProxy/config"
-	res, err := c.client.R().ForceContentType("application/json").Get(path)
-	cfgResp, err := c.parseResponse(res, path, err)
+	server, err := c.fetchUniProxySnapshot(false)
 	if err != nil {
 		return nil, err
 	}
-
-	server := new(serverConfig)
-	b, _ := cfgResp.Encode()
-	if err := json.Unmarshal(b, server); err != nil {
-		return nil, err
-	}
-	c.resp.Store(server)
 	if server.CertConfig == nil {
 		return nil, nil
 	}
@@ -207,35 +196,14 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 
 // GetNodeInfo will pull NodeInfo Config from panel
 func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
-	server := new(serverConfig)
-	path := "/api/v1/server/UniProxy/config"
-
-	res, err := c.client.R().
-		SetHeader("If-None-Match", c.eTags["node"]).
-		ForceContentType("application/json").
-		Get(path)
-
-	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
-	if res.StatusCode() == 304 {
-		return nil, fmt.Errorf(api.NodeNotModified)
-	}
-	// update etag
-	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["node"] {
-		c.eTags["node"] = res.Header().Get("Etag")
-	}
-
-	nodeInfoResp, err := c.parseResponse(res, path, err)
+	server, err := c.fetchUniProxySnapshot(true)
 	if err != nil {
 		return nil, err
 	}
-	b, _ := nodeInfoResp.Encode()
-	json.Unmarshal(b, server)
 
 	if server.ServerPort == 0 {
 		return nil, fmt.Errorf("server port must > 0")
 	}
-
-	c.resp.Store(server)
 
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":

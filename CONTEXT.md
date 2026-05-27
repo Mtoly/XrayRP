@@ -19,3 +19,7 @@ _Avoid_: Config loader, example config, viper config
 **Runtime routing selection**:
 The runtime decision that turns a node route policy and available outbound handlers into the outbound handler used for a connection.
 _Avoid_: Route engine, Xray router, outbound policy only
+
+**UniProxy snapshot**:
+The Xboard/NewV2board server config snapshot fetched from the UniProxy config endpoint and normalized into node, route, rule, and certificate state.
+_Avoid_: raw server config, v2board cache, API response
