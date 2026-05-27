@@ -12,6 +12,7 @@
 - Minimal WebSocket client lifecycle, runtime reconnect/degrade skeleton, and keepalive support.
 - Unified sync action model, coordinator, and apply pipeline in `service/controller`.
 - Opt-in websocket integration tests gated by `XRAYRP_RUN_V2BOARD_WS_INTEGRATION=1`.
+- Xboard/NewV2board usage notes covering websocket dual-active sync, route/outbound compatibility, xhttp, and AnyTLS examples.
 
 ### Changed
 - Polling and ws-triggered REST fetches now converge through the same sync action / coordinator / apply pipeline.
