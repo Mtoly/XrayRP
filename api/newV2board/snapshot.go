@@ -77,31 +77,49 @@ func nodeInfoUnsupportedTypeError(nodeType string) error {
 	}
 }
 
+func enrichNodeInfoFromUniProxySnapshot(snapshot *serverConfig, nodeInfo *api.NodeInfo) {
+	if snapshot == nil || nodeInfo == nil {
+		return
+	}
+	nodeInfo.NameServerConfig = snapshot.parseDNSConfig()
+	attachRoutePolicy(snapshot, nodeInfo)
+}
+
 func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
 	if snapshot == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving node info")
 	}
 
+	var (
+		nodeInfo *api.NodeInfo
+		err      error
+	)
+
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
-		return c.parseV2rayNodeResponse(snapshot)
+		nodeInfo, err = c.parseV2rayNodeResponse(snapshot)
 	case "Trojan":
-		return c.parseTrojanNodeResponse(snapshot)
+		nodeInfo, err = c.parseTrojanNodeResponse(snapshot)
 	case "Shadowsocks":
-		return c.parseSSNodeResponse(snapshot)
+		nodeInfo, err = c.parseSSNodeResponse(snapshot)
 	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
-		return c.parseHysteria2NodeResponse(snapshot)
+		nodeInfo, err = c.parseHysteria2NodeResponse(snapshot)
 	case "Tuic", "tuic":
-		return c.parseTuicNodeResponse(snapshot)
+		nodeInfo, err = c.parseTuicNodeResponse(snapshot)
 	case "AnyTLS", "anytls":
-		return c.parseAnyTLSNodeResponse(snapshot)
+		nodeInfo, err = c.parseAnyTLSNodeResponse(snapshot)
 	case "Socks", "socks":
-		return c.parseSocksNodeResponse(snapshot)
+		nodeInfo, err = c.parseSocksNodeResponse(snapshot)
 	case "HTTP", "http":
-		return c.parseHTTPNodeResponse(snapshot)
+		nodeInfo, err = c.parseHTTPNodeResponse(snapshot)
 	default:
 		return nil, nodeInfoUnsupportedTypeError(c.NodeType)
 	}
+	if err != nil {
+		return nil, err
+	}
+	enrichNodeInfoFromUniProxySnapshot(snapshot, nodeInfo)
+	return nodeInfo, nil
 }
 
 func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {

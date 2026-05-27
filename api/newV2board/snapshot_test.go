@@ -145,6 +145,39 @@ func TestNodeInfoFromUniProxySnapshotDispatchesV2ray(t *testing.T) {
 	}
 }
 
+func TestEnrichNodeInfoFromUniProxySnapshotAddsDNSAndRoutePolicy(t *testing.T) {
+	snapshot := loadRoutePolicyFixture(t)
+	nodeInfo := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+
+	enrichNodeInfoFromUniProxySnapshot(snapshot, nodeInfo)
+
+	if nodeInfo.RoutePolicy == nil {
+		t.Fatal("expected enrich to populate RoutePolicy")
+	}
+	if !nodeInfo.RoutePolicy.HasDirectBypass {
+		t.Fatal("expected enrich to preserve direct bypass flag")
+	}
+	if len(nodeInfo.NameServerConfig) != 1 {
+		t.Fatalf("expected enrich to populate one DNS config, got %d", len(nodeInfo.NameServerConfig))
+	}
+}
+
+func TestNodeInfoFromUniProxySnapshotAppliesCommonEnrichForV2ray(t *testing.T) {
+	client := &APIClient{NodeID: 1, NodeType: "V2ray", EnableVless: true}
+	snapshot := loadRoutePolicyFixture(t)
+
+	nodeInfo, err := client.nodeInfoFromUniProxySnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("nodeInfoFromUniProxySnapshot returned error: %v", err)
+	}
+	if nodeInfo.RoutePolicy == nil {
+		t.Fatal("expected RoutePolicy after common enrich")
+	}
+	if len(nodeInfo.NameServerConfig) != 1 {
+		t.Fatalf("expected NameServerConfig after common enrich, got %d", len(nodeInfo.NameServerConfig))
+	}
+}
+
 func TestFetchUniProxySnapshotWithoutETagDoesNotSendOrStoreETag(t *testing.T) {
 	var gotIfNoneMatch string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

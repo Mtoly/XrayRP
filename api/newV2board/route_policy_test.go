@@ -51,7 +51,7 @@ func TestParseSupportedRoutePolicySubset(t *testing.T) {
 	}
 }
 
-func TestParseV2rayNodeResponseCarriesRoutePolicy(t *testing.T) {
+func TestParseV2rayNodeResponseLeavesCommonEnrichUnset(t *testing.T) {
 	cfg := loadRoutePolicyFixture(t)
 	client := &APIClient{NodeID: 1, NodeType: "V2ray", EnableVless: true}
 
@@ -59,14 +59,11 @@ func TestParseV2rayNodeResponseCarriesRoutePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseV2rayNodeResponse returned error: %v", err)
 	}
-	if nodeInfo.RoutePolicy == nil {
-		t.Fatal("expected RoutePolicy to be populated")
+	if nodeInfo.RoutePolicy != nil {
+		t.Fatalf("expected RoutePolicy to stay unset before common enrich, got %#v", nodeInfo.RoutePolicy)
 	}
-	if !nodeInfo.RoutePolicy.HasDirectBypass {
-		t.Fatal("expected HasDirectBypass to be true on node policy")
-	}
-	if len(nodeInfo.RoutePolicy.Outbound.Include) == 0 || nodeInfo.RoutePolicy.Outbound.Include[0] != "hk-" {
-		t.Fatalf("unexpected include list on node policy: %#v", nodeInfo.RoutePolicy.Outbound.Include)
+	if len(nodeInfo.NameServerConfig) != 0 {
+		t.Fatalf("expected NameServerConfig to stay unset before common enrich, got %#v", nodeInfo.NameServerConfig)
 	}
 }
 

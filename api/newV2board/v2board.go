@@ -480,10 +480,7 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		ServiceName:       serviceName,
 		Path:              s.NetworkSettings.Path,
 		Header:            header,
-		NameServerConfig:  s.parseDNSConfig(),
 	}
-
-	attachRoutePolicy(s, nodeInfo)
 
 	// XHTTP bypass CDN fields for Trojan (same as V2ray/VLESS)
 	if transportProtocol == "xhttp" || transportProtocol == "splithttp" {
@@ -584,10 +581,8 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 		Path:              path,
 		Host:              host,
 		ServiceName:       serviceName,
-		NameServerConfig:  s.parseDNSConfig(),
 		Header:            header,
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -696,7 +691,6 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		Header:            header,
 		EnableREALITY:     enableREALITY,
 		REALITYConfig:     &realityConfig,
-		NameServerConfig:  s.parseDNSConfig(),
 		// XHTTP bypass CDN fields
 		XHTTPMode:           s.NetworkSettings.Mode,
 		XHTTPExtra:          s.NetworkSettings.Extra,
@@ -717,7 +711,6 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		NoGRPCHeader:        s.NetworkSettings.NoGRPCHeader,
 		NoSSEHeader:         s.NetworkSettings.NoSSEHeader,
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -749,16 +742,14 @@ func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, 
 	}
 
 	nodeInfo := &api.NodeInfo{
-		NodeType:         "Hysteria2",
-		NodeID:           c.NodeID,
-		Port:             uint32(s.ServerPort),
-		Host:             s.Host,
-		SNI:              sni,
-		EnableTLS:        true,
-		Hysteria2Config:  hy,
-		NameServerConfig: s.parseDNSConfig(),
+		NodeType:        "Hysteria2",
+		NodeID:          c.NodeID,
+		Port:            uint32(s.ServerPort),
+		Host:            s.Host,
+		SNI:             sni,
+		EnableTLS:       true,
+		Hysteria2Config: hy,
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -786,9 +777,7 @@ func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error
 			Heartbeat:         parseHeartbeatSeconds(s.Heartbeat),
 			AuthTimeout:       parseHeartbeatSeconds(s.AuthTimeout),
 		},
-		NameServerConfig: s.parseDNSConfig(),
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -804,16 +793,14 @@ func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, err
 	}
 
 	nodeInfo := &api.NodeInfo{
-		NodeType:         "AnyTLS",
-		NodeID:           c.NodeID,
-		Port:             uint32(s.ServerPort),
-		Host:             s.Host,
-		SNI:              sni,
-		EnableTLS:        true,
-		AnyTLSConfig:     &api.AnyTLSConfig{PaddingScheme: s.PaddingScheme},
-		NameServerConfig: s.parseDNSConfig(),
+		NodeType:     "AnyTLS",
+		NodeID:       c.NodeID,
+		Port:         uint32(s.ServerPort),
+		Host:         s.Host,
+		SNI:          sni,
+		EnableTLS:    true,
+		AnyTLSConfig: &api.AnyTLSConfig{PaddingScheme: s.PaddingScheme},
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -828,9 +815,7 @@ func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
 		TransportProtocol: "tcp",
-		NameServerConfig:  s.parseDNSConfig(),
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
@@ -848,9 +833,7 @@ func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error
 		Port:              uint32(s.ServerPort),
 		TransportProtocol: "tcp",
 		EnableTLS:         enableTLS,
-		NameServerConfig:  s.parseDNSConfig(),
 	}
-	attachRoutePolicy(s, nodeInfo)
 	return nodeInfo, nil
 }
 
