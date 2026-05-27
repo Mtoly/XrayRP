@@ -9,6 +9,69 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+func TestDeriveTransportProfileFromInbound(t *testing.T) {
+	inboundInfo, err := simplejson.NewJson([]byte(`{
+		"protocol": "vless",
+		"streamSettings": {
+			"network": "xhttp",
+			"security": "reality",
+			"realitySettings": {
+				"dest": "example.com:443",
+				"xver": 1,
+				"serverNames": ["example.com"],
+				"privateKey": "private-key",
+				"minClientVer": "1.0.0",
+				"maxClientVer": "2.0.0",
+				"maxTimeDiff": 60,
+				"shortIds": ["abcd"]
+			},
+			"xhttpSettings": {
+				"Host": "xhttp.example.com",
+				"path": "/xhttp",
+				"mode": "stream-one",
+				"uplinkChunkSize": 4096
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parse inbound fixture: %v", err)
+	}
+
+	profile, err := deriveTransportProfileFromInbound(inboundInfo, "fallback-flow")
+	if err != nil {
+		t.Fatalf("derive transport profile: %v", err)
+	}
+
+	if profile.TransportProtocol != "xhttp" {
+		t.Fatalf("unexpected transport protocol: %s", profile.TransportProtocol)
+	}
+	if !profile.EnableVless || !profile.EnableREALITY || profile.EnableTLS {
+		t.Fatalf("unexpected security flags: %#v", profile)
+	}
+	if profile.VlessFlow != "fallback-flow" {
+		t.Fatalf("expected fallback flow for non-tcp REALITY transport, got %q", profile.VlessFlow)
+	}
+	if profile.Host != "xhttp.example.com" || profile.Path != "/xhttp" {
+		t.Fatalf("unexpected endpoint fields: %#v", profile)
+	}
+	if profile.XHTTPMode != "stream-one" || profile.UplinkChunkSize != 4096 {
+		t.Fatalf("unexpected XHTTP fields: %#v", profile)
+	}
+	if profile.REALITYConfig == nil || profile.REALITYConfig.Dest != "example.com:443" {
+		t.Fatalf("unexpected REALITY config: %#v", profile.REALITYConfig)
+	}
+}
+
+func TestDeriveTransportProfileFromInboundNil(t *testing.T) {
+	profile, err := deriveTransportProfileFromInbound(nil, "fallback-flow")
+	if err != nil {
+		t.Fatalf("nil inbound should not error: %v", err)
+	}
+	if profile.TransportProtocol != "" || profile.EnableTLS || profile.EnableVless || profile.EnableREALITY || profile.REALITYConfig != nil || len(profile.Header) != 0 {
+		t.Fatalf("expected zero profile for nil inbound, got %#v", profile)
+	}
+}
+
 func TestEnrichTransportProfileWithSecurityTLS(t *testing.T) {
 	inboundInfo, err := simplejson.NewJson([]byte(`{
 		"protocol": "vmess",

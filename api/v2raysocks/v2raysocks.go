@@ -659,6 +659,23 @@ func enrichTransportProfileWithSecurity(profile *transportProfile, inboundInfo *
 	}
 }
 
+func deriveTransportProfileFromInbound(inboundInfo *simplejson.Json, fallbackVlessFlow string) (transportProfile, error) {
+	if inboundInfo == nil {
+		return transportProfile{}, nil
+	}
+
+	transportProtocol := inboundInfo.Get("streamSettings").Get("network").MustString()
+	profile := transportProfile{
+		TransportProtocol: transportProtocol,
+	}
+	enrichTransportProfileWithSecurity(&profile, inboundInfo, fallbackVlessFlow)
+	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, transportProtocol); err != nil {
+		return transportProfile{}, err
+	}
+	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, transportProtocol)
+	return profile, nil
+}
+
 // ParseV2rayNodeResponse parse the response for the given nodeInfo format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*api.NodeInfo, error) {
 	tmpInboundInfo := nodeInfoResponse.Get("inbounds").MustArray()
@@ -679,16 +696,10 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 	}
 
 	port := uint32(inboundInfo.Get("port").MustUint64())
-	transportProtocol := inboundInfo.Get("streamSettings").Get("network").MustString()
-
-	profile := transportProfile{
-		TransportProtocol: transportProtocol,
-	}
-	enrichTransportProfileWithSecurity(&profile, inboundInfo, c.VlessFlow)
-	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, transportProtocol); err != nil {
+	profile, err := deriveTransportProfileFromInbound(inboundInfo, c.VlessFlow)
+	if err != nil {
 		return nil, err
 	}
-	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, transportProtocol)
 
 	// Create GeneralNodeInfo
 	// AlterID will be updated after next sync
