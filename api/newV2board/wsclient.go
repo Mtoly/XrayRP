@@ -82,6 +82,36 @@ func (c *WSClient) KeepAlive() error {
 	return nil
 }
 
+// Pong sends an Xboard app-level pong event.
+func (c *WSClient) Pong() error {
+	return c.writeJSONEvent(WSEventPong, map[string]any{})
+}
+
+func (c *WSClient) writeJSONEvent(event string, data map[string]any) error {
+	if c == nil {
+		return nil
+	}
+	if c.isClosing() {
+		return nil
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if c.isClosing() {
+		return nil
+	}
+
+	payload := map[string]any{
+		"event": event,
+		"data":  data,
+	}
+	if err := c.conn.WriteJSON(payload); err != nil {
+		return errors.Join(ErrWSClientTransport, err)
+	}
+	return nil
+}
+
 // Close stops the client and closes the underlying websocket connection.
 func (c *WSClient) Close() error {
 	if c == nil {

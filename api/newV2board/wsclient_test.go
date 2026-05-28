@@ -1,6 +1,7 @@
 package newV2board_test
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,51 @@ func TestWSClient_KeepAliveSendsPingControlFrame(t *testing.T) {
 	case <-pingReceived:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for websocket ping")
+	}
+}
+
+func TestWSClient_PongSendsXboardPongEvent(t *testing.T) {
+	t.Parallel()
+
+	messageReceived := make(chan []byte, 1)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read pong message failed: %v", err)
+			return
+		}
+		messageReceived <- data
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	if err := client.Pong(); err != nil {
+		t.Fatalf("Pong returned error: %v", err)
+	}
+
+	select {
+	case data := <-messageReceived:
+		var got struct {
+			Event string         `json:"event"`
+			Data  map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("invalid pong JSON: %v", err)
+		}
+		if got.Event != newV2board.WSEventPong {
+			t.Fatalf("unexpected pong event: got %q want %q", got.Event, newV2board.WSEventPong)
+		}
+		if got.Data == nil || len(got.Data) != 0 {
+			t.Fatalf("unexpected pong data: %#v", got.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for app-level pong message")
 	}
 }
 

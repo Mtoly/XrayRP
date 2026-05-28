@@ -1,6 +1,10 @@
 package controller
 
-import "time"
+import (
+	"time"
+
+	"github.com/Mtoly/XrayRP/api/newV2board"
+)
 
 type syncActionType string
 
@@ -54,29 +58,41 @@ type wsActionDescriptor struct {
 }
 
 var wsControlActionMap = map[string]wsActionDescriptor{
-	"resync_all": {
+	newV2board.WSEventResyncAll: {
 		actionType: syncActionTypeResyncAll,
 		reason:     "websocket requested full resync",
 	},
-	"node_changed": {
+	newV2board.WSEventNodeChanged: {
 		actionType: syncActionTypeSyncNodeConfig,
 		reason:     "websocket node config changed",
 	},
-	"users_changed": {
+	newV2board.WSEventUsersChanged: {
 		actionType: syncActionTypeSyncUsers,
 		reason:     "websocket users changed",
 	},
-	"cert_changed": {
+	newV2board.WSEventCertChanged: {
 		actionType: syncActionTypeSyncCertConfig,
 		reason:     "websocket certificate config changed",
 	},
-	"routes_changed": {
+	newV2board.WSEventRoutesChanged: {
 		actionType: syncActionTypeSyncRoutesAndOutbounds,
 		reason:     "websocket routes or outbounds changed",
 	},
-	"outbounds_changed": {
+	newV2board.WSEventOutboundsChanged: {
 		actionType: syncActionTypeSyncRoutesAndOutbounds,
 		reason:     "websocket routes or outbounds changed",
+	},
+	newV2board.WSEventXboardSyncConfig: {
+		actionType: syncActionTypeSyncNodeConfig,
+		reason:     "websocket node config changed",
+	},
+	newV2board.WSEventXboardSyncUsers: {
+		actionType: syncActionTypeSyncUsers,
+		reason:     "websocket users changed",
+	},
+	newV2board.WSEventXboardSyncUserDelta: {
+		actionType: syncActionTypeSyncUsers,
+		reason:     "websocket user delta changed",
 	},
 }
 

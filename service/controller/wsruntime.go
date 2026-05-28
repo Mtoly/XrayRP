@@ -19,6 +19,10 @@ type wsRuntimeClient interface {
 	Close() error
 }
 
+type wsRuntimePonger interface {
+	Pong() error
+}
+
 type wsRuntimeClientFactory func(context.Context) (wsRuntimeClient, error)
 
 type wsRuntimeLifecycle interface {
@@ -228,7 +232,7 @@ func (r *wsRuntime) consumeClient(ctx context.Context, client wsRuntimeClient) b
 			if !ok {
 				return true
 			}
-			r.handleEvent(event)
+			r.handleEvent(client, event)
 		case err, ok := <-client.Errors():
 			if !ok {
 				return true
@@ -243,8 +247,22 @@ func (r *wsRuntime) consumeClient(ctx context.Context, client wsRuntimeClient) b
 	}
 }
 
-func (r *wsRuntime) handleEvent(event *newV2board.WSEvent) {
+func (r *wsRuntime) handleEvent(client wsRuntimeClient, event *newV2board.WSEvent) {
 	if event == nil {
+		return
+	}
+
+	switch event.Event {
+	case newV2board.WSEventPing:
+		if ponger, ok := client.(wsRuntimePonger); ok {
+			_ = ponger.Pong()
+		}
+		return
+	case newV2board.WSEventPong,
+		newV2board.WSEventXboardAuthSuccess,
+		newV2board.WSEventXboardError,
+		newV2board.WSEventXboardSyncNodes,
+		newV2board.WSEventXboardSyncDevices:
 		return
 	}
 

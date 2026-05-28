@@ -54,6 +54,70 @@ func TestSyncActionFromWSEventMapsCanonicalControlEvents(t *testing.T) {
 	}
 }
 
+func TestSyncActionFromWSEventMapsXboardSyncEvents(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(123, 0)
+	tests := []struct {
+		event      string
+		wantType   syncActionType
+		wantReason string
+	}{
+		{event: newV2board.WSEventXboardSyncConfig, wantType: syncActionTypeSyncNodeConfig, wantReason: "websocket node config changed"},
+		{event: newV2board.WSEventXboardSyncUsers, wantType: syncActionTypeSyncUsers, wantReason: "websocket users changed"},
+		{event: newV2board.WSEventXboardSyncUserDelta, wantType: syncActionTypeSyncUsers, wantReason: "websocket user delta changed"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.event, func(t *testing.T) {
+			t.Parallel()
+
+			action, ok := syncActionFromWSEvent(tt.event, now)
+			if !ok {
+				t.Fatalf("expected event %q to map to a sync action", tt.event)
+			}
+			if action.Type != tt.wantType {
+				t.Fatalf("unexpected action type: got %q want %q", action.Type, tt.wantType)
+			}
+			if action.Source != syncActionSourceWS {
+				t.Fatalf("unexpected action source: got %q want %q", action.Source, syncActionSourceWS)
+			}
+			if action.Metadata.Trigger != tt.event {
+				t.Fatalf("unexpected trigger: got %q want %q", action.Metadata.Trigger, tt.event)
+			}
+			if !action.Metadata.OccurredAt.Equal(now) {
+				t.Fatalf("unexpected occurred at: got %v want %v", action.Metadata.OccurredAt, now)
+			}
+			if action.Metadata.Reason != tt.wantReason {
+				t.Fatalf("unexpected reason: got %q want %q", action.Metadata.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestSyncActionFromWSEventIgnoresNonActionXboardEvents(t *testing.T) {
+	t.Parallel()
+
+	for _, event := range []string{
+		newV2board.WSEventPing,
+		newV2board.WSEventPong,
+		newV2board.WSEventXboardAuthSuccess,
+		newV2board.WSEventXboardError,
+		newV2board.WSEventXboardSyncNodes,
+		newV2board.WSEventXboardSyncDevices,
+	} {
+		event := event
+		t.Run(event, func(t *testing.T) {
+			t.Parallel()
+
+			if action, ok := syncActionFromWSEvent(event, time.Now()); ok {
+				t.Fatalf("expected event %q to be ignored, got %#v", event, action)
+			}
+		})
+	}
+}
+
 func TestSyncActionFromPollingTickMapsToResyncAll(t *testing.T) {
 	t.Parallel()
 

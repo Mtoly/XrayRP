@@ -20,6 +20,9 @@ type stubWSRuntimeClient struct {
 	keepAliveCh    chan struct{}
 	keepAliveCount int
 	keepAliveErr   error
+	pongCh         chan struct{}
+	pongCount      int
+	pongErr        error
 	closeOnce      sync.Once
 }
 
@@ -30,6 +33,7 @@ func newStubWSRuntimeClient() *stubWSRuntimeClient {
 		done:        make(chan struct{}),
 		closed:      make(chan struct{}),
 		keepAliveCh: make(chan struct{}, 16),
+		pongCh:      make(chan struct{}, 16),
 	}
 }
 
@@ -57,6 +61,18 @@ func (c *stubWSRuntimeClient) KeepAlive() error {
 	return c.keepAliveErr
 }
 
+func (c *stubWSRuntimeClient) Pong() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pongCount++
+	select {
+	case c.pongCh <- struct{}{}:
+	default:
+	}
+	return c.pongErr
+}
+
 func (c *stubWSRuntimeClient) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)
@@ -73,11 +89,25 @@ func (c *stubWSRuntimeClient) KeepAliveCount() int {
 	return c.keepAliveCount
 }
 
+func (c *stubWSRuntimeClient) PongCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pongCount
+}
+
 func (c *stubWSRuntimeClient) emitControlEvent(event string) {
 	c.events <- &newV2board.WSEvent{
 		Event:    event,
 		Category: newV2board.WSEventCategoryControl,
 		Payload:  map[string]any{"revision": 1},
+	}
+}
+
+func (c *stubWSRuntimeClient) emitEvent(event string, category newV2board.WSEventCategory) {
+	c.events <- &newV2board.WSEvent{
+		Event:    event,
+		Category: category,
+		Payload:  map[string]any{},
 	}
 }
 
@@ -468,6 +498,93 @@ func TestWSRuntime_CanRestartAfterStop(t *testing.T) {
 
 	runtime.Stop()
 	waitForChannelClosed(t, secondDone)
+}
+
+func TestWSRuntime_RepliesToAppLevelPing(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	client.emitEvent(newV2board.WSEventPing, newV2board.WSEventCategoryStatus)
+
+	select {
+	case <-client.pongCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for app-level pong")
+	}
+	if got := client.PongCount(); got != 1 {
+		t.Fatalf("unexpected pong count: got %d want 1", got)
+	}
+	submitter.ExpectNoAction(t, 50*time.Millisecond)
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_IgnoresXboardNonActionEvents(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	for _, event := range []string{
+		newV2board.WSEventPong,
+		newV2board.WSEventXboardAuthSuccess,
+		newV2board.WSEventXboardError,
+		newV2board.WSEventXboardSyncNodes,
+		newV2board.WSEventXboardSyncDevices,
+	} {
+		client.emitEvent(event, newV2board.WSEventCategoryStatus)
+	}
+
+	submitter.ExpectNoAction(t, 100*time.Millisecond)
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_SubmitsXboardSyncEvents(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	client.emitControlEvent(newV2board.WSEventXboardSyncConfig)
+	action := submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncNodeConfig {
+		t.Fatalf("unexpected sync.config action type: got %q want %q", action.Type, syncActionTypeSyncNodeConfig)
+	}
+
+	client.emitControlEvent(newV2board.WSEventXboardSyncUsers)
+	action = submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncUsers {
+		t.Fatalf("unexpected sync.users action type: got %q want %q", action.Type, syncActionTypeSyncUsers)
+	}
+
+	client.emitControlEvent(newV2board.WSEventXboardSyncUserDelta)
+	action = submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncUsers {
+		t.Fatalf("unexpected sync.user.delta action type: got %q want %q", action.Type, syncActionTypeSyncUsers)
+	}
+
+	runtime.Stop()
 }
 
 func waitForKeepAlive(t *testing.T, client *stubWSRuntimeClient) {
