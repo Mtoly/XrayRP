@@ -37,3 +37,9 @@ type WSConfig struct {
 type WSCapable interface {
 	GetWSConfig() *WSConfig
 }
+
+// WSEndpointDiscoverer is an optional capability for adapters that can discover
+// the panel-provided websocket endpoint dynamically.
+type WSEndpointDiscoverer interface {
+	DiscoverWSEndpoint() (string, error)
+}
