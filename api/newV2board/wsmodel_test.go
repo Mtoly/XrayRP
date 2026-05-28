@@ -84,10 +84,10 @@ func TestParseWSEventRejectsMissingRequiredFields(t *testing.T) {
 		raw  string
 	}{
 		{name: "missing_event", raw: `{"payload":{}}`},
-		{name: "missing_payload", raw: `{"event":"ping"}`},
-		{name: "payload_null", raw: `{"event":"ping","payload":null}`},
-		{name: "payload_array", raw: `{"event":"ping","payload":[]}`},
-		{name: "payload_string", raw: `{"event":"ping","payload":"nope"}`},
+		{name: "missing_payload", raw: `{"event":"node_changed"}`},
+		{name: "payload_null", raw: `{"event":"node_changed","payload":null}`},
+		{name: "payload_array", raw: `{"event":"node_changed","payload":[]}`},
+		{name: "payload_string", raw: `{"event":"node_changed","payload":"nope"}`},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +124,111 @@ func TestParseWSEventRejectsUnsupportedEvent(t *testing.T) {
 			_, err := ParseWSEvent([]byte(tt.raw))
 			if !errors.Is(err, ErrUnsupportedWSEvent) {
 				t.Fatalf("expected ErrUnsupportedWSEvent, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseWSEventAcceptsXboardDataEnvelope(t *testing.T) {
+	t.Parallel()
+
+	event, err := ParseWSEvent([]byte(`{"event":"sync.config","data":{"config":{"server_port":443}}}`))
+	if err != nil {
+		t.Fatalf("ParseWSEvent returned error: %v", err)
+	}
+	if event.Event != WSEventXboardSyncConfig {
+		t.Fatalf("unexpected event: got %q want %q", event.Event, WSEventXboardSyncConfig)
+	}
+	if event.Category != WSEventCategoryControl {
+		t.Fatalf("unexpected category: got %q want %q", event.Category, WSEventCategoryControl)
+	}
+	config, ok := event.Payload["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected config object, got %#v", event.Payload["config"])
+	}
+	if config["server_port"] != float64(443) {
+		t.Fatalf("unexpected config server_port: %#v", config["server_port"])
+	}
+}
+
+func TestParseWSEventPayloadTakesPrecedenceOverData(t *testing.T) {
+	t.Parallel()
+
+	event, err := ParseWSEvent([]byte(`{"event":"sync.users","payload":{"source":"payload"},"data":{"source":"data"}}`))
+	if err != nil {
+		t.Fatalf("ParseWSEvent returned error: %v", err)
+	}
+	if event.Event != WSEventXboardSyncUsers {
+		t.Fatalf("unexpected event: got %q want %q", event.Event, WSEventXboardSyncUsers)
+	}
+	if event.Payload["source"] != "payload" {
+		t.Fatalf("expected payload to win over data, got %#v", event.Payload)
+	}
+}
+
+func TestParseWSEventAllowsEmptyXboardStatusEvents(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		raw       string
+		wantEvent string
+	}{
+		{name: "ping", raw: `{"event":"ping"}`, wantEvent: WSEventPing},
+		{name: "pong", raw: `{"event":"pong"}`, wantEvent: WSEventPong},
+		{name: "auth_success", raw: `{"event":"auth.success"}`, wantEvent: WSEventXboardAuthSuccess},
+		{name: "error", raw: `{"event":"error"}`, wantEvent: WSEventXboardError},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			event, err := ParseWSEvent([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("ParseWSEvent returned error: %v", err)
+			}
+			if event.Event != tt.wantEvent {
+				t.Fatalf("unexpected event: got %q want %q", event.Event, tt.wantEvent)
+			}
+			if event.Payload == nil || len(event.Payload) != 0 {
+				t.Fatalf("expected empty payload map, got %#v", event.Payload)
+			}
+		})
+	}
+}
+
+func TestParseWSEventRecognizesXboardSyncEvents(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		raw          string
+		wantEvent    string
+		wantCategory WSEventCategory
+	}{
+		{name: "sync_config", raw: `{"event":"sync.config","data":{"config":{}}}`, wantEvent: WSEventXboardSyncConfig, wantCategory: WSEventCategoryControl},
+		{name: "sync_users", raw: `{"event":"sync.users","data":{"users":[]}}`, wantEvent: WSEventXboardSyncUsers, wantCategory: WSEventCategoryControl},
+		{name: "sync_user_delta", raw: `{"event":"sync.user.delta","data":{"action":"add","users":[]}}`, wantEvent: WSEventXboardSyncUserDelta, wantCategory: WSEventCategoryControl},
+		{name: "sync_nodes", raw: `{"event":"sync.nodes","data":{"nodes":[]}}`, wantEvent: WSEventXboardSyncNodes, wantCategory: WSEventCategoryConfig},
+		{name: "sync_devices", raw: `{"event":"sync.devices","data":{"users":[]}}`, wantEvent: WSEventXboardSyncDevices, wantCategory: WSEventCategoryConfig},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			event, err := ParseWSEvent([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("ParseWSEvent returned error: %v", err)
+			}
+			if event.Event != tt.wantEvent {
+				t.Fatalf("unexpected event: got %q want %q", event.Event, tt.wantEvent)
+			}
+			if event.Category != tt.wantCategory {
+				t.Fatalf("unexpected category: got %q want %q", event.Category, tt.wantCategory)
 			}
 		})
 	}

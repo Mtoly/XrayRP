@@ -38,10 +38,21 @@ const (
 	WSEventMachineMode      = "machine_mode"
 )
 
+const (
+	WSEventXboardAuthSuccess   = "auth.success"
+	WSEventXboardError         = "error"
+	WSEventXboardSyncConfig    = "sync.config"
+	WSEventXboardSyncUsers     = "sync.users"
+	WSEventXboardSyncUserDelta = "sync.user.delta"
+	WSEventXboardSyncNodes     = "sync.nodes"
+	WSEventXboardSyncDevices   = "sync.devices"
+)
+
 // WSMessageEnvelope is the minimal raw upstream websocket envelope.
 type WSMessageEnvelope struct {
 	Event   string          `json:"event"`
 	Payload json.RawMessage `json:"payload"`
+	Data    json.RawMessage `json:"data"`
 }
 
 // WSEvent is the normalized internal websocket event representation.
@@ -66,14 +77,9 @@ func ParseWSEvent(data []byte) (*WSEvent, error) {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedWSEvent, raw.Event)
 	}
 
-	payloadBytes := bytes.TrimSpace(raw.Payload)
-	if len(payloadBytes) == 0 || payloadBytes[0] != '{' {
-		return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil || payload == nil {
-		return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
+	payload, err := normalizeWSPayload(raw, raw.Event)
+	if err != nil {
+		return nil, err
 	}
 
 	return &WSEvent{
@@ -83,6 +89,51 @@ func ParseWSEvent(data []byte) (*WSEvent, error) {
 	}, nil
 }
 
+func normalizeWSPayload(raw WSMessageEnvelope, event string) (map[string]any, error) {
+	if payload, ok, err := decodeWSPayloadObject(raw.Payload); err != nil {
+		return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
+	} else if ok {
+		return payload, nil
+	}
+
+	if payload, ok, err := decodeWSPayloadObject(raw.Data); err != nil {
+		return nil, fmt.Errorf("%w: data", ErrWSEventMissingField)
+	} else if ok {
+		return payload, nil
+	}
+
+	if allowsEmptyWSPayload(event) {
+		return map[string]any{}, nil
+	}
+
+	return nil, fmt.Errorf("%w: payload", ErrWSEventMissingField)
+}
+
+func decodeWSPayloadObject(raw json.RawMessage) (map[string]any, bool, error) {
+	payloadBytes := bytes.TrimSpace(raw)
+	if len(payloadBytes) == 0 || string(payloadBytes) == "null" {
+		return nil, false, nil
+	}
+	if payloadBytes[0] != '{' {
+		return nil, false, ErrWSEventMissingField
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil || payload == nil {
+		return nil, false, ErrWSEventMissingField
+	}
+	return payload, true, nil
+}
+
+func allowsEmptyWSPayload(event string) bool {
+	switch event {
+	case WSEventPing, WSEventPong, WSEventXboardAuthSuccess, WSEventXboardError:
+		return true
+	default:
+		return false
+	}
+}
+
 func classifyWSEvent(event string) (WSEventCategory, bool) {
 	switch event {
 	case WSEventResyncAll,
@@ -90,16 +141,21 @@ func classifyWSEvent(event string) (WSEventCategory, bool) {
 		WSEventUsersChanged,
 		WSEventCertChanged,
 		WSEventRoutesChanged,
-		WSEventOutboundsChanged:
+		WSEventOutboundsChanged,
+		WSEventXboardSyncConfig,
+		WSEventXboardSyncUsers,
+		WSEventXboardSyncUserDelta:
 		return WSEventCategoryControl, true
-	case WSEventPing, WSEventPong:
+	case WSEventPing, WSEventPong, WSEventXboardAuthSuccess, WSEventXboardError:
 		return WSEventCategoryStatus, true
 	case WSEventNodeConfig,
 		WSEventUsersPayload,
 		WSEventRoutesPayload,
 		WSEventOutboundsPayload,
 		WSEventCertPayload,
-		WSEventMachineMode:
+		WSEventMachineMode,
+		WSEventXboardSyncNodes,
+		WSEventXboardSyncDevices:
 		return WSEventCategoryConfig, true
 	default:
 		return "", false
