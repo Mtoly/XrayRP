@@ -24,6 +24,39 @@ Not claimed as complete in this version:
 
 Complex runtime objects still use REST snapshots as the authoritative apply source. WebSocket events are treated as triggers to resync, not as trusted complete replacements for node, user, route, or certificate state.
 
+## Current Xboard WebSocket compatibility
+
+XrayRP supports the current Xboard WebSocket control-plane envelope:
+
+- legacy: `{"event":"node_changed","payload":{...}}`
+- current Xboard: `{"event":"sync.config","data":{...}}`
+
+Handled events:
+
+- `sync.config` triggers node config sync through the existing REST UniProxy snapshot path.
+- `sync.users` triggers user list sync through the existing REST UniProxy user path.
+- `sync.user.delta` currently triggers full user sync; XrayRP intentionally does not directly apply the delta payload in phase 1.
+- `ping` receives an app-level `pong` response.
+- `auth.success` and `error` are accepted and ignored by the sync pipeline.
+- `sync.nodes` and `sync.devices` are accepted by the parser but are not applied in phase 1.
+
+WebSocket endpoint resolution order:
+
+1. `ControllerConfig.WebSocketConfig.Endpoint`, if configured.
+2. Xboard `/api/v2/server/handshake` `websocket.ws_url`, when enabled.
+3. Legacy `<ApiHost>/api/v1/server/UniProxy/ws` fallback.
+
+The REST UniProxy snapshot remains the authoritative source for runtime apply. WebSocket payloads are used as change notifications only.
+
+Follow-up items not covered by this phase:
+
+- machine mode;
+- `/api/v2/server/report`;
+- device WebSocket state application;
+- Trojan REALITY;
+- outbound safe regex filters;
+- uTLS/xmux advanced field completion.
+
 ## WebSocket + Polling dual-active sync
 
 Enable WebSocket sync per node in `release/config/config.yml.example` style config:
@@ -41,7 +74,7 @@ ControllerConfig:
 Field notes:
 
 - `Enable`: enables the websocket control-plane path for adapters that expose websocket capability. If disabled, the node remains polling-only.
-- `Endpoint`: optional override. If empty, the runtime resolves it from `ApiHost` as `<ApiHost>/api/v1/server/UniProxy/ws`.
+- `Endpoint`: optional override. If empty, the runtime resolves the endpoint from Xboard `/api/v2/server/handshake` when available, then falls back to `<ApiHost>/api/v1/server/UniProxy/ws`.
 - `HeartbeatInterval`: websocket keepalive interval in seconds. Set to `0` to disable runtime keepalive ticks.
 - `ReconnectBackoff`: reconnect delay in seconds after websocket failure.
 - `ResyncOnReconnect`: when true, submit a full resync after the websocket reconnects.
