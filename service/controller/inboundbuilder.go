@@ -379,21 +379,43 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 
 	// Build TLS and REALITY settings
 	var isREALITY bool
-	// Prefer panel-provided REALITY settings; do not fall back to config.yml keys.
-	if nodeInfo.REALITYConfig != nil && nodeInfo.EnableREALITY {
-		r := nodeInfo.REALITYConfig
-		if r.Dest != "" && r.PrivateKey != "" {
-			isREALITY = true
-			streamSetting.Security = "reality"
-			streamSetting.REALITYSettings = &conf.REALITYConfig{
-				Dest:         []byte(`"` + r.Dest + `"`),
-				Xver:         r.ProxyProtocolVer,
-				ServerNames:  r.ServerNames,
-				PrivateKey:   r.PrivateKey,
-				MinClientVer: r.MinClientVer,
-				MaxClientVer: r.MaxClientVer,
-				MaxTimeDiff:  r.MaxTimeDiff,
-				ShortIds:     r.ShortIds,
+	// Prefer panel-provided REALITY settings, but fall back to config.yml when
+	// the panel marks the node as REALITY without sending full REALITY opts.
+	if nodeInfo.EnableREALITY {
+		if nodeInfo.REALITYConfig != nil {
+			r := nodeInfo.REALITYConfig
+			if r.Dest != "" && r.PrivateKey != "" {
+				isREALITY = true
+				streamSetting.Security = "reality"
+				streamSetting.REALITYSettings = &conf.REALITYConfig{
+					Dest:         []byte(`"` + r.Dest + `"`),
+					Xver:         r.ProxyProtocolVer,
+					ServerNames:  r.ServerNames,
+					PrivateKey:   r.PrivateKey,
+					MinClientVer: r.MinClientVer,
+					MaxClientVer: r.MaxClientVer,
+					MaxTimeDiff:  r.MaxTimeDiff,
+					ShortIds:     r.ShortIds,
+				}
+			}
+		}
+
+		if !isREALITY && !config.DisableLocalREALITYConfig && config.EnableREALITY && config.REALITYConfigs != nil {
+			r := config.REALITYConfigs
+			if r.Dest != "" && r.PrivateKey != "" {
+				isREALITY = true
+				streamSetting.Security = "reality"
+				streamSetting.REALITYSettings = &conf.REALITYConfig{
+					Show:         r.Show,
+					Dest:         []byte(`"` + r.Dest + `"`),
+					Xver:         r.ProxyProtocolVer,
+					ServerNames:  r.ServerNames,
+					PrivateKey:   r.PrivateKey,
+					MinClientVer: r.MinClientVer,
+					MaxClientVer: r.MaxClientVer,
+					MaxTimeDiff:  r.MaxTimeDiff,
+					ShortIds:     r.ShortIds,
+				}
 			}
 		}
 	}
