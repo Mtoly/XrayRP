@@ -3,6 +3,9 @@ package controller_test
 import (
 	"testing"
 
+	"github.com/xtls/xray-core/app/proxyman"
+	xrayreality "github.com/xtls/xray-core/transport/internet/reality"
+
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	. "github.com/Mtoly/XrayRP/service/controller"
@@ -95,5 +98,55 @@ func TestBuildSS(t *testing.T) {
 	_, err := InboundBuilder(config, nodeInfo, "test_tag")
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+func TestInboundBuilderFallsBackToLocalREALITYConfigWhenPanelOmitsRealityOpts(t *testing.T) {
+	const privateKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	nodeInfo := &api.NodeInfo{
+		NodeType:          "V2ray",
+		NodeID:            1,
+		Port:              1145,
+		TransportProtocol: "tcp",
+		EnableVless:       true,
+		EnableREALITY:     true,
+		REALITYConfig:     &api.REALITYConfig{},
+	}
+	config := &Config{
+		EnableREALITY:             true,
+		DisableLocalREALITYConfig: false,
+		REALITYConfigs: &REALITYConfig{
+			Dest:             "example.com:443",
+			ProxyProtocolVer: 1,
+			ServerNames:      []string{"example.com"},
+			PrivateKey:       privateKey,
+			ShortIds:         []string{"abcd"},
+		},
+	}
+
+	inbound, err := InboundBuilder(config, nodeInfo, "test_tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	receiver, err := inbound.ReceiverSettings.GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamSettings := receiver.(*proxyman.ReceiverConfig).StreamSettings
+	if streamSettings.SecurityType != "xray.transport.internet.reality.Config" {
+		t.Fatalf("expected REALITY security, got %q", streamSettings.SecurityType)
+	}
+	securitySettings, err := streamSettings.SecuritySettings[0].GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	realityConfig := securitySettings.(*xrayreality.Config)
+	if realityConfig.Dest != "example.com:443" {
+		t.Fatalf("expected local REALITY dest, got %q", realityConfig.Dest)
+	}
+	if realityConfig.Xver != 1 {
+		t.Fatalf("expected local REALITY xver 1, got %d", realityConfig.Xver)
 	}
 }
