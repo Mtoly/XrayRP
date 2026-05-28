@@ -152,7 +152,7 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 	if wsConfig == nil {
 		return nil, errors.New("controller: websocket config unavailable")
 	}
-	endpoint, err := buildWSEndpoint(wsConfig, c.config.WebSocketConfig)
+	endpoint, err := resolveWSEndpoint(c.apiClient, wsConfig, c.config.WebSocketConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +165,25 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 		return newV2board.NewWSClient(endpoint)
 	}
 	return newWSRuntime(factory, submitter, options), nil
+}
+
+func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.Endpoint) != "" {
+		return buildWSEndpoint(wsConfig, runtimeConfig)
+	}
+
+	if discoverer, ok := apiClient.(api.WSEndpointDiscoverer); ok {
+		if endpoint, err := discoverer.DiscoverWSEndpoint(); err == nil && strings.TrimSpace(endpoint) != "" {
+			derived := WebSocketConfig{}
+			if runtimeConfig != nil {
+				derived = *runtimeConfig
+			}
+			derived.Endpoint = endpoint
+			return buildWSEndpoint(wsConfig, &derived)
+		}
+	}
+
+	return buildWSEndpoint(wsConfig, runtimeConfig)
 }
 
 func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
