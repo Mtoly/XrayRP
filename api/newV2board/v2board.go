@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -24,18 +23,19 @@ import (
 
 // APIClient create an api client to the panel.
 type APIClient struct {
-	client        *resty.Client
-	APIHost       string
-	NodeID        int
-	Key           string
-	NodeType      string
-	EnableVless   bool
-	VlessFlow     string
-	SpeedLimit    float64
-	DeviceLimit   int
-	LocalRuleList []api.DetectRule
-	resp          atomic.Value
-	eTags         map[string]string
+	client                  *resty.Client
+	APIHost                 string
+	NodeID                  int
+	Key                     string
+	NodeType                string
+	EnableVless             bool
+	VlessFlow               string
+	SpeedLimit              float64
+	DeviceLimit             int
+	LocalRuleList           []api.DetectRule
+	resp                    atomic.Value
+	eTags                   map[string]string
+	xboardReportUnsupported atomic.Bool
 }
 
 // New create an api instance
@@ -307,25 +307,6 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 	return aliveData, nil
 }
 
-// ReportUserTraffic reports the user traffic
-func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
-	path := "/api/v1/server/UniProxy/push"
-
-	// json structure: {uid1: [u, d], uid2: [u, d], uid1: [u, d], uid3: [u, d]}
-	data := make(map[int][]int64, len(*userTraffic))
-	for _, traffic := range *userTraffic {
-		data[traffic.UID] = []int64{traffic.Upload, traffic.Download}
-	}
-
-	res, err := c.client.R().SetBody(data).ForceContentType("application/json").Post(path)
-	_, err = c.parseResponse(res, path, err)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 	snapshot, ok := c.cachedUniProxySnapshot()
@@ -333,80 +314,6 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before GetNodeRule")
 	}
 	return rulesFromUniProxySnapshot(snapshot, c.LocalRuleList)
-}
-
-// ReportNodeStatus implements the API interface
-func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
-	path := "/api/v1/server/UniProxy/status"
-
-	memUsed := int(math.Round(nodeStatus.Mem))
-	diskUsed := int(math.Round(nodeStatus.Disk))
-	if memUsed < 0 {
-		memUsed = 0
-	}
-	if diskUsed < 0 {
-		diskUsed = 0
-	}
-	if memUsed > 100 {
-		memUsed = 100
-	}
-	if diskUsed > 100 {
-		diskUsed = 100
-	}
-
-	payload := map[string]any{
-		"cpu": nodeStatus.CPU,
-		"mem": map[string]int{
-			"total": 100,
-			"used":  memUsed,
-		},
-		"swap": map[string]int{
-			"total": 0,
-			"used":  0,
-		},
-		"disk": map[string]int{
-			"total": 100,
-			"used":  diskUsed,
-		},
-	}
-
-	res, err := c.client.R().
-		SetBody(payload).
-		ForceContentType("application/json").
-		Post(path)
-
-	_, err = c.parseResponse(res, path, err)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// ReportNodeOnlineUsers implements the API interface
-func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
-	path := "/api/v1/server/UniProxy/alive"
-
-	data := make(map[int][]string)
-	for _, user := range *onlineUserList {
-		if user.UID == 0 || user.IP == "" {
-			continue
-		}
-		ipNode := fmt.Sprintf("%s_%d", user.IP, c.NodeID)
-		data[user.UID] = append(data[user.UID], ipNode)
-	}
-
-	res, err := c.client.R().
-		SetBody(data).
-		ForceContentType("application/json").
-		Post(path)
-
-	_, err = c.parseResponse(res, path, err)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // ReportIllegal implements the API interface
