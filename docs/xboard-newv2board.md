@@ -12,6 +12,7 @@ Currently covered backend-facing areas:
 - Route/outbound policy compatibility for the Xboard UniProxy config shape.
 - Panel-provided certificate config (`cert_config`) where available.
 - WebSocket + Polling dual-active control-plane skeleton.
+- `/api/v2/server/report` compatibility for status, online-user, and traffic reports with legacy UniProxy fallback.
 - Polling fallback for final consistency.
 
 Not claimed as complete in this version:
@@ -48,10 +49,19 @@ WebSocket endpoint resolution order:
 
 The REST UniProxy snapshot remains the authoritative source for runtime apply. WebSocket payloads are used as change notifications only.
 
+## Xboard `/api/v2/server/report` compatibility
+
+XrayRP attempts the Xboard `/api/v2/server/report` endpoint for NewV2board node status, online-user, and user-traffic reports. If the endpoint is clearly unsupported by the panel, the adapter falls back to the legacy UniProxy report endpoints:
+
+- `/api/v1/server/UniProxy/status`
+- `/api/v1/server/UniProxy/alive`
+- `/api/v1/server/UniProxy/push`
+
+The fallback is only for unsupported endpoint responses. Authentication failures, server errors, malformed successful responses, and transport failures are returned as errors so real panel problems are not hidden.
+
 Follow-up items not covered by this phase:
 
 - machine mode;
-- `/api/v2/server/report`;
 - device WebSocket state application;
 - Trojan REALITY;
 - outbound safe regex filters;
