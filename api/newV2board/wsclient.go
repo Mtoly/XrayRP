@@ -2,6 +2,7 @@ package newV2board
 
 import (
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 
@@ -85,6 +86,15 @@ func (c *WSClient) KeepAlive() error {
 // Pong sends an Xboard app-level pong event.
 func (c *WSClient) Pong() error {
 	return c.writeJSONEvent(WSEventPong, map[string]any{})
+}
+
+// SendDeviceReport sends the current online device snapshot to Xboard.
+func (c *WSClient) SendDeviceReport(devices map[int][]string) error {
+	payload := make(map[string]any, len(devices))
+	for uid, ips := range devices {
+		payload[strconv.Itoa(uid)] = append([]string(nil), ips...)
+	}
+	return c.writeJSONEvent(WSEventXboardReportDevices, payload)
 }
 
 func (c *WSClient) writeJSONEvent(event string, data map[string]any) error {

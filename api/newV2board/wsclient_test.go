@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +153,59 @@ func TestWSClient_PongSendsXboardPongEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for app-level pong message")
+	}
+}
+
+func TestWSClient_SendDeviceReportSendsXboardReportDevicesEvent(t *testing.T) {
+	t.Parallel()
+
+	messageReceived := make(chan []byte, 1)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read device report message failed: %v", err)
+			return
+		}
+		messageReceived <- data
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	devices := map[int][]string{
+		2: []string{"203.0.113.2"},
+		1: []string{"192.0.2.1", "198.51.100.1"},
+	}
+	if err := client.SendDeviceReport(devices); err != nil {
+		t.Fatalf("SendDeviceReport returned error: %v", err)
+	}
+
+	select {
+	case data := <-messageReceived:
+		var got struct {
+			Event string              `json:"event"`
+			Data  map[string][]string `json:"data"`
+		}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("invalid device report JSON: %v", err)
+		}
+		if got.Event != newV2board.WSEventXboardReportDevices {
+			t.Fatalf("unexpected device report event: got %q want %q", got.Event, newV2board.WSEventXboardReportDevices)
+		}
+		want := map[string][]string{
+			"1": []string{"192.0.2.1", "198.51.100.1"},
+			"2": []string{"203.0.113.2"},
+		}
+		if !reflect.DeepEqual(got.Data, want) {
+			t.Fatalf("unexpected device report data: got %#v want %#v", got.Data, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for device report message")
 	}
 }
 

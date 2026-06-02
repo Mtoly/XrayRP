@@ -46,6 +46,7 @@ const (
 	WSEventXboardSyncUserDelta = "sync.user.delta"
 	WSEventXboardSyncNodes     = "sync.nodes"
 	WSEventXboardSyncDevices   = "sync.devices"
+	WSEventXboardReportDevices = "report.devices"
 )
 
 // WSMessageEnvelope is the minimal raw upstream websocket envelope.
