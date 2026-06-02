@@ -46,6 +46,29 @@ func newUserOnlineEntry() *userOnlineEntry {
 	return &userOnlineEntry{}
 }
 
+func (e *userOnlineEntry) hasIP(ip string) bool {
+	_, loaded := e.ips.Load(ip)
+	return loaded
+}
+
+func (e *userOnlineEntry) touchIP(ip string, uid int) {
+	now := time.Now().Unix()
+	if _, loaded := e.ips.LoadOrStore(ip, connIP{UID: uid, LastSeen: now}); !loaded {
+		atomic.AddInt32(&e.count, 1)
+		return
+	}
+	e.ips.Store(ip, connIP{UID: uid, LastSeen: now})
+}
+
+func (e *userOnlineEntry) snapshotIPs() []string {
+	ips := make([]string, 0, atomic.LoadInt32(&e.count))
+	e.ips.Range(func(key, value interface{}) bool {
+		ips = append(ips, key.(string))
+		return true
+	})
+	return ips
+}
+
 // addIP records an IP for this user. Returns false (reject) if device limit exceeded.
 func (e *userOnlineEntry) addIP(ip string, uid int, deviceLimit int) (reject bool) {
 	now := time.Now().Unix()
@@ -99,6 +122,7 @@ type InboundInfo struct {
 	UserInfo       *sync.Map // Key: user tag (buildUserTag) -> UserInfo
 	BucketHub      *sync.Map // Key: user tag -> *rate.Limiter
 	UserOnlineIP   *sync.Map // Key: user tag -> *userOnlineEntry
+	GlobalDevices  *globalDeviceState
 	GlobalLimit    struct {
 		config         *GlobalDeviceLimitConfig
 		globalOnlineIP *marshaler.Marshaler
@@ -122,6 +146,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 		NodeSpeedLimit: nodeSpeedLimit,
 		BucketHub:      new(sync.Map),
 		UserOnlineIP:   new(sync.Map),
+		GlobalDevices:  newGlobalDeviceState(),
 	}
 
 	if globalLimit != nil && globalLimit.Enable {
@@ -195,6 +220,29 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
 	l.InboundInfo.Delete(tag)
 	return nil
+}
+
+func (l *Limiter) UpdateGlobalDevices(tag string, devices map[int][]string) error {
+	if value, ok := l.InboundInfo.Load(tag); ok {
+		inboundInfo := value.(*InboundInfo)
+		if inboundInfo.GlobalDevices == nil {
+			inboundInfo.GlobalDevices = newGlobalDeviceState()
+		}
+		inboundInfo.GlobalDevices.Replace(devices)
+		return nil
+	}
+	return fmt.Errorf("no such inbound in limiter: %s", tag)
+}
+
+func (l *Limiter) ClearGlobalDevices(tag string) error {
+	if value, ok := l.InboundInfo.Load(tag); ok {
+		inboundInfo := value.(*InboundInfo)
+		if inboundInfo.GlobalDevices != nil {
+			inboundInfo.GlobalDevices.Clear()
+		}
+		return nil
+	}
+	return fmt.Errorf("no such inbound in limiter: %s", tag)
 }
 
 // ipTTL is the time-to-live for online IP entries. IPs not seen within this
@@ -305,13 +353,23 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 			deviceLimit = u.DeviceLimit
 		}
 
-		// Local device limit — O(1) via atomic counter instead of O(N) Range()
 		entry := newUserOnlineEntry()
 		if v, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
 			entry = v.(*userOnlineEntry)
 		}
-		if entry.addIP(ip, uid, deviceLimit) {
-			return nil, false, true // device limit exceeded
+		if entry.hasIP(ip) {
+			entry.touchIP(ip, uid)
+		} else {
+			localIPs := entry.snapshotIPs()
+			usedFreshGlobal := inboundInfo.GlobalDevices != nil && inboundInfo.GlobalDevices.Fresh()
+			if usedFreshGlobal {
+				if inboundInfo.GlobalDevices.ShouldReject(uid, ip, deviceLimit, localIPs) {
+					return nil, false, true
+				}
+				entry.touchIP(ip, uid)
+			} else if entry.addIP(ip, uid, deviceLimit) {
+				return nil, false, true
+			}
 		}
 
 		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
