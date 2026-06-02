@@ -145,7 +145,11 @@ func firstSortedIPsWithRequired(ips map[string]struct{}, requiredIP string, limi
 	if limit <= 0 {
 		return nil
 	}
-	admitted := make(map[string]struct{}, limit)
+	capacity := len(ips)
+	if capacity > limit {
+		capacity = limit
+	}
+	admitted := make(map[string]struct{}, capacity)
 	admitted[requiredIP] = struct{}{}
 	if limit == 1 {
 		return admitted
