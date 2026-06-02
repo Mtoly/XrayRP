@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -287,9 +288,19 @@ func TestWSRuntime_ReconnectsWithBackoffAndResyncsAllOnRecovery(t *testing.T) {
 
 	firstClient.failTransport()
 
+	clearAction := submitter.WaitAction(t)
+	if clearAction.Type != syncActionTypeClearGlobalDevices {
+		t.Fatalf("unexpected disconnect action type: got %q want %q", clearAction.Type, syncActionTypeClearGlobalDevices)
+	}
+	if clearAction.Source != syncActionSourceReconnect {
+		t.Fatalf("unexpected disconnect action source: got %q want %q", clearAction.Source, syncActionSourceReconnect)
+	}
+	if clearAction.Metadata.Trigger != syncActionTriggerWSDisconnect {
+		t.Fatalf("unexpected disconnect trigger: got %q want %q", clearAction.Metadata.Trigger, syncActionTriggerWSDisconnect)
+	}
+
 	waitForWSRuntimeBackoff(t, backoffCalled, 25*time.Millisecond)
 	waitForWSRuntimeDegradedState(t, runtime, true)
-	submitter.ExpectNoAction(t, 50*time.Millisecond)
 
 	close(releaseBackoff)
 
@@ -350,8 +361,17 @@ func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSub
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
 	client.emitParseError()
+	parseAction := submitter.WaitAction(t)
+	if parseAction.Type != syncActionTypeResyncAll {
+		t.Fatalf("unexpected parse-error action type: got %q want %q", parseAction.Type, syncActionTypeResyncAll)
+	}
+	if parseAction.Source != syncActionSourceWS {
+		t.Fatalf("unexpected parse-error action source: got %q want %q", parseAction.Source, syncActionSourceWS)
+	}
+	if parseAction.Metadata.Trigger != syncActionTriggerWSParseError {
+		t.Fatalf("unexpected parse-error trigger: got %q want %q", parseAction.Metadata.Trigger, syncActionTriggerWSParseError)
+	}
 	waitForWSRuntimeDegradedState(t, runtime, false)
-	submitter.ExpectNoAction(t, 50*time.Millisecond)
 	expectNoWSRuntimeBackoff(t, backoffCalled, 50*time.Millisecond)
 	expectNoWSRuntimeAttempt(t, factory, 2, 50*time.Millisecond)
 
@@ -543,8 +563,6 @@ func TestWSRuntime_IgnoresXboardNonActionEvents(t *testing.T) {
 		newV2board.WSEventPong,
 		newV2board.WSEventXboardAuthSuccess,
 		newV2board.WSEventXboardError,
-		newV2board.WSEventXboardSyncNodes,
-		newV2board.WSEventXboardSyncDevices,
 	} {
 		client.emitEvent(event, newV2board.WSEventCategoryStatus)
 	}
@@ -582,6 +600,52 @@ func TestWSRuntime_SubmitsXboardSyncEvents(t *testing.T) {
 	action = submitter.WaitAction(t)
 	if action.Type != syncActionTypeSyncUsers {
 		t.Fatalf("unexpected sync.user.delta action type: got %q want %q", action.Type, syncActionTypeSyncUsers)
+	}
+
+	client.emitControlEvent(newV2board.WSEventXboardSyncNodes)
+	action = submitter.WaitAction(t)
+	if action.Type != syncActionTypeResyncAll {
+		t.Fatalf("unexpected sync.nodes action type: got %q want %q", action.Type, syncActionTypeResyncAll)
+	}
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_SubmitsSyncDevicesAction(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeDegradedState(t, runtime, false)
+
+	client.events <- &newV2board.WSEvent{
+		Event:    newV2board.WSEventXboardSyncDevices,
+		Category: newV2board.WSEventCategoryConfig,
+		Payload: map[string]any{
+			"users": map[string]any{
+				"1": []any{"192.0.2.1"},
+			},
+		},
+	}
+
+	action := submitter.WaitAction(t)
+	if action.Type != syncActionTypeSyncDevices {
+		t.Fatalf("unexpected sync.devices action type: got %q want %q", action.Type, syncActionTypeSyncDevices)
+	}
+	if action.Source != syncActionSourceWS {
+		t.Fatalf("unexpected sync.devices source: got %q want %q", action.Source, syncActionSourceWS)
+	}
+	if action.Metadata.Trigger != newV2board.WSEventXboardSyncDevices {
+		t.Fatalf("unexpected sync.devices trigger: got %q", action.Metadata.Trigger)
+	}
+	wantDevices := map[int][]string{1: {"192.0.2.1"}}
+	if !reflect.DeepEqual(action.Payload.Devices, wantDevices) {
+		t.Fatalf("unexpected sync.devices payload: got %#v want %#v", action.Payload.Devices, wantDevices)
 	}
 
 	runtime.Stop()

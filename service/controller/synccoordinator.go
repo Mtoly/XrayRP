@@ -64,15 +64,17 @@ func (c *syncCoordinator) Submit(action syncAction) {
 	case c.inflight != nil && c.inflight.Type == syncActionTypeResyncAll:
 		if action.Type == syncActionTypeResyncAll {
 			c.dirty[syncActionTypeResyncAll] = action
-		} else {
+		} else if syncActionCoveredByResyncAll(action.Type) {
 			c.dirty[syncActionTypeResyncAll] = *c.inflight
+		} else {
+			c.dirty[action.Type] = action
 		}
 	case action.Type == syncActionTypeResyncAll:
 		c.replacePendingWithResyncAllLocked(action)
 	case c.inflight != nil && c.inflight.Type == action.Type:
 		c.dirty[action.Type] = action
-	case c.hasPendingResyncAllLocked():
-		// A queued full resync already covers narrower actions.
+	case c.hasPendingResyncAllLocked() && syncActionCoveredByResyncAll(action.Type):
+		// A queued full resync already covers narrower REST-backed actions.
 	default:
 		c.enqueueOrReplaceLocked(action)
 	}
@@ -181,33 +183,45 @@ func (c *syncCoordinator) enqueueOrReplaceLocked(action syncAction) {
 }
 
 func (c *syncCoordinator) replacePendingWithResyncAllLocked(action syncAction) {
-	existing, ok := c.pending[syncActionTypeResyncAll]
-	c.pending = make(map[syncActionType]queuedSyncAction, 1)
-	if ok {
+	preserved := make(map[syncActionType]queuedSyncAction, len(c.pending)+1)
+	for actionType, pendingAction := range c.pending {
+		if !syncActionCoveredByResyncAll(actionType) {
+			preserved[actionType] = pendingAction
+		}
+	}
+
+	if existing, ok := c.pending[syncActionTypeResyncAll]; ok {
 		existing.action = action
-		c.pending[syncActionTypeResyncAll] = existing
+		preserved[syncActionTypeResyncAll] = existing
+		c.pending = preserved
 		return
 	}
 
 	c.nextSeq++
-	c.pending[syncActionTypeResyncAll] = queuedSyncAction{
+	preserved[syncActionTypeResyncAll] = queuedSyncAction{
 		action: action,
 		seq:    c.nextSeq,
 	}
+	c.pending = preserved
 }
 
 func (c *syncCoordinator) requeueDirtyLocked(finished syncAction) {
+	if finished.Type == syncActionTypeResyncAll {
+		c.requeueAllDirtyLocked()
+		return
+	}
+
 	dirtyAction, ok := c.dirty[finished.Type]
 	delete(c.dirty, finished.Type)
 	if !ok {
 		return
 	}
 
-	if finished.Type != syncActionTypeResyncAll && c.hasPendingResyncAllLocked() {
+	if c.hasPendingResyncAllLocked() && syncActionCoveredByResyncAll(dirtyAction.Type) {
 		return
 	}
 
-	if finished.Type == syncActionTypeResyncAll {
+	if dirtyAction.Type == syncActionTypeResyncAll {
 		c.replacePendingWithResyncAllLocked(dirtyAction)
 		return
 	}
@@ -215,7 +229,39 @@ func (c *syncCoordinator) requeueDirtyLocked(finished syncAction) {
 	c.enqueueOrReplaceLocked(dirtyAction)
 }
 
+func (c *syncCoordinator) requeueAllDirtyLocked() {
+	if len(c.dirty) == 0 {
+		return
+	}
+
+	dirtyActions := make([]syncAction, 0, len(c.dirty))
+	for actionType, dirtyAction := range c.dirty {
+		dirtyActions = append(dirtyActions, dirtyAction)
+		delete(c.dirty, actionType)
+	}
+
+	for _, dirtyAction := range dirtyActions {
+		if c.hasPendingResyncAllLocked() && syncActionCoveredByResyncAll(dirtyAction.Type) {
+			continue
+		}
+		if dirtyAction.Type == syncActionTypeResyncAll {
+			c.replacePendingWithResyncAllLocked(dirtyAction)
+			continue
+		}
+		c.enqueueOrReplaceLocked(dirtyAction)
+	}
+}
+
 func (c *syncCoordinator) hasPendingResyncAllLocked() bool {
 	_, ok := c.pending[syncActionTypeResyncAll]
 	return ok
+}
+
+func syncActionCoveredByResyncAll(actionType syncActionType) bool {
+	switch actionType {
+	case syncActionTypeSyncDevices, syncActionTypeClearGlobalDevices:
+		return false
+	default:
+		return true
+	}
 }
