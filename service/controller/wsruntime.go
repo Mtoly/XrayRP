@@ -185,6 +185,7 @@ func (r *wsRuntime) run(ctx context.Context, done chan struct{}) {
 			return
 		}
 
+		r.submitter.Submit(syncActionFromWSDisconnect(time.Now()))
 		r.setDegraded(true)
 		needsResyncOnConnect = true
 		if !r.sleep(ctx, r.reconnectBackoff) {
@@ -237,7 +238,7 @@ func (r *wsRuntime) consumeClient(ctx context.Context, client wsRuntimeClient) b
 			if !ok {
 				return true
 			}
-			if r.shouldContinueAfterError(err) {
+			if r.handleError(err) {
 				continue
 			}
 			return true
@@ -260,13 +261,11 @@ func (r *wsRuntime) handleEvent(client wsRuntimeClient, event *newV2board.WSEven
 		return
 	case newV2board.WSEventPong,
 		newV2board.WSEventXboardAuthSuccess,
-		newV2board.WSEventXboardError,
-		newV2board.WSEventXboardSyncNodes,
-		newV2board.WSEventXboardSyncDevices:
+		newV2board.WSEventXboardError:
 		return
 	}
 
-	action, ok := syncActionFromWSEvent(event.Event, time.Now())
+	action, ok := syncActionFromWSEventPayload(event, time.Now())
 	if !ok {
 		return
 	}
@@ -274,12 +273,15 @@ func (r *wsRuntime) handleEvent(client wsRuntimeClient, event *newV2board.WSEven
 	r.submitter.Submit(action)
 }
 
-func (r *wsRuntime) shouldContinueAfterError(err error) bool {
+func (r *wsRuntime) handleError(err error) bool {
 	if err == nil {
 		return true
 	}
-
-	return errors.Is(err, newV2board.ErrWSClientParse)
+	if errors.Is(err, newV2board.ErrWSClientParse) {
+		r.submitter.Submit(syncActionFromWSParseError(time.Now()))
+		return true
+	}
+	return false
 }
 
 func (r *wsRuntime) submitReconnectResync() {

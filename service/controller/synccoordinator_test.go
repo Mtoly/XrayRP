@@ -214,6 +214,82 @@ func TestSyncCoordinator_ResyncAllOverridesPendingPartialActions(t *testing.T) {
 	stopCoordinator(t, coordinator)
 }
 
+func TestSyncCoordinator_PendingResyncDoesNotDropSyncDevices(t *testing.T) {
+	executor := newCoordinatorTestExecutor()
+	releaseFirst := executor.blockCall(1)
+	releaseSecond := executor.blockCall(2)
+	coordinator := newSyncCoordinator(executor)
+
+	coordinator.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceManual, syncActionMetadata{}))
+	waitForCoordinatorAction(t, executor.started, syncActionTypeResyncAll)
+
+	coordinator.Submit(newSyncAction(syncActionTypeSyncDevices, syncActionSourceWS, syncActionMetadata{}))
+
+	close(releaseFirst)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncDevices)
+	close(releaseSecond)
+	waitForCoordinatorIdle(t, coordinator)
+
+	got := executor.Calls()
+	want := []syncActionType{syncActionTypeResyncAll, syncActionTypeSyncDevices}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected execution order: got %v want %v", got, want)
+	}
+	stopCoordinator(t, coordinator)
+}
+
+func TestSyncCoordinator_PendingResyncDoesNotDropClearGlobalDevices(t *testing.T) {
+	executor := newCoordinatorTestExecutor()
+	releaseFirst := executor.blockCall(1)
+	releaseSecond := executor.blockCall(2)
+	coordinator := newSyncCoordinator(executor)
+
+	coordinator.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceManual, syncActionMetadata{}))
+	waitForCoordinatorAction(t, executor.started, syncActionTypeResyncAll)
+
+	coordinator.Submit(newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{}))
+
+	close(releaseFirst)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeClearGlobalDevices)
+	close(releaseSecond)
+	waitForCoordinatorIdle(t, coordinator)
+
+	got := executor.Calls()
+	want := []syncActionType{syncActionTypeResyncAll, syncActionTypeClearGlobalDevices}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected execution order: got %v want %v", got, want)
+	}
+	stopCoordinator(t, coordinator)
+}
+
+func TestSyncCoordinator_ResyncAllReplacementPreservesDeviceActions(t *testing.T) {
+	executor := newCoordinatorTestExecutor()
+	releaseFirst := executor.blockCall(1)
+	releaseSecond := executor.blockCall(2)
+	releaseThird := executor.blockCall(3)
+	coordinator := newSyncCoordinator(executor)
+
+	coordinator.Submit(newSyncAction(syncActionTypeSyncAliveState, syncActionSourceManual, syncActionMetadata{}))
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncAliveState)
+
+	coordinator.Submit(newSyncAction(syncActionTypeSyncDevices, syncActionSourceWS, syncActionMetadata{}))
+	coordinator.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{}))
+
+	close(releaseFirst)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeResyncAll)
+	close(releaseSecond)
+	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncDevices)
+	close(releaseThird)
+	waitForCoordinatorIdle(t, coordinator)
+
+	got := executor.Calls()
+	want := []syncActionType{syncActionTypeSyncAliveState, syncActionTypeResyncAll, syncActionTypeSyncDevices}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected execution order: got %v want %v", got, want)
+	}
+	stopCoordinator(t, coordinator)
+}
+
 func TestSyncCoordinator_DirtyDoesNotRunConcurrentDuplicateActions(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	releaseFirst := executor.blockCall(1)

@@ -291,19 +291,27 @@ func TestDualActive_ParseErrorDoesNotKillWSChannel(t *testing.T) {
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
 	client.emitParseError()
-	time.Sleep(50 * time.Millisecond)
+	waitForAppliedSnapshots(t, recorder, 1)
+	waitForCoordinatorIdle(t, coordinator)
 	if runtime.Degraded() {
 		t.Fatal("expected parse error isolation to keep websocket runtime healthy")
 	}
+	parseSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected parse-error resync snapshot")
+	}
+	if parseSnapshot.Action.Source != syncActionSourceWS || parseSnapshot.Action.Type != syncActionTypeResyncAll || parseSnapshot.Action.Metadata.Trigger != syncActionTriggerWSParseError {
+		t.Fatalf("expected parse error to submit ws ResyncAll, got source=%q type=%q trigger=%q", parseSnapshot.Action.Source, parseSnapshot.Action.Type, parseSnapshot.Action.Metadata.Trigger)
+	}
 
 	client.emitControlEvent(newV2board.WSEventUsersChanged)
-	waitForAppliedSnapshots(t, recorder, 1)
+	waitForAppliedSnapshots(t, recorder, 2)
 	waitForCoordinatorIdle(t, coordinator)
 
-	if recorder.appliedSnapshotCount() != 1 {
-		t.Fatalf("expected subsequent websocket event to still be applied, got %d snapshots", recorder.appliedSnapshotCount())
+	if recorder.appliedSnapshotCount() != 2 {
+		t.Fatalf("expected parse-error resync and subsequent websocket event, got %d snapshots", recorder.appliedSnapshotCount())
 	}
-	wsSnapshot, ok := recorder.appliedSnapshotAt(0)
+	wsSnapshot, ok := recorder.appliedSnapshotAt(1)
 	if !ok {
 		t.Fatal("expected websocket snapshot after parse error")
 	}
@@ -352,17 +360,26 @@ func TestDualActive_ReconnectForcesResyncAll(t *testing.T) {
 	firstClient.failTransport()
 	waitForWSRuntimeBackoff(t, backoffCalled, 25*time.Millisecond)
 	waitForWSRuntimeDegradedState(t, runtime, true)
+	waitForAppliedSnapshots(t, recorder, 1)
+	disconnectSnapshot, ok := recorder.appliedSnapshotAt(0)
+	if !ok {
+		t.Fatal("expected disconnect clear snapshot")
+	}
+	if disconnectSnapshot.Action.Source != syncActionSourceReconnect || disconnectSnapshot.Action.Type != syncActionTypeClearGlobalDevices || disconnectSnapshot.Action.Metadata.Trigger != syncActionTriggerWSDisconnect {
+		t.Fatalf("expected disconnect to clear global devices, got source=%q type=%q trigger=%q", disconnectSnapshot.Action.Source, disconnectSnapshot.Action.Type, disconnectSnapshot.Action.Metadata.Trigger)
+	}
+
 	close(releaseBackoff)
 
 	waitForWSRuntimeAttempt(t, factory, 2)
 	waitForWSRuntimeDegradedState(t, runtime, false)
-	waitForAppliedSnapshots(t, recorder, 1)
+	waitForAppliedSnapshots(t, recorder, 2)
 	waitForCoordinatorIdle(t, coordinator)
 
-	if recorder.appliedSnapshotCount() != 1 {
-		t.Fatalf("expected reconnect recovery to apply one resync snapshot, got %d", recorder.appliedSnapshotCount())
+	if recorder.appliedSnapshotCount() != 2 {
+		t.Fatalf("expected disconnect clear and reconnect recovery snapshots, got %d", recorder.appliedSnapshotCount())
 	}
-	reconnectSnapshot, ok := recorder.appliedSnapshotAt(0)
+	reconnectSnapshot, ok := recorder.appliedSnapshotAt(1)
 	if !ok {
 		t.Fatal("expected reconnect snapshot")
 	}
