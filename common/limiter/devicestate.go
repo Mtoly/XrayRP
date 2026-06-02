@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,9 +33,15 @@ func (s *globalDeviceState) Replace(devices map[int][]string) {
 	for uid, ips := range devices {
 		ipSet := make(map[string]struct{}, len(ips))
 		for _, ip := range ips {
-			ipSet[ip] = struct{}{}
+			trimmed := strings.TrimSpace(ip)
+			if trimmed == "" {
+				continue
+			}
+			ipSet[trimmed] = struct{}{}
 		}
-		copied[uid] = ipSet
+		if len(ipSet) > 0 {
+			copied[uid] = ipSet
+		}
 	}
 
 	s.mu.Lock()
@@ -65,46 +72,103 @@ func (s *globalDeviceState) Fresh() bool {
 }
 
 func (s *globalDeviceState) ShouldReject(uid int, candidateIP string, deviceLimit int, localIPs []string) bool {
-	if s == nil || deviceLimit <= 0 {
-		return false
+	reject, _, _ := s.admissionDecisionFresh(uid, candidateIP, deviceLimit, localIPs)
+	return reject
+}
+
+func (s *globalDeviceState) ShouldRejectFresh(uid int, candidateIP string, deviceLimit int, localIPs []string) (reject bool, fresh bool) {
+	reject, fresh, _ = s.admissionDecisionFresh(uid, candidateIP, deviceLimit, localIPs)
+	return reject, fresh
+}
+
+func (s *globalDeviceState) admissionDecisionFresh(uid int, candidateIP string, deviceLimit int, localIPs []string) (reject bool, fresh bool, admitted map[string]struct{}) {
+	if s == nil {
+		return false, false, nil
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.freshAtLocked(s.currentTime()) {
-		return false
+		return false, false, nil
 	}
 
-	combined := make(map[string]struct{}, len(localIPs)+1)
-	if globalIPs, ok := s.devices[uid]; ok {
-		for ip := range globalIPs {
-			combined[ip] = struct{}{}
-		}
+	if deviceLimit <= 0 {
+		return false, true, nil
+	}
+
+	globalIPs := s.devices[uid]
+	candidateKnownGlobally := false
+	if _, ok := globalIPs[candidateIP]; ok {
+		candidateKnownGlobally = true
+	}
+
+	combined := make(map[string]struct{}, len(globalIPs)+len(localIPs)+1)
+	for ip := range globalIPs {
+		combined[ip] = struct{}{}
 	}
 	for _, ip := range localIPs {
 		combined[ip] = struct{}{}
 	}
 	combined[candidateIP] = struct{}{}
 
-	if len(combined) <= deviceLimit {
-		return false
+	if candidateKnownGlobally {
+		return false, true, firstSortedIPsWithRequired(combined, candidateIP, deviceLimit)
 	}
 
-	ips := make([]string, 0, len(combined))
-	for ip := range combined {
-		ips = append(ips, ip)
+	admitted = firstSortedIPs(combined, deviceLimit)
+	if _, ok := admitted[candidateIP]; ok {
+		return false, true, admitted
 	}
-	sort.Strings(ips)
+	return true, true, admitted
+}
 
-	for idx, ip := range ips {
-		if idx >= deviceLimit {
+func firstSortedIPs(ips map[string]struct{}, limit int) map[string]struct{} {
+	if limit <= 0 {
+		return nil
+	}
+	sorted := make([]string, 0, len(ips))
+	for ip := range ips {
+		sorted = append(sorted, ip)
+	}
+	sort.Strings(sorted)
+	if len(sorted) > limit {
+		sorted = sorted[:limit]
+	}
+	admitted := make(map[string]struct{}, len(sorted))
+	for _, ip := range sorted {
+		admitted[ip] = struct{}{}
+	}
+	return admitted
+}
+
+func firstSortedIPsWithRequired(ips map[string]struct{}, requiredIP string, limit int) map[string]struct{} {
+	if limit <= 0 {
+		return nil
+	}
+	capacity := len(ips)
+	if capacity > limit {
+		capacity = limit
+	}
+	admitted := make(map[string]struct{}, capacity)
+	admitted[requiredIP] = struct{}{}
+	if limit == 1 {
+		return admitted
+	}
+
+	sorted := make([]string, 0, len(ips))
+	for ip := range ips {
+		if ip != requiredIP {
+			sorted = append(sorted, ip)
+		}
+	}
+	sort.Strings(sorted)
+	for _, ip := range sorted {
+		if len(admitted) >= limit {
 			break
 		}
-		if ip == candidateIP {
-			return false
-		}
+		admitted[ip] = struct{}{}
 	}
-	return true
+	return admitted
 }
 
 func (s *globalDeviceState) currentTime() time.Time {

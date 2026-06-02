@@ -38,6 +38,7 @@ type connIP struct {
 // userOnlineEntry stores per-user IP tracking with an atomic device counter
 // to avoid O(N) Range() for device counting.
 type userOnlineEntry struct {
+	mu    sync.Mutex
 	ips   sync.Map // Key: IP string -> connIP
 	count int32    // atomic device count — avoids Range() for counting
 }
@@ -61,12 +62,60 @@ func (e *userOnlineEntry) touchIP(ip string, uid int) {
 }
 
 func (e *userOnlineEntry) snapshotIPs() []string {
-	ips := make([]string, 0, atomic.LoadInt32(&e.count))
+	capacity := atomic.LoadInt32(&e.count)
+	if capacity < 0 {
+		capacity = 0
+	}
+	ips := make([]string, 0, capacity)
 	e.ips.Range(func(key, value interface{}) bool {
 		ips = append(ips, key.(string))
 		return true
 	})
 	return ips
+}
+
+func (e *userOnlineEntry) deleteIP(key interface{}) bool {
+	if _, loaded := e.ips.LoadAndDelete(key); loaded {
+		atomic.AddInt32(&e.count, -1)
+		return true
+	}
+	return false
+}
+
+func (e *userOnlineEntry) pruneToAdmitted(admitted map[string]struct{}) {
+	if admitted == nil {
+		return
+	}
+	e.ips.Range(func(key, value interface{}) bool {
+		ip := key.(string)
+		if _, ok := admitted[ip]; !ok {
+			e.deleteIP(key)
+		}
+		return true
+	})
+}
+
+func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDevices *globalDeviceState) (reject bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.hasIP(ip) {
+		e.touchIP(ip, uid)
+		return false
+	}
+
+	localIPs := e.snapshotIPs()
+	reject, usedFreshGlobal, admitted := globalDevices.admissionDecisionFresh(uid, ip, deviceLimit, localIPs)
+	if usedFreshGlobal {
+		if reject {
+			return true
+		}
+		e.pruneToAdmitted(admitted)
+		e.touchIP(ip, uid)
+		return false
+	}
+
+	return e.addIP(ip, uid, deviceLimit)
 }
 
 // addIP records an IP for this user. Returns false (reject) if device limit exceeded.
@@ -95,12 +144,22 @@ func (e *userOnlineEntry) addIP(ip string, uid int, deviceLimit int) (reject boo
 
 // cleanStale removes IPs not seen within ttl and returns remaining count.
 func (e *userOnlineEntry) cleanStale(ttl int64) int32 {
+	return e.cleanStaleAndCollect(ttl, nil)
+}
+
+func (e *userOnlineEntry) cleanStaleAndCollect(ttl int64, out *[]api.OnlineUser) int32 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	now := time.Now().Unix()
 	e.ips.Range(func(key, value interface{}) bool {
 		entry := value.(connIP)
 		if now-entry.LastSeen > ttl {
-			e.ips.Delete(key)
-			atomic.AddInt32(&e.count, -1)
+			e.deleteIP(key)
+			return true
+		}
+		if out != nil {
+			*out = append(*out, api.OnlineUser{UID: entry.UID, IP: key.(string)})
 		}
 		return true
 	})
@@ -109,6 +168,9 @@ func (e *userOnlineEntry) cleanStale(ttl int64) int32 {
 
 // collectOnline gathers all online user records efficiently.
 func (e *userOnlineEntry) collectOnline(out *[]api.OnlineUser) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.ips.Range(func(key, value interface{}) bool {
 		entry := value.(connIP)
 		*out = append(*out, api.OnlineUser{UID: entry.UID, IP: key.(string)})
@@ -226,7 +288,7 @@ func (l *Limiter) UpdateGlobalDevices(tag string, devices map[int][]string) erro
 	if value, ok := l.InboundInfo.Load(tag); ok {
 		inboundInfo := value.(*InboundInfo)
 		if inboundInfo.GlobalDevices == nil {
-			inboundInfo.GlobalDevices = newGlobalDeviceState()
+			return fmt.Errorf("global device state is not initialized for inbound: %s", tag)
 		}
 		inboundInfo.GlobalDevices.Replace(devices)
 		return nil
@@ -258,15 +320,15 @@ func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 		// Single pass: collect online IPs and clean stale entries
 		inboundInfo.UserOnlineIP.Range(func(userKey, value interface{}) bool {
 			entry := value.(*userOnlineEntry)
-			// Clean stale IPs (not seen within TTL)
-			remaining := entry.cleanStale(ipTTL)
+			// Clean stale IPs (not seen within TTL) and collect the fresh snapshot
+			// while holding the per-user entry lock, so pruning/admission cannot
+			// race the count bookkeeping.
+			remaining := entry.cleanStaleAndCollect(ipTTL, &onlineUser)
 			if remaining == 0 {
 				// No IPs left — remove the entry and its rate bucket
 				inboundInfo.UserOnlineIP.Delete(userKey)
 				inboundInfo.BucketHub.Delete(userKey)
-				return true
 			}
-			entry.collectOnline(&onlineUser)
 			return true
 		})
 
@@ -310,23 +372,23 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 					return true // Skip if UID is not a valid integer
 				}
 
+				entry.mu.Lock()
 				// Remove IPs not in panel list
 				entry.ips.Range(func(ip, val interface{}) bool {
 					ipStr := ip.(string)
 					if !panelIPs[uidStr][ipStr] {
-						entry.ips.Delete(ip)
-						atomic.AddInt32(&entry.count, -1)
+						entry.deleteIP(ip)
 					}
 					return true
 				})
 
 				// Add IPs from panel that are missing locally
 				for ip := range panelIPs[uidStr] {
-					if _, exists := entry.ips.Load(ip); !exists {
-						entry.ips.Store(ip, connIP{UID: uidInt, LastSeen: now})
+					if _, loaded := entry.ips.LoadOrStore(ip, connIP{UID: uidInt, LastSeen: now}); !loaded {
 						atomic.AddInt32(&entry.count, 1)
 					}
 				}
+				entry.mu.Unlock()
 			}
 			return true
 		})
@@ -357,19 +419,8 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 		if v, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
 			entry = v.(*userOnlineEntry)
 		}
-		if entry.hasIP(ip) {
-			entry.touchIP(ip, uid)
-		} else {
-			localIPs := entry.snapshotIPs()
-			usedFreshGlobal := inboundInfo.GlobalDevices != nil && inboundInfo.GlobalDevices.Fresh()
-			if usedFreshGlobal {
-				if inboundInfo.GlobalDevices.ShouldReject(uid, ip, deviceLimit, localIPs) {
-					return nil, false, true
-				}
-				entry.touchIP(ip, uid)
-			} else if entry.addIP(ip, uid, deviceLimit) {
-				return nil, false, true
-			}
+		if entry.admitIP(ip, uid, deviceLimit, inboundInfo.GlobalDevices) {
+			return nil, false, true
 		}
 
 		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
