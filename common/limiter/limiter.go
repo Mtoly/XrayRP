@@ -38,6 +38,7 @@ type connIP struct {
 // userOnlineEntry stores per-user IP tracking with an atomic device counter
 // to avoid O(N) Range() for device counting.
 type userOnlineEntry struct {
+	mu    sync.Mutex
 	ips   sync.Map // Key: IP string -> connIP
 	count int32    // atomic device count — avoids Range() for counting
 }
@@ -61,12 +62,54 @@ func (e *userOnlineEntry) touchIP(ip string, uid int) {
 }
 
 func (e *userOnlineEntry) snapshotIPs() []string {
-	ips := make([]string, 0, atomic.LoadInt32(&e.count))
+	capacity := atomic.LoadInt32(&e.count)
+	if capacity < 0 {
+		capacity = 0
+	}
+	ips := make([]string, 0, capacity)
 	e.ips.Range(func(key, value interface{}) bool {
 		ips = append(ips, key.(string))
 		return true
 	})
 	return ips
+}
+
+func (e *userOnlineEntry) pruneToAdmitted(admitted map[string]struct{}) {
+	if admitted == nil {
+		return
+	}
+	e.ips.Range(func(key, value interface{}) bool {
+		ip := key.(string)
+		if _, ok := admitted[ip]; !ok {
+			if _, loaded := e.ips.LoadAndDelete(key); loaded {
+				atomic.AddInt32(&e.count, -1)
+			}
+		}
+		return true
+	})
+}
+
+func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDevices *globalDeviceState) (reject bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.hasIP(ip) {
+		e.touchIP(ip, uid)
+		return false
+	}
+
+	localIPs := e.snapshotIPs()
+	reject, usedFreshGlobal, admitted := globalDevices.admissionDecisionFresh(uid, ip, deviceLimit, localIPs)
+	if usedFreshGlobal {
+		if reject {
+			return true
+		}
+		e.pruneToAdmitted(admitted)
+		e.touchIP(ip, uid)
+		return false
+	}
+
+	return e.addIP(ip, uid, deviceLimit)
 }
 
 // addIP records an IP for this user. Returns false (reject) if device limit exceeded.
@@ -226,7 +269,7 @@ func (l *Limiter) UpdateGlobalDevices(tag string, devices map[int][]string) erro
 	if value, ok := l.InboundInfo.Load(tag); ok {
 		inboundInfo := value.(*InboundInfo)
 		if inboundInfo.GlobalDevices == nil {
-			inboundInfo.GlobalDevices = newGlobalDeviceState()
+			return fmt.Errorf("global device state is not initialized for inbound: %s", tag)
 		}
 		inboundInfo.GlobalDevices.Replace(devices)
 		return nil
@@ -357,19 +400,8 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 		if v, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
 			entry = v.(*userOnlineEntry)
 		}
-		if entry.hasIP(ip) {
-			entry.touchIP(ip, uid)
-		} else {
-			localIPs := entry.snapshotIPs()
-			usedFreshGlobal := inboundInfo.GlobalDevices != nil && inboundInfo.GlobalDevices.Fresh()
-			if usedFreshGlobal {
-				if inboundInfo.GlobalDevices.ShouldReject(uid, ip, deviceLimit, localIPs) {
-					return nil, false, true
-				}
-				entry.touchIP(ip, uid)
-			} else if entry.addIP(ip, uid, deviceLimit) {
-				return nil, false, true
-			}
+		if entry.admitIP(ip, uid, deviceLimit, inboundInfo.GlobalDevices) {
+			return nil, false, true
 		}
 
 		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
