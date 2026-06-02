@@ -11,6 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/app/mydispatcher"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
@@ -65,28 +67,33 @@ func (f *fakeSyncApplyAPI) ReportIllegal(*[]api.DetectResult) error { return nil
 func (f *fakeSyncApplyAPI) Debug()                                  {}
 
 type syncApplyRecorder struct {
-	appliedSnapshotsMu  sync.Mutex
-	appliedSnapshots    []syncApplySnapshot
-	removedTags         []string
-	addedTags           []string
-	addedNodeInfos      []*api.NodeInfo
-	addUserCalls        int
-	addLimiterCalls     int
-	deleteLimiterCalls  int
-	updateLimiterCalls  int
-	rebuildInboundCalls int
-	removedUsers        [][]string
-	updateRuleCalls     int
-	lastRuleTag         string
-	lastRules           []api.DetectRule
-	appliedCertConfigs  []*api.XrayRCertConfig
-	addTagErr           error
-	addTagErrAtCall     int
-	addTagCalls         int
-	activeRuntimes      map[string]*api.NodeInfo
-	activeLimiterTags   map[string]bool
-	removedInboundTags  []string
-	removedOutboundTags []string
+	appliedSnapshotsMu       sync.Mutex
+	appliedSnapshots         []syncApplySnapshot
+	removedTags              []string
+	addedTags                []string
+	addedNodeInfos           []*api.NodeInfo
+	addUserCalls             int
+	addLimiterCalls          int
+	deleteLimiterCalls       int
+	updateLimiterCalls       int
+	updateGlobalDevicesCalls int
+	clearGlobalDevicesCalls  int
+	rebuildInboundCalls      int
+	removedUsers             [][]string
+	updateRuleCalls          int
+	lastRuleTag              string
+	lastRules                []api.DetectRule
+	updatedGlobalDeviceTags  []string
+	updatedGlobalDevices     []map[int][]string
+	clearedGlobalDeviceTags  []string
+	appliedCertConfigs       []*api.XrayRCertConfig
+	addTagErr                error
+	addTagErrAtCall          int
+	addTagCalls              int
+	activeRuntimes           map[string]*api.NodeInfo
+	activeLimiterTags        map[string]bool
+	removedInboundTags       []string
+	removedOutboundTags      []string
 }
 
 func (r *syncApplyRecorder) recordAppliedSnapshot(snapshot syncApplySnapshot) {
@@ -181,6 +188,17 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 			recorder.activeLimiterTags[tag] = true
 			return nil
 		},
+		updateGlobalDevices: func(tag string, devices map[int][]string) error {
+			recorder.updateGlobalDevicesCalls++
+			recorder.updatedGlobalDeviceTags = append(recorder.updatedGlobalDeviceTags, tag)
+			recorder.updatedGlobalDevices = append(recorder.updatedGlobalDevices, cloneRecordedGlobalDevices(devices))
+			return nil
+		},
+		clearGlobalDevices: func(tag string) error {
+			recorder.clearGlobalDevicesCalls++
+			recorder.clearedGlobalDeviceTags = append(recorder.clearedGlobalDeviceTags, tag)
+			return nil
+		},
 		rebuildInboundWithUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error {
 			recorder.rebuildInboundCalls++
 			return nil
@@ -234,6 +252,17 @@ func cloneRecordedNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
 		cloned.RoutePolicy = &routePolicy
 	}
 	return &cloned
+}
+
+func cloneRecordedGlobalDevices(devices map[int][]string) map[int][]string {
+	if devices == nil {
+		return nil
+	}
+	cloned := make(map[int][]string, len(devices))
+	for uid, ips := range devices {
+		cloned[uid] = append([]string(nil), ips...)
+	}
+	return cloned
 }
 
 func TestSyncApply_WSTriggeredFetchUsesUnifiedApplyPipeline(t *testing.T) {
@@ -579,6 +608,99 @@ func TestSyncApply_WSComplexObjectsUseRestSnapshot(t *testing.T) {
 	}
 	if len(recorder.lastRules) != 1 || recorder.lastRules[0].Pattern.String() != "rest.example" {
 		t.Fatalf("expected REST rule snapshot to drive apply pipeline, got %#v", recorder.lastRules)
+	}
+}
+
+func TestSyncApply_SyncDevicesUpdatesGlobalDeviceState(t *testing.T) {
+	fakeAPI := &fakeSyncApplyAPI{}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	action := newSyncAction(syncActionTypeSyncDevices, syncActionSourceWS, syncActionMetadata{Trigger: newV2board.WSEventXboardSyncDevices})
+	action.Payload.Devices = map[int][]string{1: []string{"192.0.2.1"}}
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction: %v", err)
+	}
+	if recorder.updateGlobalDevicesCalls != 1 {
+		t.Fatalf("update calls=%d", recorder.updateGlobalDevicesCalls)
+	}
+	if recorder.updatedGlobalDeviceTags[0] != tag {
+		t.Fatalf("bad update tag: got %q want %q", recorder.updatedGlobalDeviceTags[0], tag)
+	}
+	if recorder.updatedGlobalDevices[0][1][0] != "192.0.2.1" {
+		t.Fatalf("bad devices: %#v", recorder.updatedGlobalDevices)
+	}
+	if fakeAPI.getNodeInfoCalls != 0 || fakeAPI.getUserListCalls != 0 {
+		t.Fatalf("unexpected REST calls")
+	}
+}
+
+func TestSyncApply_ClearGlobalDevicesClearsWithoutRestFetch(t *testing.T) {
+	fakeAPI := &fakeSyncApplyAPI{}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	action := newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{Trigger: "ws_disconnect"})
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction: %v", err)
+	}
+	if recorder.clearGlobalDevicesCalls != 1 {
+		t.Fatalf("clear calls=%d", recorder.clearGlobalDevicesCalls)
+	}
+	if recorder.clearedGlobalDeviceTags[0] != tag {
+		t.Fatalf("bad clear tag: got %q want %q", recorder.clearedGlobalDeviceTags[0], tag)
+	}
+	if fakeAPI.getNodeInfoCalls != 0 || fakeAPI.getUserListCalls != 0 {
+		t.Fatalf("unexpected REST calls")
+	}
+}
+
+func TestSyncApply_GlobalDeviceActionsNoopWithoutCurrentTag(t *testing.T) {
+	fakeAPI := &fakeSyncApplyAPI{}
+	controller, recorder := newTestSyncApplyController(fakeAPI)
+
+	action := newSyncAction(syncActionTypeSyncDevices, syncActionSourceWS, syncActionMetadata{Trigger: newV2board.WSEventXboardSyncDevices})
+	action.Payload.Devices = map[int][]string{1: []string{"192.0.2.1"}}
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction sync devices without current tag: %v", err)
+	}
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{Trigger: "ws_disconnect"})); err != nil {
+		t.Fatalf("ExecuteSyncAction clear without current tag: %v", err)
+	}
+	if recorder.updateGlobalDevicesCalls != 0 || recorder.clearGlobalDevicesCalls != 0 {
+		t.Fatalf("expected no limiter hooks without current tag, got update=%d clear=%d", recorder.updateGlobalDevicesCalls, recorder.clearGlobalDevicesCalls)
+	}
+	if fakeAPI.getNodeInfoCalls != 0 || fakeAPI.getUserListCalls != 0 {
+		t.Fatalf("unexpected REST calls")
+	}
+}
+
+func TestSyncApply_GlobalDeviceActionsNoopWithoutRuntimeLimiter(t *testing.T) {
+	fakeAPI := &fakeSyncApplyAPI{}
+	controller, _ := newTestSyncApplyController(fakeAPI)
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	controller.setNodeState(node, controller.buildNodeTagFrom(node))
+	controller.syncApplyHooks = syncApplyHooks{}
+
+	action := newSyncAction(syncActionTypeSyncDevices, syncActionSourceWS, syncActionMetadata{Trigger: newV2board.WSEventXboardSyncDevices})
+	action.Payload.Devices = map[int][]string{1: []string{"192.0.2.1"}}
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction sync devices without dispatcher: %v", err)
+	}
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{Trigger: "ws_disconnect"})); err != nil {
+		t.Fatalf("ExecuteSyncAction clear without dispatcher: %v", err)
+	}
+	controller.dispatcher = &mydispatcher.DefaultDispatcher{}
+	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
+		t.Fatalf("ExecuteSyncAction sync devices without limiter: %v", err)
+	}
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{Trigger: "ws_disconnect"})); err != nil {
+		t.Fatalf("ExecuteSyncAction clear without limiter: %v", err)
+	}
+	if fakeAPI.getNodeInfoCalls != 0 || fakeAPI.getUserListCalls != 0 {
+		t.Fatalf("unexpected REST calls")
 	}
 }
 

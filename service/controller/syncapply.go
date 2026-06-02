@@ -31,6 +31,8 @@ type syncApplyHooks struct {
 	addInboundLimiter       func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
 	deleteInboundLimiter    func(string) error
 	updateInboundLimiter    func(string, *[]api.UserInfo) error
+	updateGlobalDevices     func(string, map[int][]string) error
+	clearGlobalDevices      func(string) error
 	rebuildInboundWithUsers func(*[]api.UserInfo, *api.NodeInfo, string) error
 	removeUsers             func([]string, string) error
 	updateRule              func(string, []api.DetectRule) error
@@ -72,6 +74,8 @@ func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapsho
 		fetchRules = true
 		fetchCert = true
 	case syncActionTypeSyncAliveState:
+		return snapshot, nil
+	case syncActionTypeSyncDevices, syncActionTypeClearGlobalDevices:
 		return snapshot, nil
 	default:
 		fetchNode = true
@@ -141,6 +145,29 @@ func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapsho
 func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	hooks := c.resolveSyncApplyHooks()
 	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
+
+	switch snapshot.Action.Type {
+	case syncActionTypeSyncDevices:
+		if currentTag != "" {
+			if err := hooks.updateGlobalDevices(currentTag, snapshot.Action.Payload.Devices); err != nil {
+				return err
+			}
+		}
+		if hooks.onSnapshotApplied != nil {
+			hooks.onSnapshotApplied(snapshot)
+		}
+		return nil
+	case syncActionTypeClearGlobalDevices:
+		if currentTag != "" {
+			if err := hooks.clearGlobalDevices(currentTag); err != nil {
+				return err
+			}
+		}
+		if hooks.onSnapshotApplied != nil {
+			hooks.onSnapshotApplied(snapshot)
+		}
+		return nil
+	}
 
 	nodeChanged := false
 	if snapshot.NodeInfo != nil {
@@ -386,6 +413,20 @@ func (c *Controller) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig, ho
 	return nil
 }
 
+func (c *Controller) updateLimiterGlobalDevices(tag string, devices map[int][]string) error {
+	if c == nil || c.dispatcher == nil || c.dispatcher.Limiter == nil {
+		return nil
+	}
+	return c.dispatcher.Limiter.UpdateGlobalDevices(tag, devices)
+}
+
+func (c *Controller) clearLimiterGlobalDevices(tag string) error {
+	if c == nil || c.dispatcher == nil || c.dispatcher.Limiter == nil {
+		return nil
+	}
+	return c.dispatcher.Limiter.ClearGlobalDevices(tag)
+}
+
 func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	hooks := c.syncApplyHooks
 	if hooks.removeOldTag == nil {
@@ -411,6 +452,12 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	}
 	if hooks.updateInboundLimiter == nil {
 		hooks.updateInboundLimiter = c.UpdateInboundLimiter
+	}
+	if hooks.updateGlobalDevices == nil {
+		hooks.updateGlobalDevices = c.updateLimiterGlobalDevices
+	}
+	if hooks.clearGlobalDevices == nil {
+		hooks.clearGlobalDevices = c.clearLimiterGlobalDevices
 	}
 	if hooks.rebuildInboundWithUsers == nil {
 		hooks.rebuildInboundWithUsers = c.rebuildInboundWithUsers
