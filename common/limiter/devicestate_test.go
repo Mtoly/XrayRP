@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"golang.org/x/time/rate"
 )
 
 func TestGlobalDeviceStateRejectsThirdIPWhenFresh(t *testing.T) {
@@ -322,5 +323,109 @@ func TestLimiterFallsBackToLocalAdmissionWhenGlobalStateIsCleared(t *testing.T) 
 
 	if _, _, rejected := l.GetUserBucket("inbound", userKey, "198.51.100.1"); !rejected {
 		t.Fatal("expected cleared global state to fall back to local-only admission and reject at local limit")
+	}
+}
+
+func TestLimiterSnapshotRestoreInboundLimiterState(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{
+		UID:         1,
+		Email:       "u@example.com",
+		SpeedLimit:  100,
+		DeviceLimit: 1,
+	}}
+	if err := l.AddInboundLimiter("tag", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter failed: %v", err)
+	}
+
+	userKey := "tag|u@example.com|1"
+	if bucket, speedLimited, rejected := l.GetUserBucket("tag", userKey, "192.0.2.1"); rejected || !speedLimited || bucket == nil {
+		t.Fatalf("expected initial user bucket, speedLimited=%v rejected=%v bucket=%v", speedLimited, rejected, bucket)
+	}
+
+	value, ok := l.InboundInfo.Load("tag")
+	if !ok {
+		t.Fatal("expected inbound to exist")
+	}
+	originalInboundInfo := value.(*InboundInfo)
+	originalUserInfo := originalInboundInfo.UserInfo
+	originalBucketHub := originalInboundInfo.BucketHub
+	originalUserOnlineIP := originalInboundInfo.UserOnlineIP
+	originalGlobalDevices := originalInboundInfo.GlobalDevices
+	originalGlobalLimit := originalInboundInfo.GlobalLimit
+
+	if err := l.UpdateGlobalDevices("tag", map[int][]string{1: []string{"203.0.113.7"}}); err != nil {
+		t.Fatalf("UpdateGlobalDevices failed: %v", err)
+	}
+	if !originalGlobalDevices.ShouldReject(1, "203.0.113.8", 1, nil) {
+		t.Fatal("expected global device state to reject a second IP before restore")
+	}
+
+	snapshot, err := l.SnapshotInboundLimiterState("tag")
+	if err != nil {
+		t.Fatalf("SnapshotInboundLimiterState failed: %v", err)
+	}
+
+	updatedUsers := []api.UserInfo{{
+		UID:         1,
+		Email:       "u@example.com",
+		SpeedLimit:  200,
+		DeviceLimit: 2,
+	}}
+	if err := l.UpdateInboundLimiter("tag", &updatedUsers); err != nil {
+		t.Fatalf("UpdateInboundLimiter failed: %v", err)
+	}
+
+	if err := l.RestoreInboundLimiterState("tag", snapshot); err != nil {
+		t.Fatalf("RestoreInboundLimiterState failed: %v", err)
+	}
+
+	value, ok = l.InboundInfo.Load("tag")
+	if !ok {
+		t.Fatal("expected inbound to exist")
+	}
+	inboundInfo := value.(*InboundInfo)
+	if inboundInfo == originalInboundInfo {
+		t.Fatal("expected restore to publish a replacement inbound info")
+	}
+	if inboundInfo.UserInfo == originalUserInfo {
+		t.Fatal("expected restore to replace UserInfo with a fresh map")
+	}
+	if inboundInfo.BucketHub == originalBucketHub {
+		t.Fatal("expected restore to replace BucketHub with a fresh map")
+	}
+	if inboundInfo.UserOnlineIP != originalUserOnlineIP {
+		t.Fatal("expected restore to preserve UserOnlineIP state")
+	}
+	if inboundInfo.GlobalDevices != originalGlobalDevices {
+		t.Fatal("expected restore to preserve GlobalDevices state")
+	}
+	if inboundInfo.GlobalLimit != originalGlobalLimit {
+		t.Fatal("expected restore to preserve GlobalLimit state")
+	}
+	entryValue, ok := inboundInfo.UserOnlineIP.Load(userKey)
+	if !ok || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
+		t.Fatal("expected restore to preserve existing online IP state")
+	}
+	if !inboundInfo.GlobalDevices.ShouldReject(1, "203.0.113.8", 1, nil) {
+		t.Fatal("expected restore to preserve global device state")
+	}
+
+	restoredValue, ok := inboundInfo.UserInfo.Load(userKey)
+	if !ok {
+		t.Fatalf("expected restored user info for key %s", userKey)
+	}
+	restored := restoredValue.(UserInfo)
+	if restored.SpeedLimit != 100 || restored.DeviceLimit != 1 {
+		t.Fatalf("restored user info = %#v, want SpeedLimit=100 DeviceLimit=1", restored)
+	}
+
+	bucketValue, ok := inboundInfo.BucketHub.Load(userKey)
+	if !ok {
+		t.Fatalf("expected restored bucket for key %s", userKey)
+	}
+	restoredBucket := bucketValue.(*rate.Limiter)
+	if restoredBucket.Limit() != rate.Limit(100) || restoredBucket.Burst() != 100 {
+		t.Fatalf("restored bucket limit=%v burst=%d, want limit=100 burst=100", restoredBucket.Limit(), restoredBucket.Burst())
 	}
 }

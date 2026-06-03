@@ -29,6 +29,16 @@ type UserInfo struct {
 	DeviceLimit int
 }
 
+type InboundLimiterStateSnapshot struct {
+	UserInfo map[string]UserInfo
+	Buckets  map[string]bucketStateSnapshot
+}
+
+type bucketStateSnapshot struct {
+	Limit rate.Limit
+	Burst int
+}
+
 // connIP tracks a single online IP with its UID and last-seen timestamp.
 type connIP struct {
 	UID      int
@@ -185,11 +195,13 @@ type InboundInfo struct {
 	BucketHub      *sync.Map // Key: user tag -> *rate.Limiter
 	UserOnlineIP   *sync.Map // Key: user tag -> *userOnlineEntry
 	GlobalDevices  *globalDeviceState
-	GlobalLimit    struct {
-		config         *GlobalDeviceLimitConfig
-		globalOnlineIP *marshaler.Marshaler
-		keyLocks       sync.Map // Key: user tag -> *sync.Mutex, serializes global-limit cache updates per user
-	}
+	GlobalLimit    *globalLimitState
+}
+
+type globalLimitState struct {
+	config         *GlobalDeviceLimitConfig
+	globalOnlineIP *marshaler.Marshaler
+	keyLocks       sync.Map // Key: user tag -> *sync.Mutex, serializes global-limit cache updates per user
 }
 
 type Limiter struct {
@@ -202,6 +214,13 @@ func New() *Limiter {
 	}
 }
 
+func newInboundLimiterStateSnapshot() *InboundLimiterStateSnapshot {
+	return &InboundLimiterStateSnapshot{
+		UserInfo: make(map[string]UserInfo),
+		Buckets:  make(map[string]bucketStateSnapshot),
+	}
+}
+
 func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalLimit *GlobalDeviceLimitConfig) error {
 	inboundInfo := &InboundInfo{
 		Tag:            tag,
@@ -209,6 +228,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 		BucketHub:      new(sync.Map),
 		UserOnlineIP:   new(sync.Map),
 		GlobalDevices:  newGlobalDeviceState(),
+		GlobalLimit:    &globalLimitState{},
 	}
 
 	if globalLimit != nil && globalLimit.Enable {
@@ -276,6 +296,71 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 	} else {
 		return fmt.Errorf("no such inbound in limiter: %s", tag)
 	}
+	return nil
+}
+
+func (l *Limiter) SnapshotInboundLimiterState(tag string) (*InboundLimiterStateSnapshot, error) {
+	snapshot := newInboundLimiterStateSnapshot()
+	if l == nil || l.InboundInfo == nil {
+		return snapshot, nil
+	}
+
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return snapshot, fmt.Errorf("no such inbound in limiter: %s", tag)
+	}
+
+	inboundInfo := value.(*InboundInfo)
+	if inboundInfo.UserInfo != nil {
+		inboundInfo.UserInfo.Range(func(key, value interface{}) bool {
+			snapshot.UserInfo[key.(string)] = value.(UserInfo)
+			return true
+		})
+	}
+	if inboundInfo.BucketHub != nil {
+		inboundInfo.BucketHub.Range(func(key, value interface{}) bool {
+			bucket := value.(*rate.Limiter)
+			snapshot.Buckets[key.(string)] = bucketStateSnapshot{
+				Limit: bucket.Limit(),
+				Burst: bucket.Burst(),
+			}
+			return true
+		})
+	}
+	return snapshot, nil
+}
+
+func (l *Limiter) RestoreInboundLimiterState(tag string, snapshot *InboundLimiterStateSnapshot) error {
+	if l == nil || l.InboundInfo == nil || snapshot == nil {
+		return nil
+	}
+
+	value, ok := l.InboundInfo.Load(tag)
+	if !ok {
+		return fmt.Errorf("no such inbound in limiter: %s", tag)
+	}
+
+	userInfo := new(sync.Map)
+	for key, value := range snapshot.UserInfo {
+		userInfo.Store(key, value)
+	}
+
+	bucketHub := new(sync.Map)
+	for key, value := range snapshot.Buckets {
+		bucketHub.Store(key, rate.NewLimiter(value.Limit, value.Burst))
+	}
+
+	inboundInfo := value.(*InboundInfo)
+	replacement := &InboundInfo{
+		Tag:            inboundInfo.Tag,
+		NodeSpeedLimit: inboundInfo.NodeSpeedLimit,
+		UserInfo:       userInfo,
+		BucketHub:      bucketHub,
+		UserOnlineIP:   inboundInfo.UserOnlineIP,
+		GlobalDevices:  inboundInfo.GlobalDevices,
+		GlobalLimit:    inboundInfo.GlobalLimit,
+	}
+	l.InboundInfo.Store(tag, replacement)
 	return nil
 }
 
@@ -423,7 +508,7 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 			return nil, false, true
 		}
 
-		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
+		if inboundInfo.GlobalLimit != nil && inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
 			if reject := globalLimit(inboundInfo, userKey, uid, ip, deviceLimit); reject {
 				return nil, false, true
 			}
