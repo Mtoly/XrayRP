@@ -31,6 +31,8 @@ type syncApplyHooks struct {
 	addInboundLimiter       func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
 	deleteInboundLimiter    func(string) error
 	updateInboundLimiter    func(string, *[]api.UserInfo) error
+	snapshotInboundLimiter  func(string) (*limiter.InboundLimiterStateSnapshot, error)
+	restoreInboundLimiter   func(string, *limiter.InboundLimiterStateSnapshot) error
 	updateGlobalDevices     func(string, map[int][]string) error
 	clearGlobalDevices      func(string) error
 	rebuildInboundWithUsers func(*[]api.UserInfo, *api.NodeInfo, string) error
@@ -367,22 +369,51 @@ func (c *Controller) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo,
 		return hooks.addInboundLimiter(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
 	}
 
-	deleted, added := compareUserList(currentUserList, nextUserList)
-	if len(deleted) > 0 {
-		deletedEmail := make([]string, len(deleted))
-		for i, u := range deleted {
-			deletedEmail[i] = fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
+	diff := diffUserList(currentUserList, nextUserList)
+	if len(diff.Deleted) == 0 && len(diff.Added) == 0 && len(diff.LimitOnly) == 0 && len(diff.RuntimeUpdated) == 0 {
+		return nil
+	}
+
+	limiterUpdates := make([]api.UserInfo, 0, len(diff.Added)+len(diff.RuntimeUpdated)+len(diff.LimitOnly))
+	limiterUpdates = append(limiterUpdates, diff.Added...)
+	limiterUpdates = append(limiterUpdates, diff.RuntimeUpdated...)
+	limiterUpdates = append(limiterUpdates, diff.LimitOnly...)
+
+	limiterSnapshot, err := hooks.snapshotInboundLimiter(tag)
+	if err != nil {
+		return err
+	}
+	restoreLimiter := func(applyErr error) error {
+		if restoreErr := hooks.restoreInboundLimiter(tag, limiterSnapshot); restoreErr != nil {
+			return errors.Join(applyErr, fmt.Errorf("restore inbound limiter: %w", restoreErr))
 		}
-		if err := hooks.removeUsers(deletedEmail, tag); err != nil {
-			return err
+		return applyErr
+	}
+
+	if err := hooks.updateInboundLimiter(tag, &limiterUpdates); err != nil {
+		return restoreLimiter(err)
+	}
+
+	// Task 8 restores limiter/controller state on post-limiter runtime hook
+	// failures. Full Xray runtime user rollback is future hardening.
+	usersToRemove := make([]api.UserInfo, 0, len(diff.Deleted)+len(diff.RuntimeUpdated))
+	usersToRemove = append(usersToRemove, diff.Deleted...)
+	usersToRemove = append(usersToRemove, diff.RuntimeUpdated...)
+	if len(usersToRemove) > 0 {
+		removedUserKeys := buildRemovedUserKeys(tag, currentUserList, usersToRemove)
+		if len(removedUserKeys) > 0 {
+			if err := hooks.removeUsers(removedUserKeys, tag); err != nil {
+				return restoreLimiter(err)
+			}
 		}
 	}
-	if len(added) > 0 {
-		if err := hooks.addNewUser(&added, nodeInfo, tag); err != nil {
-			return err
-		}
-		if err := hooks.updateInboundLimiter(tag, &added); err != nil {
-			return err
+
+	usersToAdd := make([]api.UserInfo, 0, len(diff.Added)+len(diff.RuntimeUpdated))
+	usersToAdd = append(usersToAdd, diff.Added...)
+	usersToAdd = append(usersToAdd, diff.RuntimeUpdated...)
+	if len(usersToAdd) > 0 {
+		if err := hooks.addNewUser(&usersToAdd, nodeInfo, tag); err != nil {
+			return restoreLimiter(err)
 		}
 	}
 	return nil
@@ -427,6 +458,20 @@ func (c *Controller) clearLimiterGlobalDevices(tag string) error {
 	return c.dispatcher.Limiter.ClearGlobalDevices(tag)
 }
 
+func (c *Controller) snapshotInboundLimiter(tag string) (*limiter.InboundLimiterStateSnapshot, error) {
+	if c == nil || c.dispatcher == nil || c.dispatcher.Limiter == nil {
+		return nil, nil
+	}
+	return c.dispatcher.Limiter.SnapshotInboundLimiterState(tag)
+}
+
+func (c *Controller) restoreInboundLimiter(tag string, snapshot *limiter.InboundLimiterStateSnapshot) error {
+	if c == nil || c.dispatcher == nil || c.dispatcher.Limiter == nil || snapshot == nil {
+		return nil
+	}
+	return c.dispatcher.Limiter.RestoreInboundLimiterState(tag, snapshot)
+}
+
 func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	hooks := c.syncApplyHooks
 	if hooks.removeOldTag == nil {
@@ -452,6 +497,12 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	}
 	if hooks.updateInboundLimiter == nil {
 		hooks.updateInboundLimiter = c.UpdateInboundLimiter
+	}
+	if hooks.snapshotInboundLimiter == nil {
+		hooks.snapshotInboundLimiter = c.snapshotInboundLimiter
+	}
+	if hooks.restoreInboundLimiter == nil {
+		hooks.restoreInboundLimiter = c.restoreInboundLimiter
 	}
 	if hooks.updateGlobalDevices == nil {
 		hooks.updateGlobalDevices = c.updateLimiterGlobalDevices
