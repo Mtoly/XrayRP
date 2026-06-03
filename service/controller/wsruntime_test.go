@@ -19,6 +19,7 @@ type stubWSRuntimeClient struct {
 	done           chan struct{}
 	closed         chan struct{}
 	keepAliveCh    chan struct{}
+	deviceReportCh chan map[int][]string
 	keepAliveCount int
 	keepAliveErr   error
 	pongCh         chan struct{}
@@ -29,12 +30,13 @@ type stubWSRuntimeClient struct {
 
 func newStubWSRuntimeClient() *stubWSRuntimeClient {
 	return &stubWSRuntimeClient{
-		events:      make(chan *newV2board.WSEvent, 8),
-		errs:        make(chan error, 8),
-		done:        make(chan struct{}),
-		closed:      make(chan struct{}),
-		keepAliveCh: make(chan struct{}, 16),
-		pongCh:      make(chan struct{}, 16),
+		events:         make(chan *newV2board.WSEvent, 8),
+		errs:           make(chan error, 8),
+		done:           make(chan struct{}),
+		closed:         make(chan struct{}),
+		keepAliveCh:    make(chan struct{}, 16),
+		deviceReportCh: make(chan map[int][]string, 16),
+		pongCh:         make(chan struct{}, 16),
 	}
 }
 
@@ -72,6 +74,19 @@ func (c *stubWSRuntimeClient) Pong() error {
 	default:
 	}
 	return c.pongErr
+}
+
+func (c *stubWSRuntimeClient) SendDeviceReport(devices map[int][]string) error {
+	var copied map[int][]string
+	if devices != nil {
+		copied = make(map[int][]string, len(devices))
+		for uid, ips := range devices {
+			copied[uid] = append([]string(nil), ips...)
+		}
+	}
+
+	c.deviceReportCh <- copied
+	return nil
 }
 
 func (c *stubWSRuntimeClient) Close() error {
@@ -547,6 +562,37 @@ func TestWSRuntime_RepliesToAppLevelPing(t *testing.T) {
 	runtime.Stop()
 }
 
+func TestWSRuntime_ReportDevicesForwardsToConnectedClient(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeClient(t, runtime, client)
+
+	devices := map[int][]string{1: []string{"192.0.2.1"}}
+	if err := runtime.ReportDevices(devices); err != nil {
+		t.Fatalf("ReportDevices returned error: %v", err)
+	}
+	devices[1][0] = "198.51.100.1"
+
+	select {
+	case got := <-client.deviceReportCh:
+		want := map[int][]string{1: []string{"192.0.2.1"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("unexpected device report: got %#v want %#v", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for device report")
+	}
+
+	runtime.Stop()
+}
+
 func TestWSRuntime_IgnoresXboardNonActionEvents(t *testing.T) {
 	t.Parallel()
 
@@ -643,7 +689,7 @@ func TestWSRuntime_SubmitsSyncDevicesAction(t *testing.T) {
 	if action.Metadata.Trigger != newV2board.WSEventXboardSyncDevices {
 		t.Fatalf("unexpected sync.devices trigger: got %q", action.Metadata.Trigger)
 	}
-	wantDevices := map[int][]string{1: {"192.0.2.1"}}
+	wantDevices := map[int][]string{1: []string{"192.0.2.1"}}
 	if !reflect.DeepEqual(action.Payload.Devices, wantDevices) {
 		t.Fatalf("unexpected sync.devices payload: got %#v want %#v", action.Payload.Devices, wantDevices)
 	}
@@ -739,4 +785,21 @@ func waitForWSRuntimeDegradedState(t *testing.T, runtime *wsRuntime, want bool) 
 	}
 
 	t.Fatalf("timed out waiting for degraded state %t", want)
+}
+
+func waitForWSRuntimeClient(t *testing.T, runtime *wsRuntime, want wsRuntimeClient) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.mu.RLock()
+		got := runtime.client
+		runtime.mu.RUnlock()
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("timed out waiting for websocket runtime client")
 }

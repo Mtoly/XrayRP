@@ -58,6 +58,7 @@ type Controller struct {
 	logger                 *log.Entry
 	syncCoordinator        syncCoordinatorLifecycle
 	wsRuntime              wsRuntimeLifecycle
+	deviceReportState      *deviceReportState
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
@@ -113,6 +114,7 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 		startAt:    time.Now(),
 		logger:     logger,
 	}
+	controller.deviceReportState = newDeviceReportState()
 	controller.syncCoordinatorFactory = func(executor syncActionExecutor) syncCoordinatorLifecycle {
 		return newSyncCoordinator(executor)
 	}
@@ -133,6 +135,61 @@ func (c *Controller) buildWSRuntime(submitter syncActionSubmitter) (wsRuntimeLif
 		return nil, errors.New("controller: websocket runtime factory not configured")
 	}
 	return c.wsRuntimeFactory(submitter)
+}
+
+type controllerDeviceReporter interface {
+	ReportDevices(map[int][]string) error
+}
+
+type controllerDeviceReporterReadiness interface {
+	DeviceReporterReady() bool
+}
+
+func (c *Controller) ensureDeviceReportState() *deviceReportState {
+	c.stateMu.RLock()
+	state := c.deviceReportState
+	c.stateMu.RUnlock()
+	if state != nil {
+		return state
+	}
+
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.deviceReportState == nil {
+		c.deviceReportState = newDeviceReportState()
+	}
+	return c.deviceReportState
+}
+
+func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) {
+	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok && deviceReporterReady(reporter) {
+		state := c.ensureDeviceReportState()
+		if devices, pending, changed := state.PrepareChangedReport(onlineDevice); changed {
+			if err := reporter.ReportDevices(devices); err != nil {
+				if c.logger != nil {
+					c.logger.WithField("tag", tag).Print(err)
+				}
+			} else {
+				state.CommitChangedReport(pending)
+			}
+		}
+	}
+
+	if onlineDevice != nil && len(*onlineDevice) > 0 {
+		if err := c.apiClient.ReportNodeOnlineUsers(onlineDevice); err != nil {
+			c.logger.Print(err)
+		} else {
+			c.logger.Printf("Report %d online users", len(*onlineDevice))
+		}
+	}
+}
+
+func deviceReporterReady(reporter controllerDeviceReporter) bool {
+	readiness, ok := reporter.(controllerDeviceReporterReadiness)
+	if !ok {
+		return true
+	}
+	return readiness.DeviceReporterReady()
 }
 
 func (c *Controller) shouldStartWSRuntime() bool {
@@ -723,12 +780,8 @@ func (c *Controller) userInfoMonitor() (err error) {
 	// Report Online info
 	if onlineDevice, err := c.GetOnlineDevice(currentTag); err != nil {
 		c.logger.Print(err)
-	} else if len(*onlineDevice) > 0 {
-		if err = c.apiClient.ReportNodeOnlineUsers(onlineDevice); err != nil {
-			c.logger.Print(err)
-		} else {
-			c.logger.Printf("Report %d online users", len(*onlineDevice))
-		}
+	} else {
+		c.reportOnlineDevices(currentTag, onlineDevice)
 	}
 
 	// Sync alive list from panel for device limit accuracy
