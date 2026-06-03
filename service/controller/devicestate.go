@@ -18,16 +18,37 @@ type deviceReportState struct {
 
 func newDeviceReportState() *deviceReportState { return &deviceReportState{} }
 
+type pendingDeviceReport struct {
+	hash string
+}
+
 func (s *deviceReportState) BuildChangedReport(onlineUsers *[]api.OnlineUser) (map[int][]string, bool) {
+	devices, pending, changed := s.PrepareChangedReport(onlineUsers)
+	if changed {
+		s.CommitChangedReport(pending)
+	}
+	return devices, changed
+}
+
+func (s *deviceReportState) PrepareChangedReport(onlineUsers *[]api.OnlineUser) (map[int][]string, *pendingDeviceReport, bool) {
 	devices := normalizeOnlineDevices(onlineUsers)
 	hash := hashDeviceSnapshot(devices)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if hash == s.lastHash {
-		return nil, false
+		return nil, nil, false
 	}
-	s.lastHash = hash
-	return devices, true
+	return devices, &pendingDeviceReport{hash: hash}, true
+}
+
+func (s *deviceReportState) CommitChangedReport(report *pendingDeviceReport) {
+	if report == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastHash = report.hash
 }
 
 func normalizeOnlineDevices(onlineUsers *[]api.OnlineUser) map[int][]string {

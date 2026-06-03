@@ -23,6 +23,10 @@ type wsRuntimePonger interface {
 	Pong() error
 }
 
+type wsRuntimeDeviceReporter interface {
+	SendDeviceReport(map[int][]string) error
+}
+
 type wsRuntimeClientFactory func(context.Context) (wsRuntimeClient, error)
 
 type wsRuntimeLifecycle interface {
@@ -139,6 +143,29 @@ func (r *wsRuntime) Degraded() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.degraded
+}
+
+func (r *wsRuntime) ReportDevices(devices map[int][]string) error {
+	r.mu.RLock()
+	client := r.client
+	r.mu.RUnlock()
+	if client == nil {
+		return nil
+	}
+
+	reporter, ok := client.(wsRuntimeDeviceReporter)
+	if !ok {
+		return nil
+	}
+
+	return reporter.SendDeviceReport(devices)
+}
+
+func (r *wsRuntime) DeviceReporterReady() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.client.(wsRuntimeDeviceReporter)
+	return ok
 }
 
 func (r *wsRuntime) run(ctx context.Context, done chan struct{}) {
