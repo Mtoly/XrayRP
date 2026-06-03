@@ -39,7 +39,8 @@ Handled events:
 - `sync.user.delta` currently triggers full user sync; XrayRP intentionally does not directly apply the delta payload in phase 1.
 - `ping` receives an app-level `pong` response.
 - `auth.success` and `error` are accepted and ignored by the sync pipeline.
-- `sync.nodes` and `sync.devices` are accepted by the parser but are not applied in phase 1.
+- `sync.nodes` schedules a full REST resync in single-node mode. It is treated as a machine-mode invalidation signal and does not start or stop controllers.
+- `sync.devices` applies panel-provided global device/IP state to limiter admission while the WebSocket state is fresh.
 
 WebSocket endpoint resolution order:
 
@@ -47,7 +48,13 @@ WebSocket endpoint resolution order:
 2. Xboard `/api/v2/server/handshake` `websocket.ws_url`, when enabled.
 3. Legacy `<ApiHost>/api/v1/server/UniProxy/ws` fallback.
 
-The REST UniProxy snapshot remains the authoritative source for runtime apply. WebSocket payloads are used as change notifications only.
+The REST UniProxy snapshot remains the authoritative source for complex runtime state. WebSocket payloads are used as change notifications, except `sync.devices`, which is a panel-provided global device/IP snapshot for limiter admission.
+
+### Xboard single-node device sync behavior
+
+Single-node controllers treat `sync.devices` as panel-provided global device/IP state and apply it to limiter admission while the WebSocket state is fresh. WebSocket disconnect clears global device state so stale panel snapshots do not reject new connections. Controllers also send changed-only `report.devices` snapshots over WebSocket, including the empty snapshot after all devices go offline, while retaining REST alive reporting for compatibility.
+
+`sync.nodes` is treated as a machine-mode invalidation signal. In single-node mode it does not start or stop controllers; it schedules a REST resync so the current node converges safely.
 
 ## Xboard `/api/v2/server/report` compatibility
 
