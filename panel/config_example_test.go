@@ -3,10 +3,54 @@ package panel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 )
+
+func TestMachineConfigParses(t *testing.T) {
+	config := viper.New()
+	config.SetConfigType("yml")
+	if err := config.ReadConfig(strings.NewReader(`
+MachineConfig:
+  Enable: true
+  PanelType: "NewV2board"
+  ApiHost: "https://panel.example.com"
+  MachineID: 7
+  Token: "machine-token"
+  Timeout: 30
+`)); err != nil {
+		t.Fatalf("read machine config: %v", err)
+	}
+
+	panelConfig := &Config{}
+	if err := config.Unmarshal(panelConfig); err != nil {
+		t.Fatalf("unmarshal machine config: %v", err)
+	}
+
+	if panelConfig.MachineConfig == nil {
+		t.Fatal("expected MachineConfig to parse")
+	}
+	if !panelConfig.MachineConfig.Enable {
+		t.Fatal("expected machine config to be enabled")
+	}
+	if panelConfig.MachineConfig.PanelType != "NewV2board" {
+		t.Fatalf("expected panel type NewV2board, got %q", panelConfig.MachineConfig.PanelType)
+	}
+	if panelConfig.MachineConfig.ApiHost != "https://panel.example.com" {
+		t.Fatalf("expected api host https://panel.example.com, got %q", panelConfig.MachineConfig.ApiHost)
+	}
+	if panelConfig.MachineConfig.MachineID != 7 {
+		t.Fatalf("expected machine ID 7, got %d", panelConfig.MachineConfig.MachineID)
+	}
+	if panelConfig.MachineConfig.Token != "machine-token" {
+		t.Fatalf("expected token machine-token, got %q", panelConfig.MachineConfig.Token)
+	}
+	if panelConfig.MachineConfig.Timeout != 30 {
+		t.Fatalf("expected timeout 30, got %d", panelConfig.MachineConfig.Timeout)
+	}
+}
 
 func TestConfigExampleParsesRuntimeConfigContract(t *testing.T) {
 	exampleConfig, err := os.Open(filepath.Join("..", "release", "config", "config.yml.example"))

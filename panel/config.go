@@ -12,7 +12,17 @@ type Config struct {
 	OutboundConfigPath string            `mapstructure:"OutboundConfigPath"`
 	RouteConfigPath    string            `mapstructure:"RouteConfigPath"`
 	ConnectionConfig   *ConnectionConfig `mapstructure:"ConnectionConfig"`
+	MachineConfig      *MachineConfig    `mapstructure:"MachineConfig"`
 	NodesConfig        []*NodesConfig    `mapstructure:"Nodes"`
+}
+
+type MachineConfig struct {
+	Enable    bool   `mapstructure:"Enable"`
+	PanelType string `mapstructure:"PanelType"`
+	ApiHost   string `mapstructure:"ApiHost"`
+	MachineID int    `mapstructure:"MachineID"`
+	Token     string `mapstructure:"Token"`
+	Timeout   int    `mapstructure:"Timeout"`
 }
 
 type NodesConfig struct {

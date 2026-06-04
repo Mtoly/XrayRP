@@ -12,6 +12,16 @@ ConnectionConfig:
   UplinkOnly: 2 # Time limit when the connection downstream is closed, Second
   DownlinkOnly: 4 # Time limit when the connection is closed after the uplink is closed, Second
   BufferSize: 4 # The internal cache size of each connection, kB
+# MachineConfig enables Xboard machine discovery foundation.
+# Batch 2.1 only discovers node bindings and computes diffs.
+# It does NOT start/stop controllers or replace static Nodes yet.
+# MachineConfig:
+#   Enable: false
+#   PanelType: "NewV2board"
+#   ApiHost: "https://panel.example.com"
+#   MachineID: 1
+#   Token: "machine-token"
+#   Timeout: 30
 Nodes:
   - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel
     ApiConfig:
