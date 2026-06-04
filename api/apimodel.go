@@ -15,9 +15,11 @@ const (
 
 // Config API config
 type Config struct {
-	APIHost             string  `mapstructure:"ApiHost"`
-	NodeID              int     `mapstructure:"NodeID"`
-	Key                 string  `mapstructure:"ApiKey"`
+	APIHost string `mapstructure:"ApiHost"`
+	NodeID  int    `mapstructure:"NodeID"`
+	Key     string `mapstructure:"ApiKey"`
+	// MachineID is optional for NewV2board machine-discovered node clients.
+	MachineID           int     `mapstructure:"MachineID"`
 	NodeType            string  `mapstructure:"NodeType"`
 	EnableVless         bool    `mapstructure:"EnableVless"`
 	VlessFlow           string  `mapstructure:"VlessFlow"`
