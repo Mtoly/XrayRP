@@ -147,8 +147,7 @@ func TestParseSyncDevicesPayloadAcceptsSupportedUserMaps(t *testing.T) {
 		{
 			name: "map_string_any",
 			payload: map[string]any{"users": map[string]any{
-				"1":   []any{"192.0.2.1", "198.51.100.1"},
-				"bad": []any{"ignored"},
+				"1": []any{"192.0.2.1", "198.51.100.1"},
 			}},
 			want: map[int][]string{1: {"192.0.2.1", "198.51.100.1"}},
 		},
@@ -158,14 +157,24 @@ func TestParseSyncDevicesPayloadAcceptsSupportedUserMaps(t *testing.T) {
 			want:    map[int][]string{1: {"192.0.2.1"}},
 		},
 		{
+			name:    "map_string_slice_empty_ips",
+			payload: map[string]any{"users": map[string][]string{"1": {}}},
+			want:    map[int][]string{1: {}},
+		},
+		{
 			name:    "map_int_slice",
-			payload: map[string]any{"users": map[int][]string{1: {"192.0.2.1"}, -1: {"ignored"}}},
+			payload: map[string]any{"users": map[int][]string{1: {"192.0.2.1"}}},
 			want:    map[int][]string{1: {"192.0.2.1"}},
 		},
 		{
 			name:    "empty_ip_array_valid",
 			payload: map[string]any{"users": map[string]any{"1": []any{}}},
 			want:    map[int][]string{1: {}},
+		},
+		{
+			name:    "empty_users_map_valid",
+			payload: map[string]any{"users": map[string]any{}},
+			want:    map[int][]string{},
 		},
 	}
 
@@ -185,20 +194,51 @@ func TestParseSyncDevicesPayloadAcceptsSupportedUserMaps(t *testing.T) {
 	}
 }
 
-func TestParseSyncDevicesPayloadRejectsMalformedTopLevelShape(t *testing.T) {
+type malformedSyncDevicesPayloadCase struct {
+	name    string
+	payload map[string]any
+}
+
+func malformedSyncDevicesPayloadCases() []malformedSyncDevicesPayloadCase {
+	return []malformedSyncDevicesPayloadCase{
+		{name: "nil_payload", payload: nil},
+		{name: "missing_users", payload: map[string]any{}},
+		{name: "users_array", payload: map[string]any{"users": []any{}}},
+		{name: "users_string", payload: map[string]any{"users": "bad"}},
+		{name: "map_string_any_bad_uid", payload: map[string]any{"users": map[string]any{"bad": []any{"192.0.2.1"}}}},
+		{name: "map_string_any_zero_uid", payload: map[string]any{"users": map[string]any{"0": []any{"192.0.2.1"}}}},
+		{name: "map_string_any_negative_uid", payload: map[string]any{"users": map[string]any{"-1": []any{"192.0.2.1"}}}},
+		{name: "map_string_any_mixed_valid_bad_uid", payload: map[string]any{"users": map[string]any{
+			"1":   []any{"192.0.2.1"},
+			"bad": []any{"198.51.100.1"},
+		}}},
+		{name: "map_string_slice_bad_uid", payload: map[string]any{"users": map[string][]string{"bad": {"192.0.2.1"}}}},
+		{name: "map_string_slice_zero_uid", payload: map[string]any{"users": map[string][]string{"0": {"192.0.2.1"}}}},
+		{name: "map_string_slice_mixed_valid_zero_uid", payload: map[string]any{"users": map[string][]string{
+			"1": {"192.0.2.1"},
+			"0": {"198.51.100.1"},
+		}}},
+		{name: "map_int_slice_zero_uid", payload: map[string]any{"users": map[int][]string{0: {"192.0.2.1"}}}},
+		{name: "map_int_slice_negative_uid", payload: map[string]any{"users": map[int][]string{-1: {"192.0.2.1"}}}},
+		{name: "map_int_slice_mixed_valid_negative_uid", payload: map[string]any{"users": map[int][]string{
+			1:  {"192.0.2.1"},
+			-1: {"198.51.100.1"},
+		}}},
+		{name: "map_string_any_invalid_ip_shape", payload: map[string]any{"users": map[string]any{"1": 123}}},
+		{name: "map_string_any_invalid_ip_string", payload: map[string]any{"users": map[string]any{"1": "bad"}}},
+		{name: "map_string_any_non_string_ip", payload: map[string]any{"users": map[string]any{"1": []any{"192.0.2.1", 123}}}},
+	}
+}
+
+func TestParseSyncDevicesPayloadRejectsMalformedPayloads(t *testing.T) {
 	t.Parallel()
 
-	for _, payload := range []map[string]any{
-		nil,
-		{},
-		{"users": []any{}},
-		{"users": "bad"},
-	} {
-		payload := payload
-		t.Run("malformed", func(t *testing.T) {
+	for _, tt := range malformedSyncDevicesPayloadCases() {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if devices, ok := parseSyncDevicesPayload(payload); ok {
+			if devices, ok := parseSyncDevicesPayload(tt.payload); ok {
 				t.Fatalf("expected malformed payload, got %#v", devices)
 			}
 		})
@@ -209,21 +249,15 @@ func TestSyncActionFromWSEventPayloadMalformedSyncDevicesFallsBackToResyncAll(t 
 	t.Parallel()
 
 	now := time.Unix(789, 0)
-	tests := []map[string]any{
-		{"users": []any{}},
-		{"users": map[string]any{"1": 123}},
-		{"users": map[string]any{"1": "bad"}},
-		{"users": map[string]any{"1": []any{"192.0.2.1", 123}}},
-	}
 
-	for _, payload := range tests {
-		payload := payload
-		t.Run("malformed", func(t *testing.T) {
+	for _, tt := range malformedSyncDevicesPayloadCases() {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			action, ok := syncActionFromWSEventPayload(&newV2board.WSEvent{
 				Event:   newV2board.WSEventXboardSyncDevices,
-				Payload: payload,
+				Payload: tt.payload,
 			}, now)
 			if !ok {
 				t.Fatal("expected malformed sync.devices to produce ResyncAll")
