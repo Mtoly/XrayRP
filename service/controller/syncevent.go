@@ -197,7 +197,7 @@ func parseSyncDevicesPayload(payload map[string]any) (map[int][]string, bool) {
 	case map[string][]string:
 		return parseSyncDevicesStringSliceMap(typedUsers)
 	case map[int][]string:
-		return parseSyncDevicesIntSliceMap(typedUsers), true
+		return parseSyncDevicesIntSliceMap(typedUsers)
 	default:
 		return nil, false
 	}
@@ -208,7 +208,7 @@ func parseSyncDevicesStringAnyMap(users map[string]any) (map[int][]string, bool)
 	for uidKey, rawIPs := range users {
 		uid, ok := parseSyncDeviceUIDKey(uidKey)
 		if !ok {
-			continue
+			return nil, false
 		}
 
 		ips, ok := parseSyncDeviceIPs(rawIPs)
@@ -225,22 +225,22 @@ func parseSyncDevicesStringSliceMap(users map[string][]string) (map[int][]string
 	for uidKey, rawIPs := range users {
 		uid, ok := parseSyncDeviceUIDKey(uidKey)
 		if !ok {
-			continue
+			return nil, false
 		}
 		devices[uid] = copySyncDeviceIPs(rawIPs)
 	}
 	return devices, true
 }
 
-func parseSyncDevicesIntSliceMap(users map[int][]string) map[int][]string {
+func parseSyncDevicesIntSliceMap(users map[int][]string) (map[int][]string, bool) {
 	devices := make(map[int][]string, len(users))
 	for uid, rawIPs := range users {
 		if uid <= 0 {
-			continue
+			return nil, false
 		}
 		devices[uid] = copySyncDeviceIPs(rawIPs)
 	}
-	return devices
+	return devices, true
 }
 
 func parseSyncDeviceUIDKey(uidKey string) (int, bool) {
