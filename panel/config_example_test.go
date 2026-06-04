@@ -20,6 +20,14 @@ MachineConfig:
   MachineID: 7
   Token: "machine-token"
   Timeout: 30
+  DiscoveryInterval: 60
+  ControllerConfig:
+    UpdatePeriodic: 45
+    WebSocketConfig:
+      Enable: false
+      HeartbeatInterval: 30
+      ReconnectBackoff: 5
+      ResyncOnReconnect: true
 `)); err != nil {
 		t.Fatalf("read machine config: %v", err)
 	}
@@ -49,6 +57,30 @@ MachineConfig:
 	}
 	if panelConfig.MachineConfig.Timeout != 30 {
 		t.Fatalf("expected timeout 30, got %d", panelConfig.MachineConfig.Timeout)
+	}
+	if panelConfig.MachineConfig.DiscoveryInterval != 60 {
+		t.Fatalf("expected discovery interval 60, got %d", panelConfig.MachineConfig.DiscoveryInterval)
+	}
+	if panelConfig.MachineConfig.ControllerConfig == nil {
+		t.Fatal("expected machine controller config to parse")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.UpdatePeriodic != 45 {
+		t.Fatalf("expected machine controller update periodic 45, got %d", panelConfig.MachineConfig.ControllerConfig.UpdatePeriodic)
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig == nil {
+		t.Fatal("expected machine websocket config to parse")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Enable {
+		t.Fatal("expected machine websocket config to be disabled")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval != 30 {
+		t.Fatalf("expected machine websocket heartbeat interval 30, got %d", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval)
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ReconnectBackoff != 5 {
+		t.Fatalf("expected machine websocket reconnect backoff 5, got %d", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ReconnectBackoff)
+	}
+	if !panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ResyncOnReconnect {
+		t.Fatal("expected machine websocket resync on reconnect to parse as true")
 	}
 }
 

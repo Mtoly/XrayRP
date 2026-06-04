@@ -17,12 +17,14 @@ type Config struct {
 }
 
 type MachineConfig struct {
-	Enable    bool   `mapstructure:"Enable"`
-	PanelType string `mapstructure:"PanelType"`
-	ApiHost   string `mapstructure:"ApiHost"`
-	MachineID int    `mapstructure:"MachineID"`
-	Token     string `mapstructure:"Token"`
-	Timeout   int    `mapstructure:"Timeout"`
+	Enable            bool               `mapstructure:"Enable"`
+	PanelType         string             `mapstructure:"PanelType"`
+	ApiHost           string             `mapstructure:"ApiHost"`
+	MachineID         int                `mapstructure:"MachineID"`
+	Token             string             `mapstructure:"Token"`
+	Timeout           int                `mapstructure:"Timeout"`
+	DiscoveryInterval int                `mapstructure:"DiscoveryInterval"`
+	ControllerConfig  *controller.Config `mapstructure:"ControllerConfig"`
 }
 
 type NodesConfig struct {
