@@ -69,7 +69,6 @@ The fallback is only for unsupported endpoint responses. Authentication failures
 Follow-up items not covered by this phase:
 
 - machine mode;
-- device WebSocket state application;
 - Trojan REALITY;
 - outbound safe regex filters;
 - uTLS/xmux advanced field completion.

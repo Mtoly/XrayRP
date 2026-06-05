@@ -3,10 +3,86 @@ package panel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
 )
+
+func TestMachineConfigParses(t *testing.T) {
+	config := viper.New()
+	config.SetConfigType("yml")
+	if err := config.ReadConfig(strings.NewReader(`
+MachineConfig:
+  Enable: true
+  PanelType: "NewV2board"
+  ApiHost: "https://panel.example.com"
+  MachineID: 7
+  Token: "machine-token"
+  Timeout: 30
+  DiscoveryInterval: 60
+  ControllerConfig:
+    UpdatePeriodic: 45
+    WebSocketConfig:
+      Enable: false
+      HeartbeatInterval: 30
+      ReconnectBackoff: 5
+      ResyncOnReconnect: true
+`)); err != nil {
+		t.Fatalf("read machine config: %v", err)
+	}
+
+	panelConfig := &Config{}
+	if err := config.Unmarshal(panelConfig); err != nil {
+		t.Fatalf("unmarshal machine config: %v", err)
+	}
+
+	if panelConfig.MachineConfig == nil {
+		t.Fatal("expected MachineConfig to parse")
+	}
+	if !panelConfig.MachineConfig.Enable {
+		t.Fatal("expected machine config to be enabled")
+	}
+	if panelConfig.MachineConfig.PanelType != "NewV2board" {
+		t.Fatalf("expected panel type NewV2board, got %q", panelConfig.MachineConfig.PanelType)
+	}
+	if panelConfig.MachineConfig.ApiHost != "https://panel.example.com" {
+		t.Fatalf("expected api host https://panel.example.com, got %q", panelConfig.MachineConfig.ApiHost)
+	}
+	if panelConfig.MachineConfig.MachineID != 7 {
+		t.Fatalf("expected machine ID 7, got %d", panelConfig.MachineConfig.MachineID)
+	}
+	if panelConfig.MachineConfig.Token != "machine-token" {
+		t.Fatalf("expected token machine-token, got %q", panelConfig.MachineConfig.Token)
+	}
+	if panelConfig.MachineConfig.Timeout != 30 {
+		t.Fatalf("expected timeout 30, got %d", panelConfig.MachineConfig.Timeout)
+	}
+	if panelConfig.MachineConfig.DiscoveryInterval != 60 {
+		t.Fatalf("expected discovery interval 60, got %d", panelConfig.MachineConfig.DiscoveryInterval)
+	}
+	if panelConfig.MachineConfig.ControllerConfig == nil {
+		t.Fatal("expected machine controller config to parse")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.UpdatePeriodic != 45 {
+		t.Fatalf("expected machine controller update periodic 45, got %d", panelConfig.MachineConfig.ControllerConfig.UpdatePeriodic)
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig == nil {
+		t.Fatal("expected machine websocket config to parse")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Enable {
+		t.Fatal("expected machine websocket config to be disabled")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval != 30 {
+		t.Fatalf("expected machine websocket heartbeat interval 30, got %d", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval)
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ReconnectBackoff != 5 {
+		t.Fatalf("expected machine websocket reconnect backoff 5, got %d", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ReconnectBackoff)
+	}
+	if !panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.ResyncOnReconnect {
+		t.Fatal("expected machine websocket resync on reconnect to parse as true")
+	}
+}
 
 func TestConfigExampleParsesRuntimeConfigContract(t *testing.T) {
 	exampleConfig, err := os.Open(filepath.Join("..", "release", "config", "config.yml.example"))

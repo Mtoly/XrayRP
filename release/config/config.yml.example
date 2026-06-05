@@ -12,6 +12,21 @@ ConnectionConfig:
   UplinkOnly: 2 # Time limit when the connection downstream is closed, Second
   DownlinkOnly: 4 # Time limit when the connection is closed after the uplink is closed, Second
   BufferSize: 4 # The internal cache size of each connection, kB
+# MachineConfig enables Xboard machine supervisor mode.
+# Batch 2.2 discovers machine-bound nodes and dynamically manages polling controllers.
+# It does NOT enable shared machine websocket, per-node mailbox, or machine status reports yet.
+# MachineConfig:
+#   Enable: false
+#   PanelType: "NewV2board"
+#   ApiHost: "https://panel.example.com"
+#   MachineID: 1
+#   Token: "machine-token"
+#   Timeout: 30
+#   DiscoveryInterval: 60
+#   ControllerConfig:
+#     UpdatePeriodic: 60
+#     WebSocketConfig:
+#       Enable: false # Machine mode rejects true until shared machine websocket mux is implemented.
 Nodes:
   - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel
     ApiConfig:

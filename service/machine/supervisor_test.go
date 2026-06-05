@@ -1,0 +1,550 @@
+package machine
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/service"
+)
+
+type fakeService struct {
+	starts   int
+	closes   int
+	startErr error
+	closeErr error
+}
+
+func (s *fakeService) Start() error {
+	s.starts++
+	return s.startErr
+}
+
+func (s *fakeService) Close() error {
+	s.closes++
+	return s.closeErr
+}
+
+type fakeDiscoverer struct {
+	responses []*newV2board.MachineNodesResponse
+	err       error
+	calls     int
+}
+
+func (d *fakeDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodesResponse, error) {
+	d.calls++
+	if d.err != nil {
+		return nil, d.err
+	}
+	if len(d.responses) == 0 {
+		return &newV2board.MachineNodesResponse{}, nil
+	}
+	response := d.responses[0]
+	if len(d.responses) > 1 {
+		d.responses = d.responses[1:]
+	}
+	return response, nil
+}
+
+type fakeFactory struct {
+	services      map[int]*fakeService
+	serviceQueues map[int][]*fakeService
+	buildErr      map[int]error
+	built         []NodeBinding
+}
+
+func (f *fakeFactory) build(binding NodeBinding) (service.Service, error) {
+	f.built = append(f.built, binding)
+	if err := f.buildErr[binding.NodeID]; err != nil {
+		return nil, err
+	}
+	if services := f.serviceQueues[binding.NodeID]; len(services) > 0 {
+		service := services[0]
+		f.serviceQueues[binding.NodeID] = services[1:]
+		return service, nil
+	}
+	if service, ok := f.services[binding.NodeID]; ok {
+		return service, nil
+	}
+	service := &fakeService{}
+	f.services[binding.NodeID] = service
+	return service, nil
+}
+
+func TestSupervisorStartFailsWhenDiscoveryFails(t *testing.T) {
+	discoveryErr := errors.New("discovery failed")
+	discoverer := &fakeDiscoverer{err: discoveryErr}
+	factory := newFakeFactory()
+	supervisor := newTestSupervisor(t, discoverer, factory)
+
+	err := supervisor.Start()
+	if !errors.Is(err, discoveryErr) {
+		t.Fatalf("expected discovery error, got %v", err)
+	}
+	if discoverer.calls != 1 {
+		t.Fatalf("expected one discovery call, got %d", discoverer.calls)
+	}
+	if len(factory.built) != 0 {
+		t.Fatalf("expected no services to be built, got %#v", factory.built)
+	}
+	if len(supervisor.running) != 0 {
+		t.Fatalf("expected no running services, got %d", len(supervisor.running))
+	}
+}
+
+func TestSupervisorStartRollsBackStartedServicesWhenNodeStartFails(t *testing.T) {
+	startErr := errors.New("start failed")
+	first := &fakeService{}
+	second := &fakeService{startErr: startErr}
+	third := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "vmess", Name: "second"},
+			newV2board.MachineNode{ID: 3, Type: "trojan", Name: "third"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	factory.services[3] = third
+	supervisor := newTestSupervisor(t, discoverer, factory)
+
+	err := supervisor.Start()
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if first.starts != 1 || first.closes != 1 {
+		t.Fatalf("expected first service start=1 close=1, got start=%d close=%d", first.starts, first.closes)
+	}
+	if second.starts != 1 || second.closes != 0 {
+		t.Fatalf("expected failed service start=1 close=0, got start=%d close=%d", second.starts, second.closes)
+	}
+	if third.starts != 0 || third.closes != 0 {
+		t.Fatalf("expected third service untouched, got start=%d close=%d", third.starts, third.closes)
+	}
+	if len(supervisor.running) != 0 {
+		t.Fatalf("expected no running services after rollback, got %d", len(supervisor.running))
+	}
+}
+
+func TestSupervisorStartStartsAllDiscoveredNodes(t *testing.T) {
+	services := map[int]*fakeService{
+		1: {},
+		2: {},
+		3: {},
+	}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 3, Type: "Trojan", Name: "third"},
+			newV2board.MachineNode{ID: 1, Type: " Vless ", Name: " first "},
+			newV2board.MachineNode{ID: 2, Type: "Vmess", Name: "second"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services = services
+	supervisor := newTestSupervisor(t, discoverer, factory)
+
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	if len(supervisor.running) != 3 {
+		t.Fatalf("expected 3 running services, got %d", len(supervisor.running))
+	}
+	for nodeID, service := range services {
+		if service.starts != 1 {
+			t.Fatalf("expected node %d service to start once, got %d", nodeID, service.starts)
+		}
+		if runtime := supervisor.running[nodeID]; runtime == nil {
+			t.Fatalf("expected node %d runtime", nodeID)
+		} else if runtime.binding.NodeID != nodeID {
+			t.Fatalf("unexpected runtime binding for node %d: %#v", nodeID, runtime.binding)
+		}
+	}
+	if supervisor.running[1].binding.NodeType != "Vless" {
+		t.Fatalf("expected normalized type to trim whitespace, got %q", supervisor.running[1].binding.NodeType)
+	}
+	if supervisor.running[1].binding.Name != " first " {
+		t.Fatalf("expected name to be preserved, got %q", supervisor.running[1].binding.Name)
+	}
+}
+
+func TestSupervisorCloseClosesAllRunningServices(t *testing.T) {
+	services := map[int]*fakeService{
+		1: {},
+		2: {closeErr: errors.New("close failed")},
+		3: {},
+	}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "vmess", Name: "second"},
+			newV2board.MachineNode{ID: 3, Type: "trojan", Name: "third"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services = services
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	err := supervisor.Close()
+	if err == nil {
+		t.Fatal("expected close error from one service")
+	}
+	for nodeID, service := range services {
+		if service.closes != 1 {
+			t.Fatalf("expected node %d service to close once, got %d", nodeID, service.closes)
+		}
+	}
+	if len(supervisor.running) != 0 {
+		t.Fatalf("expected running map to be cleared, got %d", len(supervisor.running))
+	}
+}
+
+func newTestSupervisor(t *testing.T, discoverer *fakeDiscoverer, factory *fakeFactory) *Supervisor {
+	t.Helper()
+	supervisor, err := NewSupervisor(SupervisorConfig{}, discoverer, factory.build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	return supervisor
+}
+
+func newFakeFactory() *fakeFactory {
+	return &fakeFactory{
+		services:      make(map[int]*fakeService),
+		serviceQueues: make(map[int][]*fakeService),
+		buildErr:      make(map[int]error),
+	}
+}
+
+func machineNodesResponse(nodes ...newV2board.MachineNode) *newV2board.MachineNodesResponse {
+	return &newV2board.MachineNodesResponse{Nodes: nodes}
+}
+
+func TestSupervisorStartRollsBackStartedServicesWhenNodeBuildFails(t *testing.T) {
+	buildErr := fmt.Errorf("build failed")
+	first := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "vmess", Name: "second"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.buildErr[2] = buildErr
+	supervisor := newTestSupervisor(t, discoverer, factory)
+
+	err := supervisor.Start()
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("expected build error, got %v", err)
+	}
+	if first.starts != 1 || first.closes != 1 {
+		t.Fatalf("expected first service start=1 close=1, got start=%d close=%d", first.starts, first.closes)
+	}
+	if len(supervisor.running) != 0 {
+		t.Fatalf("expected no running services after rollback, got %d", len(supervisor.running))
+	}
+}
+
+func TestSupervisorPeriodicDiscoveryFailureKeepsRunningServices(t *testing.T) {
+	discoveryErr := errors.New("discovery failed")
+	service := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = service
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+	discoverer.err = discoveryErr
+
+	err := supervisor.reconcilePeriodic()
+	if !errors.Is(err, discoveryErr) {
+		t.Fatalf("expected discovery error, got %v", err)
+	}
+	if service.closes != 0 {
+		t.Fatalf("expected existing service to stay running, closes=%d", service.closes)
+	}
+	if got := supervisor.running[1]; got == nil || got.missingCount != 0 {
+		t.Fatalf("expected running service with missing count 0, got %#v", got)
+	}
+}
+
+func TestSupervisorPeriodicAddedNodeStartsService(t *testing.T) {
+	first := &fakeService{}
+	second := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("reconcilePeriodic returned error: %v", err)
+	}
+	if first.starts != 1 || second.starts != 1 {
+		t.Fatalf("expected first start=1 and second start=1, got %d/%d", first.starts, second.starts)
+	}
+	if len(supervisor.running) != 2 {
+		t.Fatalf("expected two running services, got %d", len(supervisor.running))
+	}
+}
+
+func TestSupervisorPeriodicAddedNodeStartFailureKeepsExistingServices(t *testing.T) {
+	startErr := errors.New("start failed")
+	first := &fakeService{}
+	second := &fakeService{startErr: startErr}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	err := supervisor.reconcilePeriodic()
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if first.starts != 1 || first.closes != 0 {
+		t.Fatalf("expected existing service unchanged, start=%d close=%d", first.starts, first.closes)
+	}
+	if second.starts != 1 || second.closes != 0 {
+		t.Fatalf("expected failing service start once and not close, start=%d close=%d", second.starts, second.closes)
+	}
+	if _, exists := supervisor.running[2]; exists {
+		t.Fatal("expected failed added node to stay absent from running map")
+	}
+}
+
+func TestSupervisorRemovedNodeMissingOnceStaysRunning(t *testing.T) {
+	first := &fakeService{}
+	second := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("reconcilePeriodic returned error: %v", err)
+	}
+	if second.closes != 0 {
+		t.Fatalf("expected missing-once service to stay running, closes=%d", second.closes)
+	}
+	if got := supervisor.running[2]; got == nil || got.missingCount != 1 {
+		t.Fatalf("expected node 2 missing count 1, got %#v", got)
+	}
+}
+
+func TestSupervisorRemovedNodeMissingTwiceClosesService(t *testing.T) {
+	first := &fakeService{}
+	second := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("first reconcilePeriodic returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("second reconcilePeriodic returned error: %v", err)
+	}
+	if second.closes != 1 {
+		t.Fatalf("expected second service to close once, got %d", second.closes)
+	}
+	if _, exists := supervisor.running[2]; exists {
+		t.Fatal("expected node 2 to be removed from running map")
+	}
+}
+
+func TestSupervisorRemovedNodeReappearsResetsMissingCount(t *testing.T) {
+	first := &fakeService{}
+	second := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+		machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
+			newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = first
+	factory.services[2] = second
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("first reconcilePeriodic returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("second reconcilePeriodic returned error: %v", err)
+	}
+	if second.closes != 0 || second.starts != 1 {
+		t.Fatalf("expected reappeared service not restarted or closed, start=%d close=%d", second.starts, second.closes)
+	}
+	if got := supervisor.running[2]; got == nil || got.missingCount != 0 {
+		t.Fatalf("expected node 2 missing count reset to 0, got %#v", got)
+	}
+}
+
+func TestSupervisorNameUpdateDoesNotRestartService(t *testing.T) {
+	service := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "old"}),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "new"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = service
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("reconcilePeriodic returned error: %v", err)
+	}
+	if service.starts != 1 || service.closes != 0 {
+		t.Fatalf("expected service not restarted, start=%d close=%d", service.starts, service.closes)
+	}
+	if got := supervisor.running[1].binding.Name; got != "new" {
+		t.Fatalf("expected binding name updated, got %q", got)
+	}
+}
+
+func TestSupervisorNodeTypeUpdateRestartsService(t *testing.T) {
+	oldService := &fakeService{}
+	newService := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "node"}),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "trojan", Name: "node"}),
+	}}
+	factory := newFakeFactory()
+	factory.serviceQueues[1] = []*fakeService{oldService, newService}
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("reconcilePeriodic returned error: %v", err)
+	}
+	if oldService.starts != 1 || oldService.closes != 1 {
+		t.Fatalf("expected old service start=1 close=1, got start=%d close=%d", oldService.starts, oldService.closes)
+	}
+	if newService.starts != 1 || newService.closes != 0 {
+		t.Fatalf("expected new service start=1 close=0, got start=%d close=%d", newService.starts, newService.closes)
+	}
+	if got := supervisor.running[1]; got == nil || got.binding.NodeType != "trojan" || got.service != newService {
+		t.Fatalf("expected running runtime to use new service/type, got %#v", got)
+	}
+}
+
+func TestSupervisorNodeTypeRestartFailureRollsBackOldService(t *testing.T) {
+	startErr := errors.New("new start failed")
+	oldService := &fakeService{}
+	newService := &fakeService{startErr: startErr}
+	rollbackService := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "node"}),
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "trojan", Name: "node"}),
+	}}
+	factory := newFakeFactory()
+	factory.serviceQueues[1] = []*fakeService{oldService, newService, rollbackService}
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	err := supervisor.reconcilePeriodic()
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if oldService.starts != 1 || oldService.closes != 1 {
+		t.Fatalf("expected old service start=1 close=1, got start=%d close=%d", oldService.starts, oldService.closes)
+	}
+	if newService.starts != 1 || newService.closes != 1 {
+		t.Fatalf("expected failed new service start=1 close=1, got start=%d close=%d", newService.starts, newService.closes)
+	}
+	if rollbackService.starts != 1 || rollbackService.closes != 0 {
+		t.Fatalf("expected rollback service start=1 close=0, got start=%d close=%d", rollbackService.starts, rollbackService.closes)
+	}
+	if got := supervisor.running[1]; got == nil || got.binding.NodeType != "vless" || got.service != rollbackService {
+		t.Fatalf("expected running runtime rolled back to old type/service, got %#v", got)
+	}
+}
+
+func TestSupervisorDiscoveryIntervalDefaultsAndClamps(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		min      time.Duration
+		want     time.Duration
+	}{
+		{name: "default", interval: 0, want: defaultMachineDiscoveryInterval},
+		{name: "default negative", interval: -1 * time.Second, want: defaultMachineDiscoveryInterval},
+		{name: "clamp default min", interval: 5 * time.Second, want: minMachineDiscoveryInterval},
+		{name: "use interval", interval: 45 * time.Second, want: 45 * time.Second},
+		{name: "custom min", interval: 10 * time.Second, min: 15 * time.Second, want: 15 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeDiscoveryInterval(tt.interval, tt.min); got != tt.want {
+				t.Fatalf("normalizeDiscoveryInterval() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}

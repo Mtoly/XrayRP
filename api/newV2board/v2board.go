@@ -58,11 +58,15 @@ func New(apiConfig *api.Config) *APIClient {
 
 	nodeType := panelNodeType(apiConfig.NodeType, apiConfig.EnableVless)
 	// Create Key for each requests
-	client.SetQueryParams(map[string]string{
+	queryParams := map[string]string{
 		"node_id":   strconv.Itoa(apiConfig.NodeID),
 		"node_type": nodeType,
 		"token":     apiConfig.Key,
-	})
+	}
+	if apiConfig.MachineID > 0 {
+		queryParams["machine_id"] = strconv.Itoa(apiConfig.MachineID)
+	}
+	client.SetQueryParams(queryParams)
 	// Read local rule list
 	localRuleList := readLocalRuleList(apiConfig.RuleListPath)
 	apiClient := &APIClient{
