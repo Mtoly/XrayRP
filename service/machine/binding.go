@@ -1,4 +1,4 @@
-package controller
+package machine
 
 import (
 	"fmt"
@@ -8,21 +8,21 @@ import (
 	"github.com/Mtoly/XrayRP/api/newV2board"
 )
 
-type machineNodeBinding struct {
+type NodeBinding struct {
 	NodeID   int
 	NodeType string
 	Name     string
 }
 
-type machineNodeBindingDiff struct {
-	Added     []machineNodeBinding
-	Removed   []machineNodeBinding
-	Updated   []machineNodeBinding
-	Unchanged []machineNodeBinding
+type NodeBindingDiff struct {
+	Added     []NodeBinding
+	Removed   []NodeBinding
+	Updated   []NodeBinding
+	Unchanged []NodeBinding
 }
 
-func normalizeMachineNodeBindings(nodes []newV2board.MachineNode) ([]machineNodeBinding, error) {
-	bindings := make([]machineNodeBinding, 0, len(nodes))
+func NormalizeNodeBindings(nodes []newV2board.MachineNode) ([]NodeBinding, error) {
+	bindings := make([]NodeBinding, 0, len(nodes))
 	seen := make(map[int]struct{}, len(nodes))
 
 	for _, node := range nodes {
@@ -40,26 +40,26 @@ func normalizeMachineNodeBindings(nodes []newV2board.MachineNode) ([]machineNode
 		}
 		seen[node.ID] = struct{}{}
 
-		bindings = append(bindings, machineNodeBinding{
+		bindings = append(bindings, NodeBinding{
 			NodeID:   node.ID,
 			NodeType: nodeType,
 			Name:     node.Name,
 		})
 	}
 
-	sortMachineNodeBindings(bindings)
+	sortNodeBindings(bindings)
 	return bindings, nil
 }
 
-func diffMachineNodeBindings(oldBindings, newBindings []machineNodeBinding) machineNodeBindingDiff {
-	var diff machineNodeBindingDiff
+func DiffNodeBindings(oldBindings, newBindings []NodeBinding) NodeBindingDiff {
+	var diff NodeBindingDiff
 
-	oldByID := make(map[int]machineNodeBinding, len(oldBindings))
+	oldByID := make(map[int]NodeBinding, len(oldBindings))
 	for _, binding := range oldBindings {
 		oldByID[binding.NodeID] = binding
 	}
 
-	newByID := make(map[int]machineNodeBinding, len(newBindings))
+	newByID := make(map[int]NodeBinding, len(newBindings))
 	for _, binding := range newBindings {
 		newByID[binding.NodeID] = binding
 	}
@@ -84,14 +84,14 @@ func diffMachineNodeBindings(oldBindings, newBindings []machineNodeBinding) mach
 		}
 	}
 
-	sortMachineNodeBindings(diff.Added)
-	sortMachineNodeBindings(diff.Removed)
-	sortMachineNodeBindings(diff.Updated)
-	sortMachineNodeBindings(diff.Unchanged)
+	sortNodeBindings(diff.Added)
+	sortNodeBindings(diff.Removed)
+	sortNodeBindings(diff.Updated)
+	sortNodeBindings(diff.Unchanged)
 	return diff
 }
 
-func sortMachineNodeBindings(bindings []machineNodeBinding) {
+func sortNodeBindings(bindings []NodeBinding) {
 	sort.Slice(bindings, func(i, j int) bool {
 		return bindings[i].NodeID < bindings[j].NodeID
 	})

@@ -1,4 +1,4 @@
-package controller
+package machine
 
 import (
 	"reflect"
@@ -7,19 +7,19 @@ import (
 	"github.com/Mtoly/XrayRP/api/newV2board"
 )
 
-func TestNormalizeMachineNodeBindingsSortsAndTrims(t *testing.T) {
+func TestNormalizeNodeBindingsSortsAndTrims(t *testing.T) {
 	nodes := []newV2board.MachineNode{
 		{ID: 3, Type: "\tvless ", Name: " Gamma"},
 		{ID: 1, Type: " vmess\n", Name: "  Alpha  "},
 		{ID: 2, Type: "trojan", Name: "Beta"},
 	}
 
-	got, err := normalizeMachineNodeBindings(nodes)
+	got, err := NormalizeNodeBindings(nodes)
 	if err != nil {
-		t.Fatalf("normalizeMachineNodeBindings returned error: %v", err)
+		t.Fatalf("NormalizeNodeBindings returned error: %v", err)
 	}
 
-	want := []machineNodeBinding{
+	want := []NodeBinding{
 		{NodeID: 1, NodeType: "vmess", Name: "  Alpha  "},
 		{NodeID: 2, NodeType: "trojan", Name: "Beta"},
 		{NodeID: 3, NodeType: "vless", Name: " Gamma"},
@@ -29,7 +29,7 @@ func TestNormalizeMachineNodeBindingsSortsAndTrims(t *testing.T) {
 	}
 }
 
-func TestNormalizeMachineNodeBindingsRejectsInvalidNodeID(t *testing.T) {
+func TestNormalizeNodeBindingsRejectsInvalidNodeID(t *testing.T) {
 	tests := []struct {
 		name string
 		id   int
@@ -40,7 +40,7 @@ func TestNormalizeMachineNodeBindingsRejectsInvalidNodeID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := normalizeMachineNodeBindings([]newV2board.MachineNode{
+			_, err := NormalizeNodeBindings([]newV2board.MachineNode{
 				{ID: tc.id, Type: "vless", Name: "node"},
 			})
 			if err == nil {
@@ -50,7 +50,7 @@ func TestNormalizeMachineNodeBindingsRejectsInvalidNodeID(t *testing.T) {
 	}
 }
 
-func TestNormalizeMachineNodeBindingsRejectsEmptyNodeType(t *testing.T) {
+func TestNormalizeNodeBindingsRejectsEmptyNodeType(t *testing.T) {
 	tests := []struct {
 		name     string
 		nodeType string
@@ -61,7 +61,7 @@ func TestNormalizeMachineNodeBindingsRejectsEmptyNodeType(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := normalizeMachineNodeBindings([]newV2board.MachineNode{
+			_, err := NormalizeNodeBindings([]newV2board.MachineNode{
 				{ID: 1, Type: tc.nodeType, Name: "node"},
 			})
 			if err == nil {
@@ -71,8 +71,8 @@ func TestNormalizeMachineNodeBindingsRejectsEmptyNodeType(t *testing.T) {
 	}
 }
 
-func TestNormalizeMachineNodeBindingsRejectsDuplicateNodeID(t *testing.T) {
-	_, err := normalizeMachineNodeBindings([]newV2board.MachineNode{
+func TestNormalizeNodeBindingsRejectsDuplicateNodeID(t *testing.T) {
+	_, err := NormalizeNodeBindings([]newV2board.MachineNode{
 		{ID: 2, Type: "vless", Name: "node-a"},
 		{ID: 2, Type: "vmess", Name: "node-b"},
 	})
@@ -81,67 +81,67 @@ func TestNormalizeMachineNodeBindingsRejectsDuplicateNodeID(t *testing.T) {
 	}
 }
 
-func TestDiffMachineNodeBindingsClassifiesAddedRemovedUpdatedUnchanged(t *testing.T) {
-	oldBindings := []machineNodeBinding{
+func TestDiffNodeBindingsClassifiesAddedRemovedUpdatedUnchanged(t *testing.T) {
+	oldBindings := []NodeBinding{
 		{NodeID: 1, NodeType: "vless", Name: "same"},
 		{NodeID: 2, NodeType: "vmess", Name: "removed"},
 		{NodeID: 3, NodeType: "trojan", Name: "old"},
 	}
-	newBindings := []machineNodeBinding{
+	newBindings := []NodeBinding{
 		{NodeID: 1, NodeType: "vless", Name: "same"},
 		{NodeID: 3, NodeType: "trojan", Name: "new"},
 		{NodeID: 4, NodeType: "hysteria", Name: "added"},
 	}
 
-	got := diffMachineNodeBindings(oldBindings, newBindings)
+	got := DiffNodeBindings(oldBindings, newBindings)
 
-	assertMachineNodeBindingsEqual(t, "added", got.Added, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "added", got.Added, []NodeBinding{
 		{NodeID: 4, NodeType: "hysteria", Name: "added"},
 	})
-	assertMachineNodeBindingsEqual(t, "removed", got.Removed, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "removed", got.Removed, []NodeBinding{
 		{NodeID: 2, NodeType: "vmess", Name: "removed"},
 	})
-	assertMachineNodeBindingsEqual(t, "updated", got.Updated, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "updated", got.Updated, []NodeBinding{
 		{NodeID: 3, NodeType: "trojan", Name: "new"},
 	})
-	assertMachineNodeBindingsEqual(t, "unchanged", got.Unchanged, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "unchanged", got.Unchanged, []NodeBinding{
 		{NodeID: 1, NodeType: "vless", Name: "same"},
 	})
 }
 
-func TestDiffMachineNodeBindingsStableOrdering(t *testing.T) {
-	oldBindings := []machineNodeBinding{
+func TestDiffNodeBindingsStableOrdering(t *testing.T) {
+	oldBindings := []NodeBinding{
 		{NodeID: 9, NodeType: "trojan", Name: "old"},
 		{NodeID: 5, NodeType: "vless", Name: "removed-high"},
 		{NodeID: 3, NodeType: "vmess", Name: "same"},
 		{NodeID: 1, NodeType: "vless", Name: "removed-low"},
 	}
-	newBindings := []machineNodeBinding{
+	newBindings := []NodeBinding{
 		{NodeID: 8, NodeType: "hysteria", Name: "added-high"},
 		{NodeID: 3, NodeType: "vmess", Name: "same"},
 		{NodeID: 2, NodeType: "vless", Name: "added-low"},
 		{NodeID: 9, NodeType: "trojan", Name: "new"},
 	}
 
-	got := diffMachineNodeBindings(oldBindings, newBindings)
+	got := DiffNodeBindings(oldBindings, newBindings)
 
-	assertMachineNodeBindingsEqual(t, "added", got.Added, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "added", got.Added, []NodeBinding{
 		{NodeID: 2, NodeType: "vless", Name: "added-low"},
 		{NodeID: 8, NodeType: "hysteria", Name: "added-high"},
 	})
-	assertMachineNodeBindingsEqual(t, "removed", got.Removed, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "removed", got.Removed, []NodeBinding{
 		{NodeID: 1, NodeType: "vless", Name: "removed-low"},
 		{NodeID: 5, NodeType: "vless", Name: "removed-high"},
 	})
-	assertMachineNodeBindingsEqual(t, "updated", got.Updated, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "updated", got.Updated, []NodeBinding{
 		{NodeID: 9, NodeType: "trojan", Name: "new"},
 	})
-	assertMachineNodeBindingsEqual(t, "unchanged", got.Unchanged, []machineNodeBinding{
+	assertNodeBindingsEqual(t, "unchanged", got.Unchanged, []NodeBinding{
 		{NodeID: 3, NodeType: "vmess", Name: "same"},
 	})
 }
 
-func assertMachineNodeBindingsEqual(t *testing.T, label string, got, want []machineNodeBinding) {
+func assertNodeBindingsEqual(t *testing.T, label string, got, want []NodeBinding) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected %s bindings\n got: %#v\nwant: %#v", label, got, want)
