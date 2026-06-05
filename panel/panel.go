@@ -194,7 +194,36 @@ func (p *Panel) Start() error {
 	p.Server = server
 	p.serverMutex.Unlock()
 
-	// Load Nodes config
+	var services []service.Service
+	if machineModeEnabled(p.panelConfig) {
+		supervisor, err := p.buildMachineSupervisor(server)
+		if err != nil {
+			return err
+		}
+		services = []service.Service{supervisor}
+	} else {
+		services, err = p.buildStaticNodeServices(server)
+		if err != nil {
+			return err
+		}
+	}
+
+	p.serviceMutex.Lock()
+	p.Service = append(p.Service, services...)
+	p.serviceMutex.Unlock()
+
+	for _, s := range services {
+		if err := s.Start(); err != nil {
+			p.logger.Errorf("Failed to start service: %v", err)
+			return fmt.Errorf("failed to start service: %w", err)
+		}
+	}
+	p.Running = true
+	return nil
+}
+
+func (p *Panel) buildStaticNodeServices(server *core.Instance) ([]service.Service, error) {
+	services := make([]service.Service, 0, len(p.panelConfig.NodesConfig))
 	for _, nodeConfig := range p.panelConfig.NodesConfig {
 		var apiClient api.API
 		switch nodeConfig.PanelType {
@@ -213,76 +242,84 @@ func (p *Panel) Start() error {
 		case "BunPanel":
 			apiClient = bunpanel.New(nodeConfig.ApiConfig)
 		default:
-			return fmt.Errorf("unsupported panel type: %s", nodeConfig.PanelType)
-		}
-		var controllerService service.Service
-		// Register controller service
-		controllerConfig := getDefaultControllerConfig()
-		if nodeConfig.ControllerConfig != nil {
-			if err := mergo.Merge(controllerConfig, nodeConfig.ControllerConfig, mergo.WithOverride); err != nil {
-				return fmt.Errorf("failed to read controller config: %w", err)
-			}
+			return nil, fmt.Errorf("unsupported panel type: %s", nodeConfig.PanelType)
 		}
 
-		// Merge panel-delivered cert config for XrayR (currently only SSPanel supports this).
-		if panelCert, err := apiClient.GetXrayRCertConfig(); err != nil {
-			p.logger.Warnf("Failed to get XrayR cert config from panel: %v", err)
-		} else if panelCert != nil {
-			if controllerConfig.CertConfig == nil {
-				controllerConfig.CertConfig = &mylego.CertConfig{}
-			}
-			if controllerConfig.CertConfig.CertMode == "" {
-				controllerConfig.CertConfig.CertMode = "dns"
-			}
-			if panelCert.Provider != "" {
-				controllerConfig.CertConfig.Provider = panelCert.Provider
-			}
-			if panelCert.Email != "" {
-				controllerConfig.CertConfig.Email = panelCert.Email
-			}
-			if len(panelCert.DNSEnv) > 0 {
-				if controllerConfig.CertConfig.DNSEnv == nil {
-					controllerConfig.CertConfig.DNSEnv = make(map[string]string)
-				}
-				for k, v := range panelCert.DNSEnv {
-					controllerConfig.CertConfig.DNSEnv[k] = v
-				}
-			}
+		controllerConfig, err := p.buildControllerConfig(nodeConfig.ControllerConfig)
+		if err != nil {
+			return nil, err
 		}
-		nodeType := apiClient.Describe().NodeType
-		if nodeType == "" && nodeConfig.ApiConfig != nil {
-			nodeType = nodeConfig.ApiConfig.NodeType
-		}
-		switch {
-		case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
-			controllerService = hysteria2.New(apiClient, controllerConfig)
-		case strings.EqualFold(nodeType, "Tuic"):
-			controllerService = tuic.New(apiClient, controllerConfig)
-		case strings.EqualFold(nodeType, "AnyTLS"):
-			controllerService = anytls.New(apiClient, controllerConfig)
-		default:
-			controllerService = controller.New(server, apiClient, controllerConfig, nodeConfig.PanelType)
-		}
-		p.serviceMutex.Lock()
-		p.Service = append(p.Service, controllerService)
-		p.serviceMutex.Unlock()
+		p.mergePanelCertConfig(apiClient, controllerConfig)
 
+		fallbackNodeType := ""
+		if nodeConfig.ApiConfig != nil {
+			fallbackNodeType = nodeConfig.ApiConfig.NodeType
+		}
+		controllerService, err := p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, nodeConfig.PanelType, fallbackNodeType)
+		if err != nil {
+			return nil, err
+		}
+		services = append(services, controllerService)
 	}
+	return services, nil
+}
 
-	// Start all the service
-	p.serviceMutex.RLock()
-	services := make([]service.Service, len(p.Service))
-	copy(services, p.Service)
-	p.serviceMutex.RUnlock()
+func (p *Panel) buildNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType string) (service.Service, error) {
+	return p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, panelType, "")
+}
 
-	for _, s := range services {
-		if err := s.Start(); err != nil {
-			p.logger.Errorf("Failed to start service: %v", err)
-			return fmt.Errorf("failed to start service: %w", err)
+func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
+	nodeType := apiClient.Describe().NodeType
+	if nodeType == "" {
+		nodeType = fallbackNodeType
+	}
+	switch {
+	case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
+		return hysteria2.New(apiClient, controllerConfig), nil
+	case strings.EqualFold(nodeType, "Tuic"):
+		return tuic.New(apiClient, controllerConfig), nil
+	case strings.EqualFold(nodeType, "AnyTLS"):
+		return anytls.New(apiClient, controllerConfig), nil
+	default:
+		return controller.New(server, apiClient, controllerConfig, panelType), nil
+	}
+}
+
+func (p *Panel) buildControllerConfig(template *controller.Config) (*controller.Config, error) {
+	controllerConfig := getDefaultControllerConfig()
+	if template != nil {
+		if err := mergo.Merge(controllerConfig, template, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to read controller config: %w", err)
 		}
 	}
-	p.Running = true
-	return nil
+	return controllerConfig, nil
+}
+
+func (p *Panel) mergePanelCertConfig(apiClient api.API, controllerConfig *controller.Config) {
+	if panelCert, err := apiClient.GetXrayRCertConfig(); err != nil {
+		p.logger.Warnf("Failed to get XrayR cert config from panel: %v", err)
+	} else if panelCert != nil {
+		if controllerConfig.CertConfig == nil {
+			controllerConfig.CertConfig = &mylego.CertConfig{}
+		}
+		if controllerConfig.CertConfig.CertMode == "" {
+			controllerConfig.CertConfig.CertMode = "dns"
+		}
+		if panelCert.Provider != "" {
+			controllerConfig.CertConfig.Provider = panelCert.Provider
+		}
+		if panelCert.Email != "" {
+			controllerConfig.CertConfig.Email = panelCert.Email
+		}
+		if len(panelCert.DNSEnv) > 0 {
+			if controllerConfig.CertConfig.DNSEnv == nil {
+				controllerConfig.CertConfig.DNSEnv = make(map[string]string)
+			}
+			for k, v := range panelCert.DNSEnv {
+				controllerConfig.CertConfig.DNSEnv[k] = v
+			}
+		}
+	}
 }
 
 // Close the panel
