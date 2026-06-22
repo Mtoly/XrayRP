@@ -56,6 +56,7 @@ type dataPathWrapper struct {
 	sm          stats.Manager
 	limiter     *limiter.Limiter
 	routePolicy *api.PanelRoutePolicy
+	SpliceCopyEnable bool
 	logger      *log.Entry
 	// ruleMgr provides audit detection
 	ruleMgr interface {
@@ -98,9 +99,9 @@ func (w *dataPathWrapper) selectDispatchHandler(ctx context.Context) (outbound.H
 
 func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 	// Force userland path to keep stats/limit in effect
-	if sess := session.InboundFromContext(ctx); sess != nil {
-		sess.CanSpliceCopy = 3
-	}
+		if sess := session.InboundFromContext(ctx); sess != nil && !w.SpliceCopyEnable {		
+			sess.CanSpliceCopy = 3
+		}
 
 	// --- FIRST: Enforce "same node in, same node out" semantics -------------
 	// This runs on EVERY connection so it must be as fast as possible.
@@ -206,6 +207,7 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string,
 		obm:         c.obm,
 		routePolicy: routePolicy,
 		logger:      c.logger.WithField("outbound_tag", tag),
+		SpliceCopyEnable: c.SpliceCopyEnable,
 	}
 	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)
 	if err := c.obm.AddHandler(context.Background(), wrapper); err != nil {
