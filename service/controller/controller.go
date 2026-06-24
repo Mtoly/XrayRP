@@ -61,6 +61,7 @@ type Controller struct {
 	deviceReportState      *deviceReportState
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
+	SpliceCopyEnable       bool
 }
 
 type periodicTask struct {
@@ -119,6 +120,7 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 		return newSyncCoordinator(executor)
 	}
 	controller.wsRuntimeFactory = controller.newConfiguredWSRuntime
+	controller.SpliceCopyEnable = config.SpliceCopyEnable
 
 	return controller
 }

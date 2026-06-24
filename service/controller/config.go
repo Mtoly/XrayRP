@@ -24,6 +24,7 @@ type Config struct {
 	DisableLocalREALITYConfig bool                             `mapstructure:"DisableLocalREALITYConfig"`
 	EnableREALITY             bool                             `mapstructure:"EnableREALITY"`
 	REALITYConfigs            *REALITYConfig                   `mapstructure:"REALITYConfigs"`
+	SpliceCopyEnable		  bool                             `mapstructure:"SpliceCopyEnable"`
 	WebSocketConfig           *WebSocketConfig                 `mapstructure:"WebSocketConfig"`
 }
 
