@@ -1,8 +1,10 @@
 package newV2board_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 )
 
@@ -71,6 +74,28 @@ func TestWSClient_CloseStopsReadLoop(t *testing.T) {
 	}
 
 	waitDone(t, client.Done())
+}
+
+func TestWSClientContextCancelsDial(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client, err := newV2board.NewWSClientContext(ctx, "ws://"+listener.Addr().String()+"/ws")
+	if err == nil {
+		_ = client.Close()
+		t.Fatal("expected canceled dial error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
 }
 
 func TestWSClient_KeepAliveSendsPingControlFrame(t *testing.T) {
@@ -206,6 +231,70 @@ func TestWSClient_SendDeviceReportSendsXboardReportDevicesEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for device report message")
+	}
+}
+
+func TestWSClient_SendNodeStatusReportSendsNodeStatusEvent(t *testing.T) {
+	t.Parallel()
+
+	messageReceived := make(chan []byte, 1)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read node status message failed: %v", err)
+			return
+		}
+		messageReceived <- data
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	status := &api.NodeStatus{CPU: 12.5, Mem: 35.2, Disk: 81.9, Uptime: 99}
+	if err := client.SendNodeStatusReport(7, status); err != nil {
+		t.Fatalf("SendNodeStatusReport returned error: %v", err)
+	}
+
+	select {
+	case data := <-messageReceived:
+		var got struct {
+			Event string `json:"event"`
+			Data  struct {
+				NodeID int `json:"node_id"`
+				Status struct {
+					CPU    float64 `json:"cpu"`
+					Uptime uint64  `json:"uptime"`
+					Mem    struct {
+						Used int `json:"used"`
+					} `json:"mem"`
+					Disk struct {
+						Used int `json:"used"`
+					} `json:"disk"`
+				} `json:"status"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("invalid node status JSON: %v", err)
+		}
+		if got.Event != newV2board.WSEventXboardNodeStatus {
+			t.Fatalf("unexpected node status event: got %q want %q", got.Event, newV2board.WSEventXboardNodeStatus)
+		}
+		if got.Data.NodeID != 7 {
+			t.Fatalf("unexpected node_id: got %d want 7", got.Data.NodeID)
+		}
+		if got.Data.Status.CPU != 12.5 || got.Data.Status.Uptime != 99 {
+			t.Fatalf("unexpected status basics: %#v", got.Data.Status)
+		}
+		if got.Data.Status.Mem.Used != 35 || got.Data.Status.Disk.Used != 82 {
+			t.Fatalf("unexpected rounded percentages: mem=%d disk=%d", got.Data.Status.Mem.Used, got.Data.Status.Disk.Used)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for node status message")
 	}
 }
 

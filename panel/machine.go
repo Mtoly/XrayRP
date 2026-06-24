@@ -2,12 +2,12 @@ package panel
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"dario.cat/mergo"
+	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/core"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -16,8 +16,6 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/machine"
 )
-
-const machineModeWebSocketUnsupportedMessage = "MachineConfig.ControllerConfig.WebSocketConfig.Enable is not supported in machine mode yet; disable it until shared machine websocket mux is implemented"
 
 func machineModeEnabled(config *Config) bool {
 	return config != nil && config.MachineConfig != nil && config.MachineConfig.Enable
@@ -65,6 +63,15 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 	}
 
 	mc := p.panelConfig.MachineConfig
+	baseControllerConfig, err := buildMachineNodeControllerConfig(mc.ControllerConfig)
+	if err != nil {
+		return nil, err
+	}
+	sharedWS, err := buildMachineSharedWSRuntime(mc, baseControllerConfig.WebSocketConfig, p.logger.WithField("service", "machine-websocket"))
+	if err != nil {
+		return nil, err
+	}
+
 	discoverer := &machine.NewV2boardDiscoverer{
 		Config: newV2board.MachineDiscoveryConfig{
 			APIHost:   mc.ApiHost,
@@ -75,19 +82,37 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 	}
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
 		apiConfig := buildMachineNodeAPIConfig(mc, binding)
-		apiClient := newV2board.New(apiConfig)
+		var apiClient api.API = newV2board.New(apiConfig)
+		if sharedWS != nil {
+			apiClient = machine.WrapAPIWithStatusReporter(apiClient, binding.NodeID, sharedWS)
+		}
+
 		controllerConfig, err := buildMachineNodeControllerConfig(mc.ControllerConfig)
 		if err != nil {
 			return nil, err
 		}
 		p.mergePanelCertConfig(apiClient, controllerConfig)
+
+		if sharedWS != nil && machineSharedWSSupportedNodeType(binding.NodeType) {
+			controllerService := controller.New(server, apiClient, controllerConfig, mc.PanelType)
+			controllerService.SetWSEventRuntimeFactory(sharedWS.NewNodeRuntimeFactory(binding.NodeID))
+			return controllerService, nil
+		}
+
 		return p.buildNodeService(server, apiClient, controllerConfig, mc.PanelType)
 	}
 
-	return machine.NewSupervisor(machine.SupervisorConfig{
+	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
 		Logger:            p.logger.WithField("service", "machine-supervisor"),
 	}, discoverer, factory)
+	if err != nil {
+		return nil, err
+	}
+	if sharedWS != nil {
+		return machine.NewRuntimeService(supervisor, sharedWS), nil
+	}
+	return supervisor, nil
 }
 
 func buildMachineNodeAPIConfig(machineConfig *MachineConfig, binding machine.NodeBinding) *api.Config {
@@ -118,10 +143,39 @@ func buildMachineNodeControllerConfig(template *controller.Config) (*controller.
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone controller config: %w", err)
 	}
-	if controllerConfig.WebSocketConfig != nil && controllerConfig.WebSocketConfig.Enable {
-		return nil, errors.New(machineModeWebSocketUnsupportedMessage)
-	}
 	return controllerConfig, nil
+}
+
+func buildMachineSharedWSRuntime(machineConfig *MachineConfig, wsConfig *controller.WebSocketConfig, logger *log.Entry) (*machine.SharedWSRuntime, error) {
+	if machineConfig == nil || wsConfig == nil || !wsConfig.Enable {
+		return nil, nil
+	}
+
+	endpoint, err := controller.BuildWSEndpoint(&api.WSConfig{
+		APIHost:   machineConfig.ApiHost,
+		MachineID: machineConfig.MachineID,
+		Key:       machineConfig.Token,
+	}, wsConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{
+		Endpoint:          endpoint,
+		HeartbeatInterval: time.Duration(wsConfig.HeartbeatInterval) * time.Second,
+		ReconnectBackoff:  time.Duration(wsConfig.ReconnectBackoff) * time.Second,
+		ResyncOnReconnect: wsConfig.ResyncOnReconnect,
+		Logger:            logger,
+	}), nil
+}
+
+func machineSharedWSSupportedNodeType(nodeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(nodeType)) {
+	case "hysteria", "hysteria2", "tuic", "anytls":
+		return false
+	default:
+		return true
+	}
 }
 
 func cloneControllerConfig(config *controller.Config) (*controller.Config, error) {

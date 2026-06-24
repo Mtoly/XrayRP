@@ -47,6 +47,7 @@ const (
 	WSEventXboardSyncNodes     = "sync.nodes"
 	WSEventXboardSyncDevices   = "sync.devices"
 	WSEventXboardReportDevices = "report.devices"
+	WSEventXboardNodeStatus    = "node.status"
 )
 
 // WSMessageEnvelope is the minimal raw upstream websocket envelope.
@@ -158,6 +159,8 @@ func classifyWSEvent(event string) (WSEventCategory, bool) {
 		WSEventXboardSyncNodes,
 		WSEventXboardSyncDevices:
 		return WSEventCategoryConfig, true
+	case WSEventXboardNodeStatus:
+		return WSEventCategoryStatus, true
 	default:
 		return "", false
 	}

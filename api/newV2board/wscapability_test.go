@@ -26,10 +26,11 @@ func (stubAdapter) Debug()                                            {}
 
 func TestWSCapNewV2boardOptIn(t *testing.T) {
 	var client api.API = newV2board.New(&api.Config{
-		APIHost:  "https://panel.example.com",
-		Key:      "secret-token",
-		NodeID:   7,
-		NodeType: "V2ray",
+		APIHost:   "https://panel.example.com",
+		Key:       "secret-token",
+		NodeID:    7,
+		MachineID: 3,
+		NodeType:  "V2ray",
 	})
 
 	capable, ok := client.(api.WSCapable)
@@ -49,6 +50,9 @@ func TestWSCapNewV2boardOptIn(t *testing.T) {
 	}
 	if wsConfig.NodeID != 7 {
 		t.Fatalf("unexpected ws config NodeID: got %d", wsConfig.NodeID)
+	}
+	if wsConfig.MachineID != 3 {
+		t.Fatalf("unexpected ws config MachineID: got %d", wsConfig.MachineID)
 	}
 	if wsConfig.NodeType != "v2ray" {
 		t.Fatalf("unexpected ws config NodeType: got %q", wsConfig.NodeType)

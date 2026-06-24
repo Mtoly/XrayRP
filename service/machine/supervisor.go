@@ -183,6 +183,10 @@ func (s *Supervisor) reconcilePeriodic() error {
 	return s.reconcile(bindings)
 }
 
+func (s *Supervisor) ReconcileNow() error {
+	return s.reconcilePeriodic()
+}
+
 func (s *Supervisor) discoverBindings() ([]NodeBinding, error) {
 	response, err := s.discoverer.DiscoverMachineNodes()
 	if err != nil {
