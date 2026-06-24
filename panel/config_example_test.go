@@ -24,7 +24,8 @@ MachineConfig:
   ControllerConfig:
     UpdatePeriodic: 45
     WebSocketConfig:
-      Enable: false
+      Enable: true
+      Endpoint: "wss://panel.example.com/api/v1/server/UniProxy/ws"
       HeartbeatInterval: 30
       ReconnectBackoff: 5
       ResyncOnReconnect: true
@@ -70,8 +71,11 @@ MachineConfig:
 	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig == nil {
 		t.Fatal("expected machine websocket config to parse")
 	}
-	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Enable {
-		t.Fatal("expected machine websocket config to be disabled")
+	if !panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Enable {
+		t.Fatal("expected machine websocket config to be enabled")
+	}
+	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Endpoint != "wss://panel.example.com/api/v1/server/UniProxy/ws" {
+		t.Fatalf("expected machine websocket endpoint override to parse, got %q", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.Endpoint)
 	}
 	if panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval != 30 {
 		t.Fatalf("expected machine websocket heartbeat interval 30, got %d", panelConfig.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval)
