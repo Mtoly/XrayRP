@@ -84,7 +84,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		apiConfig := buildMachineNodeAPIConfig(mc, binding)
 		var apiClient api.API = newV2board.New(apiConfig)
 		if sharedWS != nil {
-			apiClient = machine.WrapAPIWithStatusReporter(apiClient, binding.NodeID, sharedWS)
+			apiClient = machine.WrapAPIWithReporter(apiClient, binding.NodeID, sharedWS)
 		}
 
 		controllerConfig, err := buildMachineNodeControllerConfig(mc.ControllerConfig)

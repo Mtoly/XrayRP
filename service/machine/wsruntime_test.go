@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -189,6 +190,31 @@ func TestSupervisorReconcileNowDiscoversImmediately(t *testing.T) {
 	}
 }
 
+func TestSharedWSRuntimeReportsNodeDevicesThroughCurrentClient(t *testing.T) {
+	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
+	client := newRecordingSharedWSClient()
+	runtime.setClient(client)
+
+	if !runtime.DeviceReporterReady() {
+		t.Fatal("expected device reporter to be ready with current client")
+	}
+
+	devices := map[int][]string{1: []string{"192.0.2.1"}}
+	if err := runtime.ReportNodeDevices(7, devices); err != nil {
+		t.Fatalf("ReportNodeDevices returned error: %v", err)
+	}
+	devices[1][0] = "198.51.100.1"
+
+	call := receiveDeviceCall(t, client.deviceCalls)
+	if call.nodeID != 7 {
+		t.Fatalf("unexpected node ID: got %d want 7", call.nodeID)
+	}
+	want := map[int][]string{1: []string{"192.0.2.1"}}
+	if !reflect.DeepEqual(call.devices, want) {
+		t.Fatalf("unexpected devices: got %#v want %#v", call.devices, want)
+	}
+}
+
 func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 	restErr := errors.New("rest failed")
 	apiClient := &recordingStatusAPI{err: restErr}
@@ -208,9 +234,44 @@ func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 	}
 }
 
+func TestReportingAPIReportsNodeDevicesOverWS(t *testing.T) {
+	apiClient := &recordingStatusAPI{}
+	reporter := &recordingNodeDeviceReporter{ready: true}
+	wrapped := WrapAPIWithReporter(apiClient, 9, reporter)
+	deviceReporter, ok := wrapped.(interface {
+		ReportNodeDevices(map[int][]string) error
+	})
+	if !ok {
+		t.Fatal("expected wrapped API to expose node device reporter")
+	}
+	readiness, ok := wrapped.(interface{ DeviceReporterReady() bool })
+	if !ok || !readiness.DeviceReporterReady() {
+		t.Fatal("expected wrapped API to expose ready device reporter")
+	}
+
+	devices := map[int][]string{1: []string{"192.0.2.1"}}
+	if err := deviceReporter.ReportNodeDevices(devices); err != nil {
+		t.Fatalf("ReportNodeDevices returned error: %v", err)
+	}
+	devices[1][0] = "198.51.100.1"
+
+	if reporter.nodeID != 9 {
+		t.Fatalf("unexpected reporter node ID: got %d want 9", reporter.nodeID)
+	}
+	want := map[int][]string{1: []string{"192.0.2.1"}}
+	if !reflect.DeepEqual(reporter.devices, want) {
+		t.Fatalf("unexpected reported devices: got %#v want %#v", reporter.devices, want)
+	}
+}
+
 type statusCall struct {
 	nodeID int
 	status *api.NodeStatus
+}
+
+type deviceCall struct {
+	nodeID  int
+	devices map[int][]string
 }
 
 type recordingSharedWSClient struct {
@@ -218,6 +279,7 @@ type recordingSharedWSClient struct {
 	errs        chan error
 	done        chan struct{}
 	statusCalls chan statusCall
+	deviceCalls chan deviceCall
 }
 
 func newRecordingSharedWSClient() *recordingSharedWSClient {
@@ -226,6 +288,7 @@ func newRecordingSharedWSClient() *recordingSharedWSClient {
 		errs:        make(chan error),
 		done:        make(chan struct{}),
 		statusCalls: make(chan statusCall, 4),
+		deviceCalls: make(chan deviceCall, 4),
 	}
 }
 
@@ -235,6 +298,14 @@ func (c *recordingSharedWSClient) Done() <-chan struct{}              { return c
 func (c *recordingSharedWSClient) KeepAlive() error                   { return nil }
 func (c *recordingSharedWSClient) Pong() error                        { return nil }
 func (c *recordingSharedWSClient) Close() error                       { close(c.done); return nil }
+func (c *recordingSharedWSClient) SendDeviceReport(devices map[int][]string) error {
+	c.deviceCalls <- deviceCall{devices: cloneDeviceReport(devices)}
+	return nil
+}
+func (c *recordingSharedWSClient) SendNodeDeviceReport(nodeID int, devices map[int][]string) error {
+	c.deviceCalls <- deviceCall{nodeID: nodeID, devices: cloneDeviceReport(devices)}
+	return nil
+}
 func (c *recordingSharedWSClient) SendNodeStatusReport(nodeID int, status *api.NodeStatus) error {
 	c.statusCalls <- statusCall{nodeID: nodeID, status: status}
 	return nil
@@ -249,6 +320,22 @@ func (r *recordingNodeStatusReporter) ReportNodeStatus(nodeID int, nodeStatus *a
 	r.nodeID = nodeID
 	r.status = nodeStatus
 	return nil
+}
+
+type recordingNodeDeviceReporter struct {
+	nodeID  int
+	devices map[int][]string
+	ready   bool
+}
+
+func (r *recordingNodeDeviceReporter) ReportNodeDevices(nodeID int, devices map[int][]string) error {
+	r.nodeID = nodeID
+	r.devices = cloneDeviceReport(devices)
+	return nil
+}
+
+func (r *recordingNodeDeviceReporter) DeviceReporterReady() bool {
+	return r.ready
 }
 
 type recordingStatusAPI struct {
@@ -302,4 +389,26 @@ func receiveStatusCall(t *testing.T, ch <-chan statusCall) statusCall {
 		t.Fatal("timeout waiting for status call")
 		return statusCall{}
 	}
+}
+
+func receiveDeviceCall(t *testing.T, ch <-chan deviceCall) deviceCall {
+	t.Helper()
+	select {
+	case call := <-ch:
+		return call
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for device call")
+		return deviceCall{}
+	}
+}
+
+func cloneDeviceReport(devices map[int][]string) map[int][]string {
+	if devices == nil {
+		return nil
+	}
+	cloned := make(map[int][]string, len(devices))
+	for uid, ips := range devices {
+		cloned[uid] = append([]string(nil), ips...)
+	}
+	return cloned
 }

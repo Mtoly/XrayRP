@@ -97,11 +97,26 @@ func (c *WSClient) Pong() error {
 
 // SendDeviceReport sends the current online device snapshot to Xboard.
 func (c *WSClient) SendDeviceReport(devices map[int][]string) error {
+	return c.writeJSONEvent(WSEventXboardReportDevices, buildDeviceReportPayload(devices))
+}
+
+// SendNodeDeviceReport sends the current online device snapshot for a machine-managed node.
+func (c *WSClient) SendNodeDeviceReport(nodeID int, devices map[int][]string) error {
+	if nodeID <= 0 {
+		return errInvalidNodeDeviceReportNodeID
+	}
+	return c.writeJSONEvent(WSEventXboardReportDevices, map[string]any{
+		"node_id": nodeID,
+		"devices": buildDeviceReportPayload(devices),
+	})
+}
+
+func buildDeviceReportPayload(devices map[int][]string) map[string]any {
 	payload := make(map[string]any, len(devices))
 	for uid, ips := range devices {
 		payload[strconv.Itoa(uid)] = append([]string(nil), ips...)
 	}
-	return c.writeJSONEvent(WSEventXboardReportDevices, payload)
+	return payload
 }
 
 func (c *WSClient) SendNodeStatusReport(nodeID int, nodeStatus *api.NodeStatus) error {
