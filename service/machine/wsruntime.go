@@ -30,6 +30,8 @@ type sharedWSClient interface {
 	Done() <-chan struct{}
 	KeepAlive() error
 	Pong() error
+	SendDeviceReport(map[int][]string) error
+	SendNodeDeviceReport(int, map[int][]string) error
 	SendNodeStatusReport(int, *api.NodeStatus) error
 	Close() error
 }
@@ -136,6 +138,22 @@ func (r *SharedWSRuntime) Close() error {
 		<-done
 	}
 	return nil
+}
+
+func (r *SharedWSRuntime) DeviceReporterReady() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.client != nil
+}
+
+func (r *SharedWSRuntime) ReportNodeDevices(nodeID int, devices map[int][]string) error {
+	r.mu.RLock()
+	client := r.client
+	r.mu.RUnlock()
+	if client == nil {
+		return nil
+	}
+	return client.SendNodeDeviceReport(nodeID, devices)
 }
 
 func (r *SharedWSRuntime) ReportNodeStatus(nodeID int, nodeStatus *api.NodeStatus) error {

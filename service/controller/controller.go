@@ -194,6 +194,14 @@ type controllerDeviceReporter interface {
 	ReportDevices(map[int][]string) error
 }
 
+type controllerNodeDeviceReporter interface {
+	ReportNodeDevices(map[int][]string) error
+}
+
+type controllerNodeDeviceReporterReadiness interface {
+	DeviceReporterReady() bool
+}
+
 type controllerDeviceReporterReadiness interface {
 	DeviceReporterReady() bool
 }
@@ -215,7 +223,7 @@ func (c *Controller) ensureDeviceReportState() *deviceReportState {
 }
 
 func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) {
-	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok && deviceReporterReady(reporter) {
+	if reporter, ok := c.deviceReporter(); ok && deviceReporterReady(reporter) {
 		state := c.ensureDeviceReportState()
 		if devices, pending, changed := state.PrepareChangedReport(onlineDevice); changed {
 			if err := reporter.ReportDevices(devices); err != nil {
@@ -235,6 +243,32 @@ func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineU
 			c.logger.Printf("Report %d online users", len(*onlineDevice))
 		}
 	}
+}
+
+func (c *Controller) deviceReporter() (controllerDeviceReporter, bool) {
+	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok {
+		return reporter, true
+	}
+	if reporter, ok := c.apiClient.(controllerNodeDeviceReporter); ok {
+		return nodeDeviceReporterAdapter{reporter: reporter}, true
+	}
+	return nil, false
+}
+
+type nodeDeviceReporterAdapter struct {
+	reporter controllerNodeDeviceReporter
+}
+
+func (a nodeDeviceReporterAdapter) ReportDevices(devices map[int][]string) error {
+	if a.reporter == nil {
+		return nil
+	}
+	return a.reporter.ReportNodeDevices(devices)
+}
+
+func (a nodeDeviceReporterAdapter) DeviceReporterReady() bool {
+	readiness, ok := a.reporter.(controllerNodeDeviceReporterReadiness)
+	return !ok || readiness.DeviceReporterReady()
 }
 
 func deviceReporterReady(reporter controllerDeviceReporter) bool {
