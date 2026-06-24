@@ -22,18 +22,15 @@ func TestValidateMachineModeRejectsStaticNodes(t *testing.T) {
 	}
 }
 
-func TestValidateMachineModeRejectsWebSocketEnabled(t *testing.T) {
+func TestValidateMachineModeAllowsWebSocketEnabled(t *testing.T) {
 	config := validMachineModeConfig()
 	config.MachineConfig.ControllerConfig = &controller.Config{
 		WebSocketConfig: &controller.WebSocketConfig{Enable: true},
 	}
 
 	err := validateMachineModeConfig(config)
-	if err == nil {
-		t.Fatal("expected WebSocket unsupported error")
-	}
-	if !strings.Contains(err.Error(), "WebSocket") {
-		t.Fatalf("expected WebSocket error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected WebSocket config to be valid in machine mode, got %v", err)
 	}
 }
 
@@ -54,7 +51,7 @@ func TestBuildMachineSupervisorRejectsStaticNodes(t *testing.T) {
 	}
 }
 
-func TestBuildMachineSupervisorRejectsWebSocketEnabled(t *testing.T) {
+func TestBuildMachineSupervisorAllowsWebSocketEnabled(t *testing.T) {
 	config := validMachineModeConfig()
 	config.MachineConfig.ControllerConfig = &controller.Config{
 		WebSocketConfig: &controller.WebSocketConfig{Enable: true},
@@ -62,14 +59,14 @@ func TestBuildMachineSupervisorRejectsWebSocketEnabled(t *testing.T) {
 	panel := New(config)
 
 	service, err := panel.buildMachineSupervisor(nil)
-	if err == nil {
-		t.Fatal("expected WebSocket unsupported error")
+	if err != nil {
+		t.Fatalf("expected machine supervisor with shared WebSocket, got %v", err)
 	}
-	if service != nil {
-		t.Fatalf("expected no supervisor service, got %T", service)
+	if service == nil {
+		t.Fatal("expected machine runtime service")
 	}
-	if err.Error() != machineModeWebSocketUnsupportedMessage {
-		t.Fatalf("expected WebSocket error %q, got %v", machineModeWebSocketUnsupportedMessage, err)
+	if _, ok := service.(*machine.RuntimeService); !ok {
+		t.Fatalf("expected machine runtime service, got %T", service)
 	}
 }
 

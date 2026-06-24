@@ -137,6 +137,59 @@ func (c *Controller) buildWSRuntime(submitter syncActionSubmitter) (wsRuntimeLif
 	return c.wsRuntimeFactory(submitter)
 }
 
+type WSEventRuntimeFactory func(WSEventSubmitter) (WSRuntimeLifecycle, error)
+
+func (c *Controller) SetWSEventRuntimeFactory(factory WSEventRuntimeFactory) {
+	if factory == nil {
+		c.wsRuntimeFactory = c.newConfiguredWSRuntime
+		return
+	}
+
+	c.wsRuntimeFactory = func(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+		return factory(wsEventSubmitter{submitter: submitter})
+	}
+}
+
+type wsEventSubmitter struct {
+	submitter syncActionSubmitter
+}
+
+func (s wsEventSubmitter) SubmitWSEvent(event *newV2board.WSEvent) {
+	if s.submitter == nil {
+		return
+	}
+	action, ok := syncActionFromWSEventPayload(event, time.Now())
+	if !ok {
+		return
+	}
+	s.submitter.Submit(action)
+}
+
+func (s wsEventSubmitter) SubmitWSParseError() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(syncActionFromWSParseError(time.Now()))
+}
+
+func (s wsEventSubmitter) SubmitWSDisconnect() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(syncActionFromWSDisconnect(time.Now()))
+}
+
+func (s wsEventSubmitter) SubmitWSReconnect() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{
+		Trigger:    wsRuntimeReconnectTrigger,
+		OccurredAt: time.Now(),
+		Reason:     "websocket runtime reconnected",
+	}))
+}
+
 type controllerDeviceReporter interface {
 	ReportDevices(map[int][]string) error
 }
@@ -218,15 +271,15 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 		HeartbeatInterval: time.Duration(c.config.WebSocketConfig.HeartbeatInterval) * time.Second,
 		ResyncOnReconnect: c.config.WebSocketConfig.ResyncOnReconnect,
 	}
-	factory := func(context.Context) (wsRuntimeClient, error) {
-		return newV2board.NewWSClient(endpoint)
+	factory := func(ctx context.Context) (wsRuntimeClient, error) {
+		return newV2board.NewWSClientContext(ctx, endpoint)
 	}
 	return newWSRuntime(factory, submitter, options), nil
 }
 
 func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
 	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.Endpoint) != "" {
-		return buildWSEndpoint(wsConfig, runtimeConfig)
+		return BuildWSEndpoint(wsConfig, runtimeConfig)
 	}
 
 	if discoverer, ok := apiClient.(api.WSEndpointDiscoverer); ok {
@@ -236,14 +289,18 @@ func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *Web
 				derived = *runtimeConfig
 			}
 			derived.Endpoint = endpoint
-			return buildWSEndpoint(wsConfig, &derived)
+			return BuildWSEndpoint(wsConfig, &derived)
 		}
 	}
 
-	return buildWSEndpoint(wsConfig, runtimeConfig)
+	return BuildWSEndpoint(wsConfig, runtimeConfig)
 }
 
 func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	return BuildWSEndpoint(wsConfig, runtimeConfig)
+}
+
+func BuildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
 	if wsConfig == nil {
 		return "", errors.New("controller: websocket config unavailable")
 	}
@@ -279,11 +336,19 @@ func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (st
 	}
 
 	query := parsed.Query()
-	if query.Get("node_id") == "" {
-		query.Set("node_id", strconv.Itoa(wsConfig.NodeID))
-	}
-	if query.Get("node_type") == "" {
-		query.Set("node_type", wsConfig.NodeType)
+	if wsConfig.MachineID > 0 {
+		query.Del("node_id")
+		query.Del("node_type")
+		if query.Get("machine_id") == "" {
+			query.Set("machine_id", strconv.Itoa(wsConfig.MachineID))
+		}
+	} else {
+		if query.Get("node_id") == "" {
+			query.Set("node_id", strconv.Itoa(wsConfig.NodeID))
+		}
+		if query.Get("node_type") == "" {
+			query.Set("node_type", wsConfig.NodeType)
+		}
 	}
 	if query.Get("token") == "" {
 		query.Set("token", wsConfig.Key)

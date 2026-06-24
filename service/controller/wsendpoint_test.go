@@ -92,3 +92,23 @@ func TestResolveWSEndpointFallsBackToLegacyWhenDiscoveryEmptyOrErrors(t *testing
 		})
 	}
 }
+
+func TestBuildWSEndpointUsesMachineIdentityWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := BuildWSEndpoint(&api.WSConfig{
+		APIHost:   "https://panel.example",
+		NodeID:    7,
+		MachineID: 42,
+		NodeType:  "vless",
+		Key:       "machine-token",
+	}, &WebSocketConfig{Endpoint: "wss://panel.example/ws?node_id=7&node_type=vless"})
+	if err != nil {
+		t.Fatalf("BuildWSEndpoint returned error: %v", err)
+	}
+
+	want := "wss://panel.example/ws?machine_id=42&token=machine-token"
+	if endpoint != want {
+		t.Fatalf("unexpected endpoint: got %q want %q", endpoint, want)
+	}
+}

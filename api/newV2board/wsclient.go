@@ -1,11 +1,13 @@
 package newV2board
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/gorilla/websocket"
 )
 
@@ -27,7 +29,12 @@ type WSClient struct {
 
 // NewWSClient dials the websocket endpoint and starts the read loop.
 func NewWSClient(rawURL string) (*WSClient, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(rawURL, nil)
+	return NewWSClientContext(context.Background(), rawURL)
+}
+
+// NewWSClientContext dials the websocket endpoint with ctx and starts the read loop.
+func NewWSClientContext(ctx context.Context, rawURL string) (*WSClient, error) {
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +102,14 @@ func (c *WSClient) SendDeviceReport(devices map[int][]string) error {
 		payload[strconv.Itoa(uid)] = append([]string(nil), ips...)
 	}
 	return c.writeJSONEvent(WSEventXboardReportDevices, payload)
+}
+
+func (c *WSClient) SendNodeStatusReport(nodeID int, nodeStatus *api.NodeStatus) error {
+	payload, err := buildNodeStatusWSPayload(nodeID, nodeStatus)
+	if err != nil {
+		return err
+	}
+	return c.writeJSONEvent(WSEventXboardNodeStatus, payload)
 }
 
 func (c *WSClient) writeJSONEvent(event string, data map[string]any) error {

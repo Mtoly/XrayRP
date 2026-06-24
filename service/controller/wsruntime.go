@@ -29,9 +29,18 @@ type wsRuntimeDeviceReporter interface {
 
 type wsRuntimeClientFactory func(context.Context) (wsRuntimeClient, error)
 
-type wsRuntimeLifecycle interface {
+type WSRuntimeLifecycle interface {
 	Start()
 	Stop()
+}
+
+type wsRuntimeLifecycle = WSRuntimeLifecycle
+
+type WSEventSubmitter interface {
+	SubmitWSEvent(*newV2board.WSEvent)
+	SubmitWSParseError()
+	SubmitWSDisconnect()
+	SubmitWSReconnect()
 }
 
 type wsRuntimeTicker interface {

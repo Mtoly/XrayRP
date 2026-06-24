@@ -11,6 +11,7 @@ import (
 
 var (
 	errNilNodeStatus           = errors.New("node status is nil")
+	errInvalidNodeStatusNodeID = errors.New("node status node ID must be greater than 0")
 	errXboardReportUnsupported = errors.New("xboard report endpoint unsupported")
 )
 
@@ -39,6 +40,22 @@ func buildReportStatusPayload(nodeStatus *api.NodeStatus) (map[string]any, error
 				"used":  clampReportPercent(nodeStatus.Disk),
 			},
 		},
+	}, nil
+}
+
+func buildNodeStatusWSPayload(nodeID int, nodeStatus *api.NodeStatus) (map[string]any, error) {
+	if nodeID <= 0 {
+		return nil, errInvalidNodeStatusNodeID
+	}
+
+	statusPayload, err := buildReportStatusPayload(nodeStatus)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"node_id": nodeID,
+		"status":  statusPayload["status"],
 	}, nil
 }
 

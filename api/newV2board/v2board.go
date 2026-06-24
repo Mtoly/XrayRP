@@ -26,6 +26,7 @@ type APIClient struct {
 	client                  *resty.Client
 	APIHost                 string
 	NodeID                  int
+	MachineID               int
 	Key                     string
 	NodeType                string
 	EnableVless             bool
@@ -72,6 +73,7 @@ func New(apiConfig *api.Config) *APIClient {
 	apiClient := &APIClient{
 		client:        client,
 		NodeID:        apiConfig.NodeID,
+		MachineID:     apiConfig.MachineID,
 		Key:           apiConfig.Key,
 		APIHost:       apiConfig.APIHost,
 		NodeType:      apiConfig.NodeType,
@@ -98,10 +100,11 @@ func (c *APIClient) wsConfig() *api.WSConfig {
 	}
 
 	return &api.WSConfig{
-		APIHost:  c.APIHost,
-		NodeID:   c.NodeID,
-		Key:      c.Key,
-		NodeType: panelNodeType(c.NodeType, c.EnableVless),
+		APIHost:   c.APIHost,
+		NodeID:    c.NodeID,
+		MachineID: c.MachineID,
+		Key:       c.Key,
+		NodeType:  panelNodeType(c.NodeType, c.EnableVless),
 	}
 }
 
