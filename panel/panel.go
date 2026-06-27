@@ -28,6 +28,7 @@ import (
 	"github.com/Mtoly/XrayRP/api/v2raysocks"
 	"github.com/Mtoly/XrayRP/app/mydispatcher"
 	_ "github.com/Mtoly/XrayRP/cmd/distro/all"
+	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/anytls"
@@ -214,7 +215,11 @@ func (p *Panel) Start() error {
 
 	for _, s := range services {
 		if err := s.Start(); err != nil {
-			p.logger.Error("Failed to start service; error details omitted because they may contain credentials")
+			if common.ShowErrorDetails() {
+				p.logger.Errorf("Failed to start service: %v", err)
+			} else {
+				p.logger.Error("Failed to start service; error details omitted because they may contain credentials")
+			}
 			return fmt.Errorf("failed to start service: %w", err)
 		}
 	}
@@ -292,6 +297,7 @@ func (p *Panel) buildControllerConfig(template *controller.Config) (*controller.
 			return nil, fmt.Errorf("failed to read controller config: %w", err)
 		}
 	}
+	controllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
 	return controllerConfig, nil
 }
 

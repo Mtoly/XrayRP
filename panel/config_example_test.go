@@ -13,6 +13,9 @@ func TestMachineConfigParses(t *testing.T) {
 	config := viper.New()
 	config.SetConfigType("yml")
 	if err := config.ReadConfig(strings.NewReader(`
+Log:
+  Level: warning
+  ShowErrorDetails: true
 MachineConfig:
   Enable: true
   PanelType: "NewV2board"
@@ -38,6 +41,9 @@ MachineConfig:
 		t.Fatalf("unmarshal machine config: %v", err)
 	}
 
+	if !panelConfig.LogConfig.ShowErrorDetails {
+		t.Fatal("expected log ShowErrorDetails to parse as true")
+	}
 	if panelConfig.MachineConfig == nil {
 		t.Fatal("expected MachineConfig to parse")
 	}

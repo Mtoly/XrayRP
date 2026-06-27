@@ -1,14 +1,17 @@
 package machine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service"
+	"github.com/sirupsen/logrus"
 )
 
 type fakeService struct {
@@ -72,6 +75,44 @@ func (f *fakeFactory) build(binding NodeBinding) (service.Service, error) {
 	service := &fakeService{}
 	f.services[binding.NodeID] = service
 	return service, nil
+}
+
+func TestSupervisorLogWarningOmitsErrorDetailsByDefault(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buffer)
+	logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true})
+	err := errors.New("token=secret")
+	supervisor := &Supervisor{config: SupervisorConfig{Logger: logrus.NewEntry(logger)}}
+
+	supervisor.logWarning(err)
+
+	logOutput := buffer.String()
+	if strings.Contains(logOutput, err.Error()) {
+		t.Fatalf("expected sensitive error to be omitted, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "details omitted") {
+		t.Fatalf("expected redacted log message, got %q", logOutput)
+	}
+}
+
+func TestSupervisorLogWarningCanShowErrorDetails(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buffer)
+	logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true})
+	err := errors.New("token=secret")
+	supervisor := &Supervisor{config: SupervisorConfig{
+		Logger:           logrus.NewEntry(logger),
+		ShowErrorDetails: true,
+	}}
+
+	supervisor.logWarning(err)
+
+	logOutput := buffer.String()
+	if !strings.Contains(logOutput, err.Error()) {
+		t.Fatalf("expected detailed error to be logged, got %q", logOutput)
+	}
 }
 
 func TestSupervisorStartFailsWhenDiscoveryFails(t *testing.T) {

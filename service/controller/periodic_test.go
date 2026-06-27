@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/sirupsen/logrus"
 )
 
 type recordingPeriodic struct {
@@ -24,6 +27,56 @@ func (p *recordingPeriodic) Start() error {
 func (p *recordingPeriodic) Close() error {
 	p.closed++
 	return p.closeErr
+}
+
+type failingPeriodic struct {
+	err error
+}
+
+func (p failingPeriodic) Start() error {
+	return p.err
+}
+
+func (p failingPeriodic) Close() error {
+	return nil
+}
+
+func TestControllerStartPeriodicTaskOmitsErrorDetailsByDefault(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buffer)
+	logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true})
+	err := errors.New("token=secret")
+	controller := &Controller{logger: logrus.NewEntry(logger)}
+
+	controller.startPeriodicTask("node monitor", failingPeriodic{err: err})
+
+	logOutput := buffer.String()
+	if strings.Contains(logOutput, err.Error()) {
+		t.Fatalf("expected sensitive error to be omitted, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "details omitted") {
+		t.Fatalf("expected redacted log message, got %q", logOutput)
+	}
+}
+
+func TestControllerStartPeriodicTaskCanShowErrorDetails(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buffer)
+	logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true})
+	err := errors.New("token=secret")
+	controller := &Controller{
+		config: &Config{ShowErrorDetails: true},
+		logger: logrus.NewEntry(logger),
+	}
+
+	controller.startPeriodicTask("node monitor", failingPeriodic{err: err})
+
+	logOutput := buffer.String()
+	if !strings.Contains(logOutput, err.Error()) {
+		t.Fatalf("expected detailed error to be logged, got %q", logOutput)
+	}
 }
 
 func TestNormalizeBaseConfigInterval(t *testing.T) {

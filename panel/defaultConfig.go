@@ -4,9 +4,10 @@ import "github.com/Mtoly/XrayRP/service/controller"
 
 func getDefaultLogConfig() *LogConfig {
 	return &LogConfig{
-		Level:      "none",
-		AccessPath: "",
-		ErrorPath:  "",
+		Level:            "none",
+		AccessPath:       "",
+		ErrorPath:        "",
+		ShowErrorDetails: false,
 	}
 }
 

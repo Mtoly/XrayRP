@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/panel"
 )
 
@@ -25,7 +26,11 @@ var (
 		Use: "XrayR",
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := run(); err != nil {
-				log.Error("XrayR failed to start; error details omitted because they may contain credentials")
+				if common.ShowErrorDetails() {
+					log.Errorf("XrayR failed to start: %v", err)
+				} else {
+					log.Error("XrayR failed to start; error details omitted because they may contain credentials")
+				}
 				os.Exit(1)
 			}
 		},
@@ -91,6 +96,7 @@ func run() error {
 	} else {
 		log.SetReportCaller(false)
 	}
+	common.SetShowErrorDetails(panelConfig.ShowErrorDetails())
 
 	// Create initial panel instance.
 	p := panel.New(panelConfig)
@@ -144,6 +150,7 @@ func run() error {
 		} else {
 			log.SetReportCaller(false)
 		}
+		common.SetShowErrorDetails(newPanelConfig.ShowErrorDetails())
 
 		panelConfig = newPanelConfig
 		p = panel.New(panelConfig)

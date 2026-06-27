@@ -9,6 +9,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/service"
 	log "github.com/sirupsen/logrus"
 )
@@ -37,6 +38,7 @@ type SupervisorConfig struct {
 	DiscoveryInterval    time.Duration
 	MinDiscoveryInterval time.Duration
 	Logger               *log.Entry
+	ShowErrorDetails     bool
 }
 
 type Supervisor struct {
@@ -403,7 +405,15 @@ func (s *Supervisor) logWarning(err error) {
 	if err == nil || s.config.Logger == nil {
 		return
 	}
+	if s.showErrorDetails() {
+		s.config.Logger.Warn(err)
+		return
+	}
 	s.config.Logger.Warn("machine supervisor operation failed; error details omitted because they may contain credentials")
+}
+
+func (s *Supervisor) showErrorDetails() bool {
+	return common.ShowErrorDetails() || s != nil && s.config.ShowErrorDetails
 }
 
 func normalizeDiscoveryInterval(interval, min time.Duration) time.Duration {

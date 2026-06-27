@@ -25,6 +25,7 @@ type Config struct {
 	EnableREALITY             bool                             `mapstructure:"EnableREALITY"`
 	REALITYConfigs            *REALITYConfig                   `mapstructure:"REALITYConfigs"`
 	WebSocketConfig           *WebSocketConfig                 `mapstructure:"WebSocketConfig"`
+	ShowErrorDetails          bool                             `mapstructure:"-"`
 }
 
 type WebSocketConfig struct {

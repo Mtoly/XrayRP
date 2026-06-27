@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/common"
 	"github.com/xtls/xray-core/common/task"
 )
 
@@ -49,8 +50,16 @@ func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) {
 		return
 	}
 	if err := periodic.Start(); err != nil && c.logger != nil {
-		c.logger.WithField("task", tag).Warn("periodic task failed; error details omitted because they may contain credentials")
+		if c.showErrorDetails() {
+			c.logger.WithField("task", tag).Warn(err)
+		} else {
+			c.logger.WithField("task", tag).Warn("periodic task failed; error details omitted because they may contain credentials")
+		}
 	}
+}
+
+func (c *Controller) showErrorDetails() bool {
+	return common.ShowErrorDetails() || c != nil && c.config != nil && c.config.ShowErrorDetails
 }
 
 func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) {
