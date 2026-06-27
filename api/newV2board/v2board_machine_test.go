@@ -54,6 +54,16 @@ func TestNewV2boardClientSendsMachineIDWhenConfigured(t *testing.T) {
 }
 
 func TestNewV2boardMachineClientUsesV2Endpoints(t *testing.T) {
+	testNewV2boardMachineClientUsesV2Endpoints(t, "Vless")
+}
+
+func TestNewV2boardMachineClientAcceptsLowercaseVlessUsers(t *testing.T) {
+	testNewV2boardMachineClientUsesV2Endpoints(t, "vless")
+}
+
+func testNewV2boardMachineClientUsesV2Endpoints(t *testing.T, nodeType string) {
+	t.Helper()
+
 	requests := make(chan *http.Request, 5)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests <- r.Clone(r.Context())
@@ -74,7 +84,7 @@ func TestNewV2boardMachineClientUsesV2Endpoints(t *testing.T) {
 	client := newV2board.New(&api.Config{
 		APIHost:   server.URL,
 		NodeID:    11,
-		NodeType:  "Vless",
+		NodeType:  nodeType,
 		Key:       "machine-token",
 		MachineID: 7,
 	})

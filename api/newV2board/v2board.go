@@ -224,8 +224,9 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	var users []*user
 	path := c.userPath()
 
-	switch c.NodeType {
-	case "V2ray", "Trojan", "Shadowsocks", "Vmess", "Vless", "Hysteria2", "hysteria2", "Hysteria", "hysteria", "Tuic", "tuic", "AnyTLS", "anytls", "Socks", "socks", "HTTP", "http":
+	nodeType := strings.ToLower(strings.TrimSpace(c.NodeType))
+	switch nodeType {
+	case "v2ray", "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "hysteria", "tuic", "anytls", "socks", "http":
 		break
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", c.NodeType)
@@ -275,7 +276,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 			u.DeviceLimit = c.DeviceLimit
 		}
 		u.Email = u.UUID + "@v2board.user"
-		if c.NodeType == "Shadowsocks" {
+		if nodeType == "shadowsocks" {
 			u.Passwd = u.UUID
 		}
 		userList[i] = u
