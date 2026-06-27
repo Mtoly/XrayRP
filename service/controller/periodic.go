@@ -49,7 +49,7 @@ func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) {
 		return
 	}
 	if err := periodic.Start(); err != nil && c.logger != nil {
-		c.logger.WithField("task", tag).Print(err)
+		c.logger.WithField("task", tag).Warn("periodic task failed; error details omitted because they may contain credentials")
 	}
 }
 

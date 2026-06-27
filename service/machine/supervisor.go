@@ -403,7 +403,7 @@ func (s *Supervisor) logWarning(err error) {
 	if err == nil || s.config.Logger == nil {
 		return
 	}
-	s.config.Logger.Warn(err)
+	s.config.Logger.Warn("machine supervisor operation failed; error details omitted because they may contain credentials")
 }
 
 func normalizeDiscoveryInterval(interval, min time.Duration) time.Duration {
