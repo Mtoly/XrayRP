@@ -108,6 +108,8 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 			return "", "", fmt.Errorf("cert file path or key file path not exist")
 		}
 		return certConfig.CertFile, certConfig.KeyFile, nil
+	case "content":
+		return mylego.ContentCert(certConfig)
 	case "dns":
 		lego, err := mylego.New(certConfig)
 		if err != nil {

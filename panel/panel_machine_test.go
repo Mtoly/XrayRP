@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/machine"
 )
@@ -225,6 +227,56 @@ func TestBuildMachineControllerConfigReturnsFreshConfigPerNode(t *testing.T) {
 	}
 	if cfg2.GlobalDeviceLimitConfig.RedisAddr != template.GlobalDeviceLimitConfig.RedisAddr {
 		t.Fatalf("mutating cfg1 GlobalDeviceLimitConfig changed cfg2: got %q", cfg2.GlobalDeviceLimitConfig.RedisAddr)
+	}
+}
+
+func TestApplyPanelCertConfigPreservesContentMode(t *testing.T) {
+	certConfig := &mylego.CertConfig{}
+	panelCert := &api.XrayRCertConfig{
+		CertMode:    "content",
+		CertDomain:  "example.com",
+		CertContent: "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----\n",
+		KeyContent:  "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
+	}
+
+	if err := applyPanelCertConfig(certConfig, panelCert); err != nil {
+		t.Fatalf("applyPanelCertConfig returned error: %v", err)
+	}
+	if certConfig.CertMode != "content" {
+		t.Fatalf("expected content mode to be preserved, got %q", certConfig.CertMode)
+	}
+	if certConfig.CertDomain != panelCert.CertDomain {
+		t.Fatalf("expected cert domain %q, got %q", panelCert.CertDomain, certConfig.CertDomain)
+	}
+	if certConfig.CertContent != panelCert.CertContent || certConfig.KeyContent != panelCert.KeyContent {
+		t.Fatalf("expected cert/key content to be preserved, got cert=%q key=%q", certConfig.CertContent, certConfig.KeyContent)
+	}
+	if certConfig.CertFile != "" || certConfig.KeyFile != "" {
+		t.Fatalf("expected content mode not to write file paths in panel layer, got cert=%q key=%q", certConfig.CertFile, certConfig.KeyFile)
+	}
+}
+
+func TestApplyPanelCertConfigSkipsEmptyLegacyCertConfig(t *testing.T) {
+	certConfig := &mylego.CertConfig{}
+	panelCert := &api.XrayRCertConfig{}
+
+	if err := applyPanelCertConfig(certConfig, panelCert); err != nil {
+		t.Fatalf("applyPanelCertConfig returned error: %v", err)
+	}
+	if certConfig.CertMode != "" || certConfig.Provider != "" || certConfig.Email != "" || len(certConfig.DNSEnv) != 0 {
+		t.Fatalf("expected empty panel cert config to be ignored, got %#v", certConfig)
+	}
+}
+
+func TestApplyPanelCertConfigUsesDNSOnlyWhenPanelProvidesDNSFields(t *testing.T) {
+	certConfig := &mylego.CertConfig{}
+	panelCert := &api.XrayRCertConfig{Provider: "cloudflare"}
+
+	if err := applyPanelCertConfig(certConfig, panelCert); err != nil {
+		t.Fatalf("applyPanelCertConfig returned error: %v", err)
+	}
+	if certConfig.CertMode != "dns" || certConfig.Provider != "cloudflare" {
+		t.Fatalf("unexpected DNS cert config: %#v", certConfig)
 	}
 }
 

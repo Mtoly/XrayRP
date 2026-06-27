@@ -118,9 +118,15 @@ type customRoute struct {
 }
 
 type certConfig struct {
-	Provider string            `json:"provider"`
-	Email    string            `json:"email"`
-	DNSEnv   map[string]string `json:"dns_env"`
+	CertMode    string            `json:"cert_mode"`
+	Domain      string            `json:"domain"`
+	CertFile    string            `json:"cert_file"`
+	KeyFile     string            `json:"key_file"`
+	CertContent string            `json:"cert_content"`
+	KeyContent  string            `json:"key_content"`
+	Provider    string            `json:"provider"`
+	Email       string            `json:"email"`
+	DNSEnv      map[string]string `json:"dns_env"`
 }
 
 type user struct {

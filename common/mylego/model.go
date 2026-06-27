@@ -5,6 +5,8 @@ type CertConfig struct {
 	CertDomain       string            `mapstructure:"CertDomain"`
 	CertFile         string            `mapstructure:"CertFile"`
 	KeyFile          string            `mapstructure:"KeyFile"`
+	CertContent      string            `mapstructure:"CertContent"`
+	KeyContent       string            `mapstructure:"KeyContent"`
 	Provider         string            `mapstructure:"Provider"` // alidns, cloudflare, gandi, godaddy....
 	Email            string            `mapstructure:"Email"`
 	DNSEnv           map[string]string `mapstructure:"DNSEnv"`

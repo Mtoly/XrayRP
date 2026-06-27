@@ -373,9 +373,13 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 		userList: &restUsers,
 		ruleList: &restRules,
 		certConfig: &api.XrayRCertConfig{
-			Provider: "cloudflare",
-			Email:    "ops@example.com",
-			DNSEnv:   map[string]string{"CF_API_TOKEN": "token"},
+			CertMode:   "file",
+			CertDomain: "node.example.com",
+			CertFile:   "/tmp/new.crt",
+			KeyFile:    "/tmp/new.key",
+			Provider:   "cloudflare",
+			Email:      "ops@example.com",
+			DNSEnv:     map[string]string{"CF_API_TOKEN": "token"},
 		},
 	}
 	controller, recorder := newTestSyncApplyController(fakeAPI)
@@ -391,10 +395,11 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	controller.setUserList(&currentUsers)
 	controller.setAppliedRuleList([]api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}})
 	controller.config.CertConfig = &mylego.CertConfig{
-		CertMode: "dns",
-		Provider: "alidns",
-		Email:    "old@example.com",
-		DNSEnv:   map[string]string{"ALICLOUD_ACCESS_KEY": "old"},
+		CertMode:   "dns",
+		CertDomain: "old.example.com",
+		Provider:   "alidns",
+		Email:      "old@example.com",
+		DNSEnv:     map[string]string{"ALICLOUD_ACCESS_KEY": "old"},
 	}
 
 	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"})); err != nil {
@@ -418,6 +423,12 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	}
 	if len(recorder.appliedCertConfigs) != 1 {
 		t.Fatalf("expected cert compare-and-apply once, got %d", len(recorder.appliedCertConfigs))
+	}
+	if controller.config.CertConfig.CertMode != "file" || controller.config.CertConfig.CertDomain != "node.example.com" {
+		t.Fatalf("expected controller cert mode/domain to be updated from REST snapshot, got mode=%q domain=%q", controller.config.CertConfig.CertMode, controller.config.CertConfig.CertDomain)
+	}
+	if controller.config.CertConfig.CertFile != "/tmp/new.crt" || controller.config.CertConfig.KeyFile != "/tmp/new.key" {
+		t.Fatalf("expected controller cert files to be updated from REST snapshot, got cert=%q key=%q", controller.config.CertConfig.CertFile, controller.config.CertConfig.KeyFile)
 	}
 	if controller.config.CertConfig.Provider != "cloudflare" || controller.config.CertConfig.Email != "ops@example.com" {
 		t.Fatalf("expected controller cert config to be updated from REST snapshot, got provider=%q email=%q", controller.config.CertConfig.Provider, controller.config.CertConfig.Email)

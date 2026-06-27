@@ -45,9 +45,15 @@ func certConfigFromUniProxySnapshot(snapshot *serverConfig) *api.XrayRCertConfig
 		return nil
 	}
 	return &api.XrayRCertConfig{
-		Provider: snapshot.CertConfig.Provider,
-		Email:    snapshot.CertConfig.Email,
-		DNSEnv:   snapshot.CertConfig.DNSEnv,
+		CertMode:    snapshot.CertConfig.CertMode,
+		CertDomain:  snapshot.CertConfig.Domain,
+		CertFile:    snapshot.CertConfig.CertFile,
+		KeyFile:     snapshot.CertConfig.KeyFile,
+		CertContent: snapshot.CertConfig.CertContent,
+		KeyContent:  snapshot.CertConfig.KeyContent,
+		Provider:    snapshot.CertConfig.Provider,
+		Email:       snapshot.CertConfig.Email,
+		DNSEnv:      snapshot.CertConfig.DNSEnv,
 	}
 }
 
