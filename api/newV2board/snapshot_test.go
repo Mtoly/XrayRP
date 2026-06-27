@@ -199,8 +199,31 @@ func TestNodeInfoFromUniProxySnapshotDispatchesLowercaseMachineVless(t *testing.
 	if nodeInfo.Port != 443 {
 		t.Fatalf("expected derived node port 443, got %d", nodeInfo.Port)
 	}
-	if nodeInfo.NodeType != "vless" {
-		t.Fatalf("expected lowercase vless node type to be preserved, got %q", nodeInfo.NodeType)
+	if nodeInfo.NodeType != "Vless" {
+		t.Fatalf("expected lowercase vless node type to be normalized, got %q", nodeInfo.NodeType)
+	}
+}
+
+func TestCanonicalNodeTypeNormalizesMachineTypes(t *testing.T) {
+	tests := map[string]string{
+		"vless":       "Vless",
+		"vmess":       "Vmess",
+		"v2ray":       "Vmess",
+		"trojan":      "Trojan",
+		"shadowsocks": "Shadowsocks",
+		"hysteria":    "Hysteria2",
+		"hysteria2":   "Hysteria2",
+		"tuic":        "Tuic",
+		"anytls":      "AnyTLS",
+		"socks":       "Socks",
+		"http":        "HTTP",
+	}
+	for input, want := range tests {
+		t.Run(input, func(t *testing.T) {
+			if got := canonicalNodeType(input); got != want {
+				t.Fatalf("canonicalNodeType(%q) = %q, want %q", input, got, want)
+			}
+		})
 	}
 }
 

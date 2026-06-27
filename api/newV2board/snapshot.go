@@ -109,32 +109,58 @@ func enrichNodeInfoFromUniProxySnapshot(snapshot *serverConfig, nodeInfo *api.No
 	attachRoutePolicy(snapshot, nodeInfo)
 }
 
+func canonicalNodeType(nodeType string) string {
+	switch strings.ToLower(strings.TrimSpace(nodeType)) {
+	case "vless":
+		return "Vless"
+	case "vmess", "v2ray":
+		return "Vmess"
+	case "trojan":
+		return "Trojan"
+	case "shadowsocks":
+		return "Shadowsocks"
+	case "hysteria", "hysteria2":
+		return "Hysteria2"
+	case "tuic":
+		return "Tuic"
+	case "anytls":
+		return "AnyTLS"
+	case "socks":
+		return "Socks"
+	case "http":
+		return "HTTP"
+	default:
+		return strings.TrimSpace(nodeType)
+	}
+}
+
 func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
 	if snapshot == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving node info")
 	}
 
+	nodeType := canonicalNodeType(c.NodeType)
 	var (
 		nodeInfo *api.NodeInfo
 		err      error
 	)
 
-	switch c.NodeType {
-	case "V2ray", "v2ray", "Vmess", "vmess", "Vless", "vless":
+	switch nodeType {
+	case "V2ray", "Vmess", "Vless":
 		nodeInfo, err = c.parseV2rayNodeResponse(snapshot)
-	case "Trojan", "trojan":
+	case "Trojan":
 		nodeInfo, err = c.parseTrojanNodeResponse(snapshot)
-	case "Shadowsocks", "shadowsocks":
+	case "Shadowsocks":
 		nodeInfo, err = c.parseSSNodeResponse(snapshot)
-	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
+	case "Hysteria2":
 		nodeInfo, err = c.parseHysteria2NodeResponse(snapshot)
-	case "Tuic", "tuic":
+	case "Tuic":
 		nodeInfo, err = c.parseTuicNodeResponse(snapshot)
-	case "AnyTLS", "anytls":
+	case "AnyTLS":
 		nodeInfo, err = c.parseAnyTLSNodeResponse(snapshot)
-	case "Socks", "socks":
+	case "Socks":
 		nodeInfo, err = c.parseSocksNodeResponse(snapshot)
-	case "HTTP", "http":
+	case "HTTP":
 		nodeInfo, err = c.parseHTTPNodeResponse(snapshot)
 	default:
 		return nil, nodeInfoUnsupportedTypeError(c.NodeType)
@@ -142,6 +168,7 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 	if err != nil {
 		return nil, err
 	}
+	nodeInfo.NodeType = nodeType
 	enrichNodeInfoFromUniProxySnapshot(snapshot, nodeInfo)
 	return nodeInfo, nil
 }
