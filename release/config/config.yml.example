@@ -1,243 +1,200 @@
-Log:
-  Level: warning # Log level: none, error, warning, info, debug
-  AccessPath: # /etc/XrayR/access.Log
-  ErrorPath: # /etc/XrayR/error.log
-  ShowErrorDetails: false # Whether to print detailed errors that may contain credentials; safe default is false
-DnsConfigPath: # /etc/XrayR/dns.json # Path to dns config, check https://xtls.github.io/config/dns.html for help
-RouteConfigPath: # /etc/XrayR/route.json # Path to route config, check https://xtls.github.io/config/routing.html for help
-InboundConfigPath: # /etc/XrayR/custom_inbound.json # Path to custom inbound config, check https://xtls.github.io/config/inbound.html for help
-OutboundConfigPath: # /etc/XrayR/custom_outbound.json # Path to custom outbound config, check https://xtls.github.io/config/outbound.html for help
-ConnectionConfig:
-  Handshake: 4 # Handshake time limit, Second
-  ConnIdle: 30 # Connection idle time limit, Second
-  UplinkOnly: 2 # Time limit when the connection downstream is closed, Second
-  DownlinkOnly: 4 # Time limit when the connection is closed after the uplink is closed, Second
-  BufferSize: 4 # The internal cache size of each connection, kB
+Log: # Logging output and verbosity settings.
+  Level: warning # Log level: none, error, warning, info, debug.
+  AccessPath: # Optional access log file path, for example /etc/XrayR/access.log. Leave empty to disable access file logging.
+  ErrorPath: # Optional error log file path, for example /etc/XrayR/error.log. Leave empty to log errors to stdout/stderr.
+  ShowErrorDetails: false # Whether to print detailed errors that may contain credentials; safe default is false.
+DnsConfigPath: # Optional path to dns.json; see https://xtls.github.io/config/dns.html.
+RouteConfigPath: # Optional path to route.json; see https://xtls.github.io/config/routing.html.
+InboundConfigPath: # Optional path to custom_inbound.json; see https://xtls.github.io/config/inbound.html.
+OutboundConfigPath: # Optional path to custom_outbound.json; see https://xtls.github.io/config/outbound.html.
+ConnectionConfig: # Xray connection timeout and buffer tuning.
+  Handshake: 4 # Handshake timeout in seconds.
+  ConnIdle: 30 # Idle connection timeout in seconds.
+  UplinkOnly: 2 # Timeout in seconds after downstream closes while uplink is still open.
+  DownlinkOnly: 4 # Timeout in seconds after uplink closes while downstream is still open.
+  BufferSize: 4 # Per-connection internal buffer size in KB; lower values reduce memory usage.
 # MachineConfig enables Xboard server management mode.
 # Use MachineConfig instead of Nodes; machine mode cannot be enabled together with static Nodes.
 # XrayRP authenticates to Xboard with MachineID + Token, discovers servers bound to this machine,
 # dynamically starts/stops per-node services, handles sync.nodes via a shared machine WebSocket,
-# routes per-node events by node_id, and reports node.status over WebSocket best-effort.
+# routes per-node events by node_id, reports node.status over WebSocket best-effort,
+# and reports machine load to Xboard's server management page by base_config.push_interval.
 # In Xboard, create/bind servers to this machine and copy the machine ID/token here.
-# MachineConfig:
-#   Enable: false # Set true to enable Xboard machine/server management mode.
-#   PanelType: "NewV2board" # Machine mode supports Xboard/NewV2board.
-#   ApiHost: "https://panel.example.com"
-#   MachineID: 1
-#   Token: "machine-token"
-#   Timeout: 30
-#   DiscoveryInterval: 60 # Fallback polling interval; Xboard base_config.pull_interval can update this at runtime, and sync.nodes triggers immediate rediscovery when WebSocket is enabled.
-#   ControllerConfig: # Shared controller defaults applied to every discovered server.
-#     ListenIP: 0.0.0.0
-#     SendIP: 0.0.0.0
-#     UpdatePeriodic: 60 # Fallback interval; Xboard base_config.pull_interval controls config sync and base_config.push_interval controls report/online updates at runtime when provided.
-#     WebSocketConfig:
+# MachineConfig: # Xboard/NewV2board machine/server management mode configuration.
+#   Enable: false # Set true to enable machine mode. When true, do not configure static Nodes below.
+#   PanelType: "NewV2board" # Machine mode panel adapter. Use NewV2board for Xboard/NewV2board.
+#   ApiHost: "https://panel.example.com" # Base URL of the Xboard/NewV2board panel, without a trailing slash.
+#   MachineID: 1 # Machine ID from the Xboard server management page.
+#   Token: "machine-token" # Machine token from Xboard. Keep this secret.
+#   Timeout: 30 # HTTP API timeout in seconds for machine discovery and reports.
+#   DiscoveryInterval: 60 # Fallback node discovery interval in seconds; Xboard base_config.pull_interval can update it at runtime.
+#   ControllerConfig: # Shared controller defaults applied to every discovered server/node.
+#     ListenIP: 0.0.0.0 # Local listen IP for inbound services created from discovered nodes.
+#     SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
+#     UpdatePeriodic: 60 # Fallback per-node sync/report interval in seconds when panel base_config is unavailable.
+#     WebSocketConfig: # Shared machine WebSocket control-plane settings.
 #       Enable: true # Enable shared machine WebSocket for sync.nodes, per-node mailbox routing, and node.status reports.
 #       Endpoint: # Optional override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws with machine_id + token.
-#       HeartbeatInterval: 30
-#       ReconnectBackoff: 5
-#       ResyncOnReconnect: true
-Nodes:
-  - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel
-    ApiConfig:
-      ApiHost: "http://127.0.0.1:667"
-      ApiKey: "123"
-      NodeID: 41 # Single node ID (int). For multiple nodes, add multiple entries under Nodes.
-      NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP
-      Timeout: 30 # Timeout for the api request
-      EnableVless: false # Enable Vless for V2ray Type
-      VlessFlow: "xtls-rprx-vision" # Only for direct TLS/REALITY over TCP. Keep empty for ws/grpc/httpupgrade/splithttp(xhttp).
-      SpeedLimit: 0 # Mbps, Local settings will replace remote settings, 0 means disable
-      DeviceLimit: 0 # Local settings will replace remote settings, 0 means disable
-      RuleListPath: # /etc/XrayR/rulelist Path to local rulelist file
-      DisableCustomConfig: false # disable custom config for sspanel
-    ControllerConfig:
-      ListenIP: 0.0.0.0 # IP address you want to listen
-      SendIP: 0.0.0.0 # IP address you want to send pacakage
-      UpdatePeriodic: 60 # Local fallback interval. For Xboard/NewV2board, remote base_config.pull_interval controls config sync and base_config.push_interval controls reports when provided.
-      EnableDNS: false # Use custom DNS config, Please ensure that you set the dns.json well
-      DNSType: AsIs # AsIs, UseIP, UseIPv4, UseIPv6, DNS strategy
-      DisableSniffing: false # Disable sniffing
-      DisableUploadTraffic: false # Disable upload traffic reporting
-      DisableGetRule: false # Disable fetching rules from panel
-      DisableIVCheck: false # Disable Shadowsocks IV check (legacy compatibility only; keep false unless required)
-      WebSocketConfig:
-        Enable: false # Enable websocket dual-active control plane. false keeps polling-only mode.
-        Endpoint: # Optional websocket endpoint override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws
-        HeartbeatInterval: 30 # Websocket heartbeat interval in seconds
-        ReconnectBackoff: 5 # Websocket reconnect backoff in seconds
-        ResyncOnReconnect: true # Submit a full resync after websocket reconnects
-      EnableProxyProtocol: false # Only works for WebSocket and TCP
-      AutoSpeedLimitConfig:
-        Limit: 0 # Warned speed. Set to 0 to disable AutoSpeedLimit (mbps)
-        WarnTimes: 0 # After (WarnTimes) consecutive warnings, the user will be limited. Set to 0 to punish overspeed user immediately.
-        LimitSpeed: 0 # The speedlimit of a limited user (unit: mbps)
-        LimitDuration: 0 # How many minutes will the limiting last (unit: minute)
-      GlobalDeviceLimitConfig:
-        Enable: false # Enable the global device limit of a user
-        RedisNetwork: tcp # Redis protocol, tcp or unix
-        RedisAddr: 127.0.0.1:6379 # Redis server address, or unix socket path
-        RedisUsername: # Redis username
-        RedisPassword: YOUR PASSWORD # Redis password
-        RedisDB: 0 # Redis DB
-        Timeout: 5 # Timeout for redis request
-        Expiry: 60 # Expiry time (second)
-      EnableFallback: false # Only support for Trojan and Vless
-      FallBackConfigs:  # Support multiple fallbacks
-        - SNI: # TLS SNI(Server Name Indication), Empty for any
-          Alpn: # Alpn, Empty for any
-          Path: # HTTP PATH, Empty for any
-          Dest: 80 # Required, Destination of fallback, check https://xtls.github.io/config/features/fallback.html for details.
-          ProxyProtocolVer: 0 # Send PROXY protocol version, 0 for disable
-      DisableLocalREALITYConfig: false  # disable local reality config
-      EnableREALITY: false # Enable REALITY
-      REALITYConfigs:
-        Dest: www.amazon.com:443 # Required, Same as fallback
-        ProxyProtocolVer: 0 # Send PROXY protocol version, 0 for disable
-        ServerNames: # Required, list of available serverNames for the client, * wildcard is not supported at the moment.
-          - www.amazon.com
-        PrivateKey: YOUR_PRIVATE_KEY # Required, execute './XrayR x25519' to generate.
-        MinClientVer: # Optional, minimum version of Xray client, format is x.y.z.
-        MaxClientVer: # Optional, maximum version of Xray client, format is x.y.z.
-        MaxTimeDiff: 0 # Optional, maximum allowed time difference, unit is in milliseconds.
-        ShortIds: # Required, list of available shortIds for the client, can be used to differentiate between different clients.
-          - ""
-          - 0123456789abcdef
-      # CertConfig:
-      # - Required for Hysteria2, Tuic, AnyTLS nodes.
-      # - For other node types, it is optional and can be managed by panel/local settings.
-      # Uncomment and fill the fields below when needed:
-      # CertConfig:
-      #   CertMode: dns # none, file, http, tls, dns
-      #   CertDomain: "node1.test.com"
-      #   CertFile: /etc/XrayR/cert/node1.test.com.cert
-      #   KeyFile: /etc/XrayR/cert/node1.test.com.key
-      #   Provider: alidns
-      #   Email: test@me.com
-      #   DNSEnv:
-      #     ALICLOUD_ACCESS_KEY: aaa
-      #     ALICLOUD_SECRET_KEY: bbb
+#       HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
+#       ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
+#       ResyncOnReconnect: true # Submit a full node rediscovery/resync after WebSocket reconnects.
+Nodes: # Static node list. Use this when MachineConfig is disabled.
+  - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
+    ApiConfig: # Panel API authentication and node identity settings.
+      ApiHost: "http://127.0.0.1:667" # Base URL of the panel API, without a trailing slash.
+      ApiKey: "123" # Panel API key/token for this node. Keep this secret.
+      NodeID: 41 # Single node ID. For multiple nodes, add more entries under Nodes.
+      NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP.
+      Timeout: 30 # HTTP API timeout in seconds.
+      EnableVless: false # For legacy V2ray-type panels, expose this node as VLESS instead of VMess.
+      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP. Keep empty for ws/grpc/httpupgrade/splithttp/xhttp.
+      SpeedLimit: 0 # Local speed limit in Mbps. 0 means use panel value or disable local override.
+      DeviceLimit: 0 # Local per-user device/IP limit. 0 means use panel value or disable local override.
+      RuleListPath: # Optional path to a local audit rule list file, for example /etc/XrayR/rulelist.
+      DisableCustomConfig: false # Disable custom config fetched from SSPanel-compatible panels.
+    ControllerConfig: # Runtime behavior for this node.
+      ListenIP: 0.0.0.0 # Local IP address for inbound listeners.
+      SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
+      UpdatePeriodic: 60 # Local fallback sync interval in seconds. For Xboard/NewV2board, base_config.pull_interval controls config sync and base_config.push_interval controls reports when provided.
+      EnableDNS: false # Enable custom DNS config from DnsConfigPath.
+      DNSType: AsIs # DNS strategy: AsIs, UseIP, UseIPv4, or UseIPv6.
+      DisableSniffing: false # Disable protocol sniffing for inbound traffic.
+      DisableUploadTraffic: false # Disable upload/download traffic reporting to the panel.
+      DisableGetRule: false # Disable fetching audit/routing rules from the panel.
+      DisableIVCheck: false # Disable Shadowsocks IV check for legacy compatibility. Keep false unless required.
+      WebSocketConfig: # Optional WebSocket dual-active control plane settings.
+        Enable: false # Enable WebSocket control plane. false keeps polling-only mode.
+        Endpoint: # Optional endpoint override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws.
+        HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
+        ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
+        ResyncOnReconnect: true # Submit a full resync after WebSocket reconnects.
+      EnableProxyProtocol: false # Enable PROXY protocol on supported TCP/WebSocket inbounds.
+      AutoSpeedLimitConfig: # Automatic speed-limit punishment settings.
+        Limit: 0 # Warning threshold in Mbps. 0 disables AutoSpeedLimit.
+        WarnTimes: 0 # Number of consecutive warnings before limiting. 0 limits immediately after one warning.
+        LimitSpeed: 0 # Speed limit applied to punished users in Mbps.
+        LimitDuration: 0 # Punishment duration in minutes.
+      GlobalDeviceLimitConfig: # Redis-backed global online device/IP limit across multiple XrayRP instances.
+        Enable: false # Enable global device limit for users.
+        RedisNetwork: tcp # Redis network type: tcp or unix.
+        RedisAddr: 127.0.0.1:6379 # Redis server address, or Unix socket path when RedisNetwork is unix.
+        RedisUsername: # Optional Redis username. Leave empty when Redis ACL username is not used.
+        RedisPassword: YOUR PASSWORD # Redis password. Keep this secret.
+        RedisDB: 0 # Redis database index.
+        Timeout: 5 # Redis request timeout in seconds.
+        Expiry: 60 # Redis online-device record expiry in seconds.
+      EnableFallback: false # Enable fallback routing. Only supported for Trojan and VLESS.
+      FallBackConfigs: # Fallback destinations used when EnableFallback is true.
+        - SNI: # TLS SNI matcher. Empty matches any SNI.
+          Alpn: # ALPN matcher. Empty matches any ALPN.
+          Path: # HTTP path matcher. Empty matches any path.
+          Dest: 80 # Required fallback destination; see https://xtls.github.io/config/features/fallback.html.
+          ProxyProtocolVer: 0 # PROXY protocol version to send to fallback destination. 0 disables it.
+      DisableLocalREALITYConfig: false # Ignore local REALITYConfigs and use panel-provided REALITY settings when available.
+      EnableREALITY: false # Enable REALITY for supported VLESS/Trojan nodes.
+      REALITYConfigs: # Local REALITY settings used when EnableREALITY is true and local REALITY is not disabled.
+        Show: false # Whether to show REALITY debug information to clients.
+        Dest: www.amazon.com:443 # Required REALITY destination, usually a real TLS site host:port.
+        ProxyProtocolVer: 0 # PROXY protocol version sent to Dest. 0 disables it.
+        ServerNames: # Required list of accepted server names. Wildcard is not supported.
+          - www.amazon.com # One accepted REALITY server name.
+        PrivateKey: YOUR_PRIVATE_KEY # Required private key. Generate with './XrayR x25519'.
+        MinClientVer: # Optional minimum allowed Xray client version, format x.y.z.
+        MaxClientVer: # Optional maximum allowed Xray client version, format x.y.z.
+        MaxTimeDiff: 0 # Optional maximum client/server time difference in milliseconds. 0 disables the check.
+        ShortIds: # Required list of accepted REALITY short IDs.
+          - "" # Empty short ID option.
+          - 0123456789abcdef # Example non-empty short ID.
+      # CertConfig: # TLS certificate settings. Required for Hysteria2, Tuic, and AnyTLS nodes.
+      #   CertMode: dns # Certificate source: none, file, http, tls, or dns.
+      #   CertDomain: "node1.test.com" # Domain name used for certificate issue/load.
+      #   CertFile: /etc/XrayR/cert/node1.test.com.cert # Certificate file path when CertMode is file.
+      #   KeyFile: /etc/XrayR/cert/node1.test.com.key # Private key file path when CertMode is file.
+      #   CertContent: # Inline certificate PEM content. Use only when the panel/local config provides certificate text directly.
+      #   KeyContent: # Inline private key PEM content. Keep this secret.
+      #   Provider: alidns # DNS provider for CertMode dns. See https://go-acme.github.io/lego/dns/.
+      #   Email: test@me.com # ACME account email for certificate issuance.
+      #   DNSEnv: # Environment variables required by the DNS provider.
+      #     ALICLOUD_ACCESS_KEY: aaa # Example DNS provider access key. Keep this secret.
+      #     ALICLOUD_SECRET_KEY: bbb # Example DNS provider secret key. Keep this secret.
+      #   RejectUnknownSni: false # Reject TLS clients whose SNI does not match the configured certificate domain.
 
-#  - PanelType: "SSpanel" # Panel type: SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel
-#    ApiConfig:
-#      ApiHost: "http://127.0.0.1:668"
-#      ApiKey: "123"
-#      NodeID: 41
-#      NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP
-#      Timeout: 30 # Timeout for the api request
-#      EnableVless: false # Enable Vless for V2ray Type
-#      VlessFlow: "xtls-rprx-vision" # Only support vless
-#      SpeedLimit: 0 # Mbps, Local settings will replace remote settings, 0 means disable
-#      DeviceLimit: 0 # Local settings will replace remote settings, 0 means disable
-#      RuleListPath: # /etc/XrayR/rulelist Path to local rulelist file
-#    ControllerConfig:
-#      ListenIP: 0.0.0.0 # IP address you want to listen
-#      SendIP: 0.0.0.0 # IP address you want to send pacakage
-#      UpdatePeriodic: 60 # Time to update the nodeinfo, how many sec.
-#      EnableDNS: false # Use custom DNS config, Please ensure that you set the dns.json well
-#      DNSType: AsIs # AsIs, UseIP, UseIPv4, UseIPv6, DNS strategy
-#      WebSocketConfig:
-#        Enable: false # false keeps polling-only mode even if panel supports websocket
-#        Endpoint: # Optional websocket endpoint override
-#        HeartbeatInterval: 30 # seconds
-#        ReconnectBackoff: 5 # seconds
-#        ResyncOnReconnect: true # submit a full resync after reconnect
-#      EnableProxyProtocol: false # Only works for WebSocket and TCP
-#      AutoSpeedLimitConfig:
-#        Limit: 0 # Warned speed. Set to 0 to disable AutoSpeedLimit (mbps)
-#        WarnTimes: 0 # After (WarnTimes) consecutive warnings, the user will be limited. Set to 0 to punish overspeed user immediately.
-#        LimitSpeed: 0 # The speedlimit of a limited user (unit: mbps)
-#        LimitDuration: 0 # How many minutes will the limiting last (unit: minute)
-#      GlobalDeviceLimitConfig:
-#        Enable: false # Enable the global device limit of a user
-#        RedisNetwork: tcp # Redis protocol, tcp or unix
-#        RedisAddr: 127.0.0.1:6379 # Redis server address, or unix socket path
-#        RedisUsername: # Redis username
-#        RedisPassword: YOUR PASSWORD # Redis password
-#        RedisDB: 0 # Redis DB
-#        Timeout: 5 # Timeout for redis request
-#        Expiry: 60 # Expiry time (second)
-#      EnableFallback: false # Only support for Trojan and Vless
-#      FallBackConfigs:  # Support multiple fallbacks
-#        - SNI: # TLS SNI(Server Name Indication), Empty for any
-#          Alpn: # Alpn, Empty for any
-#          Path: # HTTP PATH, Empty for any
-#          Dest: 80 # Required, Destination of fallback, check https://xtls.github.io/config/features/fallback.html for details.
-#          ProxyProtocolVer: 0 # Send PROXY protocol version, 0 for disable
-#      EnableREALITY: true # Enable REALITY
-#      REALITYConfigs:
-#        Dest: www.amazon.com:443 # Required, Same as fallback
-#        ProxyProtocolVer: 0 # Send PROXY protocol version, 0 for disable
-#        ServerNames: # Required, list of available serverNames for the client, * wildcard is not supported at the moment.
-#          - www.amazon.com
-#        PrivateKey: YOUR_PRIVATE_KEY # Required, execute './XrayR x25519' to generate.
-#        MinClientVer: # Optional, minimum version of Xray client, format is x.y.z.
-#        MaxClientVer: # Optional, maximum version of Xray client, format is x.y.z.
-#        MaxTimeDiff: 0 # Optional, maximum allowed time difference, unit is in milliseconds.
-#        ShortIds: # Required, list of available shortIds for the client, can be used to differentiate between different clients.
-#          - ""
-#          - 0123456789abcdef
-#      CertConfig:
-#        CertMode: dns # Option about how to get certificate: none, file, http, tls, dns. Choose "none" will forcedly disable the tls config.
-#        CertDomain: "node1.test.com" # Domain to cert
-#        CertFile: /etc/XrayR/cert/node1.test.com.cert # Provided if the CertMode is file
-#        KeyFile: /etc/XrayR/cert/node1.test.com.key
-#        Provider: alidns # DNS cert provider, Get the full support list here: https://go-acme.github.io/lego/dns/
-#        Email: test@me.com
-#        DNSEnv: # DNS ENV option used by DNS provider
-#          ALICLOUD_ACCESS_KEY: aaa
-#          ALICLOUD_SECRET_KEY: bbb
-
-#  - PanelType: "NewV2board" # Example: Tuic node (Xboard/NewV2board)
-#    ApiConfig:
-#      ApiHost: "https://panel.example.com"
-#      ApiKey: "your_api_key"
-#      NodeID: 1
-#      NodeType: Tuic
-#      Timeout: 30
-#      RuleListPath: # /etc/XrayR/rulelist
-#    ControllerConfig:
-#      ListenIP: 0.0.0.0
-#      SendIP: 0.0.0.0
-#      UpdatePeriodic: 60
-#      DisableUploadTraffic: false
-#      DisableGetRule: false
-#      CertConfig: # Required for Tuic
-#        CertMode: file # none, file, http, tls, dns
-#        CertDomain: "tuic.example.com"
-#        CertFile: /etc/XrayR/cert/tuic.example.com.cert
-#        KeyFile: /etc/XrayR/cert/tuic.example.com.key
-
-#  - PanelType: "NewV2board" # Example: Hysteria2 node
-#    ApiConfig:
-#      ApiHost: "https://panel.example.com"
-#      ApiKey: "your_api_key"
-#      NodeID: 2
-#      NodeType: Hysteria2
-#      Timeout: 30
-#    ControllerConfig:
-#      ListenIP: 0.0.0.0
-#      SendIP: 0.0.0.0
-#      UpdatePeriodic: 60
-#      CertConfig: # Required for Hysteria2
-#        CertMode: file
-#        CertDomain: "hy2.example.com"
-#        CertFile: /etc/XrayR/cert/hy2.example.com.cert
-#        KeyFile: /etc/XrayR/cert/hy2.example.com.key
-
-#  - PanelType: "NewV2board" # Example: AnyTLS node
-#    ApiConfig:
-#      ApiHost: "https://panel.example.com"
-#      ApiKey: "your_api_key"
-#      NodeID: 3
-#      NodeType: AnyTLS
-#      Timeout: 30
-#    ControllerConfig:
-#      ListenIP: 0.0.0.0
-#      SendIP: 0.0.0.0
-#      UpdatePeriodic: 60
-#      CertConfig: # Required for AnyTLS
-#        CertMode: file
-#        CertDomain: "anytls.example.com"
-#        CertFile: /etc/XrayR/cert/anytls.example.com.cert
-#        KeyFile: /etc/XrayR/cert/anytls.example.com.key
+#  - PanelType: "SSpanel" # Panel type: SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
+#    ApiConfig: # Panel API authentication and node identity settings.
+#      ApiHost: "http://127.0.0.1:668" # Base URL of the panel API, without a trailing slash.
+#      ApiKey: "123" # Panel API key/token for this node. Keep this secret.
+#      NodeID: 41 # Single node ID from the panel.
+#      NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP.
+#      Timeout: 30 # HTTP API timeout in seconds.
+#      EnableVless: false # For legacy V2ray-type panels, expose this node as VLESS instead of VMess.
+#      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP.
+#      SpeedLimit: 0 # Local speed limit in Mbps. 0 means use panel value or disable local override.
+#      DeviceLimit: 0 # Local per-user device/IP limit. 0 means use panel value or disable local override.
+#      RuleListPath: # Optional path to a local audit rule list file, for example /etc/XrayR/rulelist.
+#      DisableCustomConfig: false # Disable custom config fetched from SSPanel-compatible panels.
+#    ControllerConfig: # Runtime behavior for this node.
+#      ListenIP: 0.0.0.0 # Local IP address for inbound listeners.
+#      SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
+#      UpdatePeriodic: 60 # Node info/user/rule sync interval in seconds.
+#      EnableDNS: false # Enable custom DNS config from DnsConfigPath.
+#      DNSType: AsIs # DNS strategy: AsIs, UseIP, UseIPv4, or UseIPv6.
+#      DisableSniffing: false # Disable protocol sniffing for inbound traffic.
+#      DisableUploadTraffic: false # Disable upload/download traffic reporting to the panel.
+#      DisableGetRule: false # Disable fetching audit/routing rules from the panel.
+#      DisableIVCheck: false # Disable Shadowsocks IV check for legacy compatibility. Keep false unless required.
+#      WebSocketConfig: # Optional WebSocket dual-active control plane settings.
+#        Enable: false # Enable WebSocket control plane. false keeps polling-only mode.
+#        Endpoint: # Optional endpoint override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws.
+#        HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
+#        ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
+#        ResyncOnReconnect: true # Submit a full resync after WebSocket reconnects.
+#      EnableProxyProtocol: false # Enable PROXY protocol on supported TCP/WebSocket inbounds.
+#      AutoSpeedLimitConfig: # Automatic speed-limit punishment settings.
+#        Limit: 0 # Warning threshold in Mbps. 0 disables AutoSpeedLimit.
+#        WarnTimes: 0 # Number of consecutive warnings before limiting. 0 limits immediately after one warning.
+#        LimitSpeed: 0 # Speed limit applied to punished users in Mbps.
+#        LimitDuration: 0 # Punishment duration in minutes.
+#      GlobalDeviceLimitConfig: # Redis-backed global online device/IP limit across multiple XrayRP instances.
+#        Enable: false # Enable global device limit for users.
+#        RedisNetwork: tcp # Redis network type: tcp or unix.
+#        RedisAddr: 127.0.0.1:6379 # Redis server address, or Unix socket path when RedisNetwork is unix.
+#        RedisUsername: # Optional Redis username. Leave empty when Redis ACL username is not used.
+#        RedisPassword: YOUR PASSWORD # Redis password. Keep this secret.
+#        RedisDB: 0 # Redis database index.
+#        Timeout: 5 # Redis request timeout in seconds.
+#        Expiry: 60 # Redis online-device record expiry in seconds.
+#      EnableFallback: false # Enable fallback routing. Only supported for Trojan and VLESS.
+#      FallBackConfigs: # Fallback destinations used when EnableFallback is true.
+#        - SNI: # TLS SNI matcher. Empty matches any SNI.
+#          Alpn: # ALPN matcher. Empty matches any ALPN.
+#          Path: # HTTP path matcher. Empty matches any path.
+#          Dest: 80 # Required fallback destination; see https://xtls.github.io/config/features/fallback.html.
+#          ProxyProtocolVer: 0 # PROXY protocol version to send to fallback destination. 0 disables it.
+#      DisableLocalREALITYConfig: false # Ignore local REALITYConfigs and use panel-provided REALITY settings when available.
+#      EnableREALITY: true # Enable REALITY for supported VLESS/Trojan nodes.
+#      REALITYConfigs: # Local REALITY settings used when EnableREALITY is true and local REALITY is not disabled.
+#        Show: false # Whether to show REALITY debug information to clients.
+#        Dest: www.amazon.com:443 # Required REALITY destination, usually a real TLS site host:port.
+#        ProxyProtocolVer: 0 # PROXY protocol version sent to Dest. 0 disables it.
+#        ServerNames: # Required list of accepted server names. Wildcard is not supported.
+#          - www.amazon.com # One accepted REALITY server name.
+#        PrivateKey: YOUR_PRIVATE_KEY # Required private key. Generate with './XrayR x25519'.
+#        MinClientVer: # Optional minimum allowed Xray client version, format x.y.z.
+#        MaxClientVer: # Optional maximum allowed Xray client version, format x.y.z.
+#        MaxTimeDiff: 0 # Optional maximum client/server time difference in milliseconds. 0 disables the check.
+#        ShortIds: # Required list of accepted REALITY short IDs.
+#          - "" # Empty short ID option.
+#          - 0123456789abcdef # Example non-empty short ID.
+#      CertConfig: # TLS certificate settings.
+#        CertMode: dns # Certificate source: none, file, http, tls, or dns. none forcibly disables TLS cert config.
+#        CertDomain: "node1.test.com" # Domain name used for certificate issue/load.
+#        CertFile: /etc/XrayR/cert/node1.test.com.cert # Certificate file path when CertMode is file.
+#        KeyFile: /etc/XrayR/cert/node1.test.com.key # Private key file path when CertMode is file.
+#        CertContent: # Inline certificate PEM content. Use only when certificate text is provided directly.
+#        KeyContent: # Inline private key PEM content. Keep this secret.
+#        Provider: alidns # DNS provider for CertMode dns. See https://go-acme.github.io/lego/dns/.
+#        Email: test@me.com # ACME account email for certificate issuance.
+#        DNSEnv: # Environment variables required by the DNS provider.
+#          ALICLOUD_ACCESS_KEY: aaa # Example DNS provider access key. Keep this secret.
+#          ALICLOUD_SECRET_KEY: bbb # Example DNS provider secret key. Keep this secret.
+#        RejectUnknownSni: false # Reject TLS clients whose SNI does not match the configured certificate domain.
