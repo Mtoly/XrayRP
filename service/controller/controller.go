@@ -13,7 +13,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/outbound"
@@ -59,14 +58,12 @@ type Controller struct {
 	syncCoordinator        syncCoordinatorLifecycle
 	wsRuntime              wsRuntimeLifecycle
 	deviceReportState      *deviceReportState
+	newPeriodicTask        periodicTaskFactory
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
 
-type periodicTask struct {
-	tag string
-	*task.Periodic
-}
+type periodicTask = controllerPeriodicTask
 
 // New return a Controller service with default parameters.
 func New(server *core.Instance, api api.API, config *Config, panelType string) *Controller {
@@ -194,6 +191,14 @@ type controllerDeviceReporter interface {
 	ReportDevices(map[int][]string) error
 }
 
+type controllerNodeDeviceReporter interface {
+	ReportNodeDevices(map[int][]string) error
+}
+
+type controllerNodeDeviceReporterReadiness interface {
+	DeviceReporterReady() bool
+}
+
 type controllerDeviceReporterReadiness interface {
 	DeviceReporterReady() bool
 }
@@ -215,7 +220,7 @@ func (c *Controller) ensureDeviceReportState() *deviceReportState {
 }
 
 func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) {
-	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok && deviceReporterReady(reporter) {
+	if reporter, ok := c.deviceReporter(); ok && deviceReporterReady(reporter) {
 		state := c.ensureDeviceReportState()
 		if devices, pending, changed := state.PrepareChangedReport(onlineDevice); changed {
 			if err := reporter.ReportDevices(devices); err != nil {
@@ -235,6 +240,32 @@ func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineU
 			c.logger.Printf("Report %d online users", len(*onlineDevice))
 		}
 	}
+}
+
+func (c *Controller) deviceReporter() (controllerDeviceReporter, bool) {
+	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok {
+		return reporter, true
+	}
+	if reporter, ok := c.apiClient.(controllerNodeDeviceReporter); ok {
+		return nodeDeviceReporterAdapter{reporter: reporter}, true
+	}
+	return nil, false
+}
+
+type nodeDeviceReporterAdapter struct {
+	reporter controllerNodeDeviceReporter
+}
+
+func (a nodeDeviceReporterAdapter) ReportDevices(devices map[int][]string) error {
+	if a.reporter == nil {
+		return nil
+	}
+	return a.reporter.ReportNodeDevices(devices)
+}
+
+func (a nodeDeviceReporterAdapter) DeviceReporterReady() bool {
+	readiness, ok := a.reporter.(controllerNodeDeviceReporterReadiness)
+	return !ok || readiness.DeviceReporterReady()
 }
 
 func deviceReporterReady(reporter controllerDeviceReporter) bool {
@@ -437,39 +468,8 @@ func (c *Controller) Start() error {
 	}
 
 	// Add periodic tasks
-	c.tasks = append(c.tasks,
-		periodicTask{
-			tag: "node monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second,
-				Execute:  c.nodeInfoMonitor,
-			}},
-		periodicTask{
-			tag: "user monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second,
-				Execute:  c.userInfoMonitor,
-			}},
-	)
-
-	// Check cert service in need
-	var currentNodeInfo *api.NodeInfo
-	c.stateMu.RLock()
-	currentNodeInfo = c.nodeInfo
-	c.stateMu.RUnlock()
-	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false {
-		c.tasks = append(c.tasks, periodicTask{
-			tag: "cert monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second * 60,
-				Execute:  c.certMonitor,
-			}})
-	}
-
-	// Start periodic tasks
-	for i := range c.tasks {
-		c.logger.Printf("Start %s periodic task", c.tasks[i].tag)
-		go c.tasks[i].Start()
+	if err := c.startControllerPeriodicTasks(newNodeInfo); err != nil {
+		return err
 	}
 
 	return nil
@@ -477,12 +477,8 @@ func (c *Controller) Start() error {
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	for i := range c.tasks {
-		if c.tasks[i].Periodic != nil {
-			if err := c.tasks[i].Periodic.Close(); err != nil {
-				c.logger.Panicf("%s periodic task close failed: %s", c.tasks[i].tag, err)
-			}
-		}
+	if err := c.closePeriodicTasks(); err != nil {
+		return err
 	}
 
 	if c.wsRuntime != nil {

@@ -19,6 +19,7 @@ type syncApplySnapshot struct {
 	UserList          *[]api.UserInfo
 	RuleList          *[]api.DetectRule
 	CertConfig        *api.XrayRCertConfig
+	BaseConfig        *api.BaseConfig
 	CertConfigFetched bool
 }
 
@@ -100,6 +101,7 @@ func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapsho
 			}
 			snapshot.NodeInfo = nodeInfo
 		}
+		snapshot.BaseConfig = c.currentBaseConfig()
 	}
 
 	if fetchUsers {
@@ -178,6 +180,10 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if err := c.applyBaseConfig(snapshot.BaseConfig); err != nil {
+		return err
 	}
 
 	if snapshot.RuleList != nil && !c.config.DisableGetRule {

@@ -9,6 +9,8 @@ The `newV2board` adapter targets the backend side of Xboard/NewV2board node oper
 Currently covered backend-facing areas:
 
 - Node config and user sync through REST snapshots.
+- Xboard machine/server management mode: discover machine-bound servers, dynamically start/stop per-node services, and react to `sync.nodes` with immediate rediscovery.
+- Xboard `base_config` runtime interval updates for controller sync/report tasks and machine discovery polling.
 - Route/outbound policy compatibility for the Xboard UniProxy config shape.
 - Panel-provided certificate config (`cert_config`) where available.
 - WebSocket + Polling dual-active control-plane skeleton.
@@ -17,7 +19,7 @@ Currently covered backend-facing areas:
 
 Not claimed as complete in this version:
 
-- Machine mode.
+- Direct application of full WebSocket config payloads without REST confirmation.
 - Panel UI behavior.
 - Subscription template behavior.
 - Full Xboard route engine parity.
@@ -55,6 +57,17 @@ The REST UniProxy snapshot remains the authoritative source for complex runtime 
 Single-node controllers treat `sync.devices` as panel-provided global device/IP state and apply it to limiter admission while the WebSocket state is fresh. WebSocket disconnect clears global device state so stale panel snapshots do not reject new connections. Controllers also send changed-only `report.devices` snapshots over WebSocket, including the empty snapshot after all devices go offline, while retaining REST alive reporting for compatibility.
 
 `sync.nodes` is treated as a machine-mode invalidation signal. In single-node mode it does not start or stop controllers; it schedules a REST resync so the current node converges safely.
+
+### Xboard base_config interval updates
+
+Xboard/NewV2board can return `base_config` in both node UniProxy config snapshots and machine node discovery snapshots. XrayRP treats these values as runtime scheduling controls, not as Xray protocol config:
+
+- `base_config.pull_interval` updates the controller's config/user/rule polling interval. In machine mode, the machine discovery loop also uses the machine discovery response's `pull_interval`.
+- `base_config.push_interval` updates the controller's status, traffic, online-user, and device-report interval.
+- Local `ControllerConfig.UpdatePeriodic` and `MachineConfig.DiscoveryInterval` remain fallback values when the panel does not provide positive intervals.
+- Very small values are clamped to safe minimums: push/report intervals use at least 5 seconds, and pull/discovery intervals use at least 30 seconds.
+
+Changing only `base_config` should not rebuild inbound/outbound runtime state. Runtime objects still change only when the REST snapshot shows actual node, user, rule, route, or certificate differences.
 
 ## Xboard `/api/v2/server/report` compatibility
 

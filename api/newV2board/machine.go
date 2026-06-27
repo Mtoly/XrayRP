@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -18,14 +19,9 @@ type MachineNode struct {
 	Name string `json:"name"`
 }
 
-type MachineBaseConfig struct {
-	PushInterval int `json:"push_interval"`
-	PullInterval int `json:"pull_interval"`
-}
-
 type MachineNodesResponse struct {
-	Nodes      []MachineNode     `json:"nodes"`
-	BaseConfig MachineBaseConfig `json:"base_config"`
+	Nodes      []MachineNode  `json:"nodes"`
+	BaseConfig api.BaseConfig `json:"base_config"`
 }
 
 type MachineDiscoveryConfig struct {
@@ -41,8 +37,8 @@ type machineNodesRequest struct {
 }
 
 type machineNodesWireResponse struct {
-	Nodes      json.RawMessage   `json:"nodes"`
-	BaseConfig MachineBaseConfig `json:"base_config"`
+	Nodes      json.RawMessage `json:"nodes"`
+	BaseConfig api.BaseConfig  `json:"base_config"`
 }
 
 func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse, error) {

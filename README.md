@@ -19,7 +19,7 @@ A Xray backend framework that can easily support many panels.
 
 本版本的主要更新内容请见 [CHANGELOG.md](./CHANGELOG.md)。
 
-Xboard / NewV2board 相关的 WebSocket 双通道同步、route/outbound 兼容、xhttp 与 AnyTLS 配置说明请见 [Xboard / NewV2board Notes](./docs/xboard-newv2board.md)。
+Xboard / NewV2board 相关的 WebSocket 双通道同步、机器/服务器管理模式、`base_config` 热更新、route/outbound 兼容、xhttp 与 AnyTLS 配置说明请见 [Xboard / NewV2board Notes](./docs/xboard-newv2board.md)。
 
 一个基于Xray的后端框架，支持V2ay,Trojan,Shadowsocks协议，极易扩展，支持多面板对接。
 

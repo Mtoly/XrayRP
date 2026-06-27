@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service"
 	log "github.com/sirupsen/logrus"
@@ -43,18 +44,24 @@ type Supervisor struct {
 	discoverer NodeDiscoverer
 	factory    NodeServiceFactory
 
-	mu      sync.Mutex
-	running map[int]*nodeRuntime
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started bool
-	closed  bool
+	mu                sync.Mutex
+	running           map[int]*nodeRuntime
+	cancel            context.CancelFunc
+	done              chan struct{}
+	discoveryInterval time.Duration
+	started           bool
+	closed            bool
 }
 
 type nodeRuntime struct {
 	binding      NodeBinding
 	service      service.Service
 	missingCount int
+}
+
+type discoverySnapshot struct {
+	bindings   []NodeBinding
+	baseConfig api.BaseConfig
 }
 
 func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory NodeServiceFactory) (*Supervisor, error) {
@@ -71,10 +78,11 @@ func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory N
 	}
 
 	return &Supervisor{
-		config:     config,
-		discoverer: discoverer,
-		factory:    factory,
-		running:    make(map[int]*nodeRuntime),
+		config:            config,
+		discoverer:        discoverer,
+		factory:           factory,
+		running:           make(map[int]*nodeRuntime),
+		discoveryInterval: config.DiscoveryInterval,
 	}, nil
 }
 
@@ -93,7 +101,7 @@ func (s *Supervisor) Start() error {
 	done := make(chan struct{})
 	s.cancel = cancel
 	s.done = done
-	go s.run(ctx, done)
+	go s.run(ctx, done, s.discoveryInterval)
 	return nil
 }
 
@@ -139,10 +147,11 @@ func (s *Supervisor) startInitial() error {
 	}
 	s.mu.Unlock()
 
-	bindings, err := s.discoverBindings()
+	snapshot, err := s.discoverSnapshot()
 	if err != nil {
 		return err
 	}
+	bindings := snapshot.bindings
 
 	runtimes := make(map[int]*nodeRuntime, len(bindings))
 	started := make([]*nodeRuntime, 0, len(bindings))
@@ -164,11 +173,12 @@ func (s *Supervisor) startInitial() error {
 	}
 	s.running = runtimes
 	s.started = true
+	s.applyBaseConfigLocked(snapshot.baseConfig)
 	return nil
 }
 
 func (s *Supervisor) reconcilePeriodic() error {
-	bindings, err := s.discoverBindings()
+	snapshot, err := s.discoverSnapshot()
 	if err != nil {
 		s.logWarning(err)
 		return err
@@ -180,27 +190,54 @@ func (s *Supervisor) reconcilePeriodic() error {
 		return nil
 	}
 
-	return s.reconcile(bindings)
+	s.applyBaseConfigLocked(snapshot.baseConfig)
+	return s.reconcile(snapshot.bindings)
 }
 
 func (s *Supervisor) ReconcileNow() error {
 	return s.reconcilePeriodic()
 }
 
-func (s *Supervisor) discoverBindings() ([]NodeBinding, error) {
+func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
 	response, err := s.discoverer.DiscoverMachineNodes()
 	if err != nil {
-		return nil, fmt.Errorf("discover machine nodes: %w", err)
+		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: %w", err)
 	}
 	if response == nil {
-		return nil, fmt.Errorf("discover machine nodes: empty response")
+		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: empty response")
 	}
 
 	bindings, err := NormalizeNodeBindings(response.Nodes)
 	if err != nil {
-		return nil, fmt.Errorf("normalize machine node bindings: %w", err)
+		return discoverySnapshot{}, fmt.Errorf("normalize machine node bindings: %w", err)
 	}
-	return bindings, nil
+	return discoverySnapshot{bindings: bindings, baseConfig: response.BaseConfig}, nil
+}
+
+func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) {
+	if baseConfig.PullInterval <= 0 {
+		return
+	}
+
+	nextInterval := normalizeDiscoveryInterval(time.Duration(baseConfig.PullInterval)*time.Second, s.config.MinDiscoveryInterval)
+	if nextInterval <= 0 || nextInterval == s.discoveryInterval {
+		return
+	}
+	s.discoveryInterval = nextInterval
+
+	if s.cancel == nil || s.closed {
+		return
+	}
+	oldCancel := s.cancel
+	if s.config.Logger != nil {
+		s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.cancel = cancel
+	s.done = done
+	oldCancel()
+	go s.run(ctx, done, nextInterval)
 }
 
 func (s *Supervisor) reconcile(bindings []NodeBinding) error {
@@ -344,10 +381,10 @@ func (s *Supervisor) closeRuntimesBestEffort(runtimes []*nodeRuntime) {
 	}
 }
 
-func (s *Supervisor) run(ctx context.Context, done chan struct{}) {
+func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.Duration) {
 	defer close(done)
 
-	ticker := time.NewTicker(s.config.DiscoveryInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

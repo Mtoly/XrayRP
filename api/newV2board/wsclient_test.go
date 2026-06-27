@@ -234,6 +234,59 @@ func TestWSClient_SendDeviceReportSendsXboardReportDevicesEvent(t *testing.T) {
 	}
 }
 
+func TestWSClient_SendNodeDeviceReportSendsMachineNodeReportDevicesEvent(t *testing.T) {
+	t.Parallel()
+
+	messageReceived := make(chan []byte, 1)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read node device report message failed: %v", err)
+			return
+		}
+		messageReceived <- data
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	devices := map[int][]string{1: []string{"192.0.2.1"}}
+	if err := client.SendNodeDeviceReport(7, devices); err != nil {
+		t.Fatalf("SendNodeDeviceReport returned error: %v", err)
+	}
+
+	select {
+	case data := <-messageReceived:
+		var got struct {
+			Event string `json:"event"`
+			Data  struct {
+				NodeID  int                 `json:"node_id"`
+				Devices map[string][]string `json:"devices"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("invalid node device report JSON: %v", err)
+		}
+		if got.Event != newV2board.WSEventXboardReportDevices {
+			t.Fatalf("unexpected device report event: got %q want %q", got.Event, newV2board.WSEventXboardReportDevices)
+		}
+		if got.Data.NodeID != 7 {
+			t.Fatalf("unexpected node_id: got %d want 7", got.Data.NodeID)
+		}
+		want := map[string][]string{"1": []string{"192.0.2.1"}}
+		if !reflect.DeepEqual(got.Data.Devices, want) {
+			t.Fatalf("unexpected device report data: got %#v want %#v", got.Data.Devices, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for node device report message")
+	}
+}
+
 func TestWSClient_SendNodeStatusReportSendsNodeStatusEvent(t *testing.T) {
 	t.Parallel()
 
@@ -295,6 +348,15 @@ func TestWSClient_SendNodeStatusReportSendsNodeStatusEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for node status message")
+	}
+}
+
+func TestWSClient_SendNodeDeviceReportRejectsInvalidNodeID(t *testing.T) {
+	t.Parallel()
+
+	client := &newV2board.WSClient{}
+	if err := client.SendNodeDeviceReport(0, map[int][]string{}); err == nil {
+		t.Fatal("expected invalid node ID error")
 	}
 }
 

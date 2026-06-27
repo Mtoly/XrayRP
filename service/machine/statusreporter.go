@@ -6,31 +6,55 @@ type NodeStatusReporter interface {
 	ReportNodeStatus(nodeID int, nodeStatus *api.NodeStatus) error
 }
 
-func WrapAPIWithStatusReporter(apiClient api.API, nodeID int, reporter NodeStatusReporter) api.API {
+type NodeDeviceReporter interface {
+	ReportNodeDevices(nodeID int, devices map[int][]string) error
+}
+
+type DeviceReporterReadiness interface {
+	DeviceReporterReady() bool
+}
+
+func WrapAPIWithReporter(apiClient api.API, nodeID int, reporter any) api.API {
 	if apiClient == nil || reporter == nil || nodeID <= 0 {
 		return apiClient
 	}
-	return &statusReportingAPI{
+	return &reportingAPI{
 		API:      apiClient,
 		nodeID:   nodeID,
 		reporter: reporter,
 	}
 }
 
-type statusReportingAPI struct {
-	api.API
-	nodeID   int
-	reporter NodeStatusReporter
+func WrapAPIWithStatusReporter(apiClient api.API, nodeID int, reporter NodeStatusReporter) api.API {
+	return WrapAPIWithReporter(apiClient, nodeID, reporter)
 }
 
-func (a *statusReportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
-	if a.reporter != nil {
-		_ = a.reporter.ReportNodeStatus(a.nodeID, nodeStatus)
+type reportingAPI struct {
+	api.API
+	nodeID   int
+	reporter any
+}
+
+func (a *reportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	if reporter, ok := a.reporter.(NodeStatusReporter); ok {
+		_ = reporter.ReportNodeStatus(a.nodeID, nodeStatus)
 	}
 	return a.API.ReportNodeStatus(nodeStatus)
 }
 
-func (a *statusReportingAPI) GetWSConfig() *api.WSConfig {
+func (a *reportingAPI) ReportNodeDevices(devices map[int][]string) error {
+	if reporter, ok := a.reporter.(NodeDeviceReporter); ok {
+		return reporter.ReportNodeDevices(a.nodeID, devices)
+	}
+	return nil
+}
+
+func (a *reportingAPI) DeviceReporterReady() bool {
+	readiness, ok := a.reporter.(DeviceReporterReadiness)
+	return !ok || readiness.DeviceReporterReady()
+}
+
+func (a *reportingAPI) GetWSConfig() *api.WSConfig {
 	capable, ok := a.API.(api.WSCapable)
 	if !ok {
 		return nil
@@ -38,7 +62,7 @@ func (a *statusReportingAPI) GetWSConfig() *api.WSConfig {
 	return capable.GetWSConfig()
 }
 
-func (a *statusReportingAPI) DiscoverWSEndpoint() (string, error) {
+func (a *reportingAPI) DiscoverWSEndpoint() (string, error) {
 	discoverer, ok := a.API.(api.WSEndpointDiscoverer)
 	if !ok {
 		return "", nil

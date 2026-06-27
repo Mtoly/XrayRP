@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	errNilNodeStatus           = errors.New("node status is nil")
-	errInvalidNodeStatusNodeID = errors.New("node status node ID must be greater than 0")
-	errXboardReportUnsupported = errors.New("xboard report endpoint unsupported")
+	errNilNodeStatus                 = errors.New("node status is nil")
+	errInvalidNodeStatusNodeID       = errors.New("node status node ID must be greater than 0")
+	errInvalidNodeDeviceReportNodeID = errors.New("node device report node ID must be greater than 0")
+	errXboardReportUnsupported       = errors.New("xboard report endpoint unsupported")
 )
 
 const xboardReportPath = "/api/v2/server/report"
