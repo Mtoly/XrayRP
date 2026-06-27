@@ -38,6 +38,18 @@ type NodeStatus struct {
 	Uptime uint64
 }
 
+// BaseConfig carries panel-defined runtime intervals in seconds.
+type BaseConfig struct {
+	PushInterval int `json:"push_interval"`
+	PullInterval int `json:"pull_interval"`
+}
+
+// BaseConfigProvider is an optional capability implemented by panel adapters
+// that can expose panel-defined runtime intervals from the latest config snapshot.
+type BaseConfigProvider interface {
+	GetBaseConfig() *BaseConfig
+}
+
 type OutboundFilterPolicy struct {
 	Candidates []string
 	Include    []string

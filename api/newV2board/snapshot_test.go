@@ -60,6 +60,45 @@ func TestCertConfigFromUniProxySnapshot(t *testing.T) {
 	}
 }
 
+func TestBaseConfigFromUniProxySnapshot(t *testing.T) {
+	if baseConfig := baseConfigFromUniProxySnapshot(nil); baseConfig != nil {
+		t.Fatalf("expected nil base config from nil snapshot, got %#v", baseConfig)
+	}
+	if baseConfig := baseConfigFromUniProxySnapshot(&serverConfig{}); baseConfig != nil {
+		t.Fatalf("expected nil base config without positive intervals, got %#v", baseConfig)
+	}
+
+	snapshot := &serverConfig{BaseConfig: api.BaseConfig{PushInterval: 15, PullInterval: 45}}
+	baseConfig := baseConfigFromUniProxySnapshot(snapshot)
+	if baseConfig == nil {
+		t.Fatal("expected base config from snapshot")
+	}
+	if baseConfig.PushInterval != 15 || baseConfig.PullInterval != 45 {
+		t.Fatalf("unexpected base config: %#v", baseConfig)
+	}
+
+	baseConfig.PushInterval = 99
+	if snapshot.BaseConfig.PushInterval != 15 {
+		t.Fatalf("expected returned base config to be a copy, snapshot changed to %#v", snapshot.BaseConfig)
+	}
+}
+
+func TestAPIClientGetBaseConfigUsesCachedSnapshot(t *testing.T) {
+	client := New(&api.Config{APIHost: "http://127.0.0.1", NodeID: 1, NodeType: "V2ray"})
+	if baseConfig := client.GetBaseConfig(); baseConfig != nil {
+		t.Fatalf("expected nil base config before snapshot is cached, got %#v", baseConfig)
+	}
+
+	client.storeUniProxySnapshot(&serverConfig{BaseConfig: api.BaseConfig{PushInterval: 20, PullInterval: 50}})
+	baseConfig := client.GetBaseConfig()
+	if baseConfig == nil {
+		t.Fatal("expected cached base config")
+	}
+	if baseConfig.PushInterval != 20 || baseConfig.PullInterval != 50 {
+		t.Fatalf("unexpected cached base config: %#v", baseConfig)
+	}
+}
+
 func TestRulesFromUniProxySnapshotIncludesLocalAndBlockRoutes(t *testing.T) {
 	localPattern := mustCompileRegex(t, "local-allow")
 	snapshot := &serverConfig{Routes: []route{

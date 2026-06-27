@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service"
 )
@@ -225,6 +226,10 @@ func newFakeFactory() *fakeFactory {
 
 func machineNodesResponse(nodes ...newV2board.MachineNode) *newV2board.MachineNodesResponse {
 	return &newV2board.MachineNodesResponse{Nodes: nodes}
+}
+
+func machineNodesResponseWithBaseConfig(baseConfig api.BaseConfig, nodes ...newV2board.MachineNode) *newV2board.MachineNodesResponse {
+	return &newV2board.MachineNodesResponse{Nodes: nodes, BaseConfig: baseConfig}
 }
 
 func TestSupervisorStartRollsBackStartedServicesWhenNodeBuildFails(t *testing.T) {
@@ -546,5 +551,43 @@ func TestSupervisorDiscoveryIntervalDefaultsAndClamps(t *testing.T) {
 				t.Fatalf("normalizeDiscoveryInterval() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSupervisorStartAppliesBaseConfigPullInterval(t *testing.T) {
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{DiscoveryInterval: 60 * time.Second}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+	if supervisor.discoveryInterval != 45*time.Second {
+		t.Fatalf("expected discovery interval from base config, got %s", supervisor.discoveryInterval)
+	}
+}
+
+func TestSupervisorPeriodicAppliesBaseConfigPullInterval(t *testing.T) {
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 5}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{DiscoveryInterval: 60 * time.Second}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	if err := supervisor.reconcilePeriodic(); err != nil {
+		t.Fatalf("reconcilePeriodic returned error: %v", err)
+	}
+	if supervisor.discoveryInterval != minMachineDiscoveryInterval {
+		t.Fatalf("expected clamped discovery interval, got %s", supervisor.discoveryInterval)
 	}
 }

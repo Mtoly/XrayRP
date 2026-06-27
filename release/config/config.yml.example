@@ -25,11 +25,11 @@ ConnectionConfig:
 #   MachineID: 1
 #   Token: "machine-token"
 #   Timeout: 30
-#   DiscoveryInterval: 60 # Fallback polling interval; sync.nodes triggers immediate rediscovery when WebSocket is enabled.
+#   DiscoveryInterval: 60 # Fallback polling interval; Xboard base_config.pull_interval can update this at runtime, and sync.nodes triggers immediate rediscovery when WebSocket is enabled.
 #   ControllerConfig: # Shared controller defaults applied to every discovered server.
 #     ListenIP: 0.0.0.0
 #     SendIP: 0.0.0.0
-#     UpdatePeriodic: 60
+#     UpdatePeriodic: 60 # Fallback interval; Xboard base_config.pull_interval controls config sync and base_config.push_interval controls report/online updates at runtime when provided.
 #     WebSocketConfig:
 #       Enable: true # Enable shared machine WebSocket for sync.nodes, per-node mailbox routing, and node.status reports.
 #       Endpoint: # Optional override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws with machine_id + token.
@@ -53,7 +53,7 @@ Nodes:
     ControllerConfig:
       ListenIP: 0.0.0.0 # IP address you want to listen
       SendIP: 0.0.0.0 # IP address you want to send pacakage
-      UpdatePeriodic: 60 # Time to update the nodeinfo, how many sec.
+      UpdatePeriodic: 60 # Local fallback interval. For Xboard/NewV2board, remote base_config.pull_interval controls config sync and base_config.push_interval controls reports when provided.
       EnableDNS: false # Use custom DNS config, Please ensure that you set the dns.json well
       DNSType: AsIs # AsIs, UseIP, UseIPv4, UseIPv6, DNS strategy
       DisableSniffing: false # Disable sniffing

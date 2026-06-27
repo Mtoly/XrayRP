@@ -43,6 +43,22 @@ func certConfigFromUniProxySnapshot(snapshot *serverConfig) *api.XrayRCertConfig
 	}
 }
 
+func baseConfigFromUniProxySnapshot(snapshot *serverConfig) *api.BaseConfig {
+	if snapshot == nil || (snapshot.BaseConfig.PushInterval <= 0 && snapshot.BaseConfig.PullInterval <= 0) {
+		return nil
+	}
+	baseConfig := snapshot.BaseConfig
+	return &baseConfig
+}
+
+func (c *APIClient) GetBaseConfig() *api.BaseConfig {
+	snapshot, ok := c.cachedUniProxySnapshot()
+	if !ok {
+		return nil
+	}
+	return baseConfigFromUniProxySnapshot(snapshot)
+}
+
 func rulesFromUniProxySnapshot(snapshot *serverConfig, localRules []api.DetectRule) (*[]api.DetectRule, error) {
 	if snapshot == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving rules")

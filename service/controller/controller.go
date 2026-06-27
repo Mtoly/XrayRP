@@ -13,7 +13,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/outbound"
@@ -59,14 +58,12 @@ type Controller struct {
 	syncCoordinator        syncCoordinatorLifecycle
 	wsRuntime              wsRuntimeLifecycle
 	deviceReportState      *deviceReportState
+	newPeriodicTask        periodicTaskFactory
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
 
-type periodicTask struct {
-	tag string
-	*task.Periodic
-}
+type periodicTask = controllerPeriodicTask
 
 // New return a Controller service with default parameters.
 func New(server *core.Instance, api api.API, config *Config, panelType string) *Controller {
@@ -471,39 +468,8 @@ func (c *Controller) Start() error {
 	}
 
 	// Add periodic tasks
-	c.tasks = append(c.tasks,
-		periodicTask{
-			tag: "node monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second,
-				Execute:  c.nodeInfoMonitor,
-			}},
-		periodicTask{
-			tag: "user monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second,
-				Execute:  c.userInfoMonitor,
-			}},
-	)
-
-	// Check cert service in need
-	var currentNodeInfo *api.NodeInfo
-	c.stateMu.RLock()
-	currentNodeInfo = c.nodeInfo
-	c.stateMu.RUnlock()
-	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false {
-		c.tasks = append(c.tasks, periodicTask{
-			tag: "cert monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(c.config.UpdatePeriodic) * time.Second * 60,
-				Execute:  c.certMonitor,
-			}})
-	}
-
-	// Start periodic tasks
-	for i := range c.tasks {
-		c.logger.Printf("Start %s periodic task", c.tasks[i].tag)
-		go c.tasks[i].Start()
+	if err := c.startControllerPeriodicTasks(newNodeInfo); err != nil {
+		return err
 	}
 
 	return nil
@@ -511,12 +477,8 @@ func (c *Controller) Start() error {
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	for i := range c.tasks {
-		if c.tasks[i].Periodic != nil {
-			if err := c.tasks[i].Periodic.Close(); err != nil {
-				c.logger.Panicf("%s periodic task close failed: %s", c.tasks[i].tag, err)
-			}
-		}
+	if err := c.closePeriodicTasks(); err != nil {
+		return err
 	}
 
 	if c.wsRuntime != nil {

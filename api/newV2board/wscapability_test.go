@@ -102,3 +102,11 @@ func TestWSCapBaseAPIContractRemainsOptional(t *testing.T) {
 		t.Fatal("expected base api.API implementations to remain valid without ws capability")
 	}
 }
+
+func TestBaseConfigCapabilityBaseAPIContractRemainsOptional(t *testing.T) {
+	var client api.API = stubAdapter{}
+
+	if _, ok := client.(api.BaseConfigProvider); ok {
+		t.Fatal("expected base api.API implementations to remain valid without base config capability")
+	}
+}
