@@ -120,11 +120,11 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 	)
 
 	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless":
+	case "V2ray", "v2ray", "Vmess", "vmess", "Vless", "vless":
 		nodeInfo, err = c.parseV2rayNodeResponse(snapshot)
-	case "Trojan":
+	case "Trojan", "trojan":
 		nodeInfo, err = c.parseTrojanNodeResponse(snapshot)
-	case "Shadowsocks":
+	case "Shadowsocks", "shadowsocks":
 		nodeInfo, err = c.parseSSNodeResponse(snapshot)
 	case "Hysteria2", "hysteria2", "Hysteria", "hysteria":
 		nodeInfo, err = c.parseHysteria2NodeResponse(snapshot)

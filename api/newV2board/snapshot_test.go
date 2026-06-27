@@ -184,6 +184,26 @@ func TestNodeInfoFromUniProxySnapshotDispatchesV2ray(t *testing.T) {
 	}
 }
 
+func TestNodeInfoFromUniProxySnapshotDispatchesLowercaseMachineVless(t *testing.T) {
+	client := &APIClient{NodeID: 1, NodeType: "vless"}
+	snapshot := &serverConfig{ServerPort: 443}
+	snapshot.Network = "tcp"
+
+	nodeInfo, err := client.nodeInfoFromUniProxySnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("nodeInfoFromUniProxySnapshot returned error: %v", err)
+	}
+	if nodeInfo == nil {
+		t.Fatal("expected node info from lowercase vless snapshot")
+	}
+	if nodeInfo.Port != 443 {
+		t.Fatalf("expected derived node port 443, got %d", nodeInfo.Port)
+	}
+	if nodeInfo.NodeType != "vless" {
+		t.Fatalf("expected lowercase vless node type to be preserved, got %q", nodeInfo.NodeType)
+	}
+}
+
 func TestEnrichNodeInfoFromUniProxySnapshotAddsDNSAndRoutePolicy(t *testing.T) {
 	snapshot := loadRoutePolicyFixture(t)
 	nodeInfo := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
