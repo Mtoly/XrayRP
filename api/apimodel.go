@@ -186,11 +186,17 @@ type DetectResult struct {
 }
 
 // XrayRCertConfig carries optional panel-provided certificate settings
-// (e.g., DNS provider, ACME email, and DNS-01 environment variables).
+// (e.g., ACME settings, local file paths, or panel-supplied PEM content).
 type XrayRCertConfig struct {
-	Provider string            `json:"provider"`
-	Email    string            `json:"email"`
-	DNSEnv   map[string]string `json:"dns_env"`
+	CertMode    string            `json:"cert_mode"`
+	CertDomain  string            `json:"domain"`
+	CertFile    string            `json:"cert_file"`
+	KeyFile     string            `json:"key_file"`
+	CertContent string            `json:"cert_content"`
+	KeyContent  string            `json:"key_content"`
+	Provider    string            `json:"provider"`
+	Email       string            `json:"email"`
+	DNSEnv      map[string]string `json:"dns_env"`
 }
 
 type Hysteria2Config struct {

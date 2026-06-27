@@ -441,6 +441,12 @@ func (c *Controller) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig, ho
 		current = &mylego.CertConfig{}
 		c.config.CertConfig = current
 	}
+	current.CertMode = certConfig.CertMode
+	current.CertDomain = certConfig.CertDomain
+	current.CertFile = certConfig.CertFile
+	current.KeyFile = certConfig.KeyFile
+	current.CertContent = certConfig.CertContent
+	current.KeyContent = certConfig.KeyContent
 	current.Provider = certConfig.Provider
 	current.Email = certConfig.Email
 	current.DNSEnv = cloneStringMap(certConfig.DNSEnv)
@@ -571,7 +577,26 @@ func panelCertConfigEqual(current *mylego.CertConfig, next *api.XrayRCertConfig)
 	if current == nil || next == nil {
 		return current == nil && next == nil
 	}
-	return current.Provider == next.Provider && current.Email == next.Email && reflect.DeepEqual(current.DNSEnv, next.DNSEnv)
+	return normalizeCertMode(current.CertMode, current.Provider, current.DNSEnv) == normalizeCertMode(next.CertMode, next.Provider, next.DNSEnv) &&
+		current.CertDomain == next.CertDomain &&
+		current.CertFile == next.CertFile &&
+		current.KeyFile == next.KeyFile &&
+		current.CertContent == next.CertContent &&
+		current.KeyContent == next.KeyContent &&
+		current.Provider == next.Provider &&
+		current.Email == next.Email &&
+		reflect.DeepEqual(current.DNSEnv, next.DNSEnv)
+}
+
+func normalizeCertMode(certMode, provider string, dnsEnv map[string]string) string {
+	mode := strings.ToLower(strings.TrimSpace(certMode))
+	if mode != "" {
+		return mode
+	}
+	if strings.TrimSpace(provider) != "" || len(dnsEnv) > 0 {
+		return "dns"
+	}
+	return ""
 }
 
 func clonePanelCertConfig(certConfig *api.XrayRCertConfig) *api.XrayRCertConfig {
@@ -579,9 +604,15 @@ func clonePanelCertConfig(certConfig *api.XrayRCertConfig) *api.XrayRCertConfig 
 		return nil
 	}
 	return &api.XrayRCertConfig{
-		Provider: certConfig.Provider,
-		Email:    certConfig.Email,
-		DNSEnv:   cloneStringMap(certConfig.DNSEnv),
+		CertMode:    certConfig.CertMode,
+		CertDomain:  certConfig.CertDomain,
+		CertFile:    certConfig.CertFile,
+		KeyFile:     certConfig.KeyFile,
+		CertContent: certConfig.CertContent,
+		KeyContent:  certConfig.KeyContent,
+		Provider:    certConfig.Provider,
+		Email:       certConfig.Email,
+		DNSEnv:      cloneStringMap(certConfig.DNSEnv),
 	}
 }
 

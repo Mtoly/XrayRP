@@ -41,8 +41,14 @@ func TestCertConfigFromUniProxySnapshot(t *testing.T) {
 	}
 
 	snapshot := &serverConfig{CertConfig: &certConfig{
-		Provider: "alidns",
-		Email:    "ops@example.com",
+		CertMode:    "content",
+		Domain:      "node.example.com",
+		CertFile:    "/tmp/node.crt",
+		KeyFile:     "/tmp/node.key",
+		CertContent: "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----\n",
+		KeyContent:  "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
+		Provider:    "alidns",
+		Email:       "ops@example.com",
 		DNSEnv: map[string]string{
 			"ALICLOUD_ACCESS_KEY": "ak",
 			"ALICLOUD_SECRET_KEY": "sk",
@@ -51,6 +57,15 @@ func TestCertConfigFromUniProxySnapshot(t *testing.T) {
 	cert := certConfigFromUniProxySnapshot(snapshot)
 	if cert == nil {
 		t.Fatal("expected cert config from snapshot")
+	}
+	if cert.CertMode != "content" || cert.CertDomain != "node.example.com" {
+		t.Fatalf("unexpected cert mode/domain: %#v", cert)
+	}
+	if cert.CertFile != "/tmp/node.crt" || cert.KeyFile != "/tmp/node.key" {
+		t.Fatalf("unexpected cert files: %#v", cert)
+	}
+	if cert.CertContent == "" || cert.KeyContent == "" {
+		t.Fatalf("expected cert content to be preserved: %#v", cert)
 	}
 	if cert.Provider != "alidns" || cert.Email != "ops@example.com" {
 		t.Fatalf("unexpected cert config: %#v", cert)
