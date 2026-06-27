@@ -208,8 +208,29 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	return c.reportLegacyUserTraffic(userTraffic)
 }
 
+func (c *APIClient) legacyStatusPath() string {
+	if c != nil && c.MachineID > 0 {
+		return "/api/v2/server/status"
+	}
+	return "/api/v1/server/UniProxy/status"
+}
+
+func (c *APIClient) legacyAlivePath() string {
+	if c != nil && c.MachineID > 0 {
+		return "/api/v2/server/alive"
+	}
+	return "/api/v1/server/UniProxy/alive"
+}
+
+func (c *APIClient) legacyTrafficPath() string {
+	if c != nil && c.MachineID > 0 {
+		return "/api/v2/server/push"
+	}
+	return "/api/v1/server/UniProxy/push"
+}
+
 func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
-	path := "/api/v1/server/UniProxy/status"
+	path := c.legacyStatusPath()
 
 	payload := map[string]any{
 		"cpu": nodeStatus.CPU,
@@ -237,7 +258,7 @@ func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
 }
 
 func (c *APIClient) reportLegacyNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
-	path := "/api/v1/server/UniProxy/alive"
+	path := c.legacyAlivePath()
 	data := buildAliveMap(onlineUserList, c.NodeID)
 
 	res, err := c.client.R().
@@ -250,7 +271,7 @@ func (c *APIClient) reportLegacyNodeOnlineUsers(onlineUserList *[]api.OnlineUser
 }
 
 func (c *APIClient) reportLegacyUserTraffic(userTraffic *[]api.UserTraffic) error {
-	path := "/api/v1/server/UniProxy/push"
+	path := c.legacyTrafficPath()
 	data := buildTrafficMap(userTraffic)
 
 	res, err := c.client.R().

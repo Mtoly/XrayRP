@@ -11,7 +11,15 @@ import (
 	"github.com/Mtoly/XrayRP/common"
 )
 
-const uniProxyConfigPath = "/api/v1/server/UniProxy/config"
+const legacyUniProxyConfigPath = "/api/v1/server/UniProxy/config"
+const xboardConfigPath = "/api/v2/server/config"
+
+func (c *APIClient) configPath() string {
+	if c != nil && c.MachineID > 0 {
+		return xboardConfigPath
+	}
+	return legacyUniProxyConfigPath
+}
 
 func (c *APIClient) cachedUniProxySnapshot() (*serverConfig, bool) {
 	value := c.resp.Load()
@@ -139,12 +147,13 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 }
 
 func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
+	path := c.configPath()
 	req := c.client.R().ForceContentType("application/json")
 	if useETag {
 		req.SetHeader("If-None-Match", c.eTags["node"])
 	}
 
-	res, err := req.Get(uniProxyConfigPath)
+	res, err := req.Get(path)
 	if useETag && res != nil && res.StatusCode() == 304 {
 		return nil, fmt.Errorf(api.NodeNotModified)
 	}
@@ -155,7 +164,7 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 		}
 	}
 
-	cfgResp, err := c.parseResponse(res, uniProxyConfigPath, err)
+	cfgResp, err := c.parseResponse(res, path, err)
 	if err != nil {
 		return nil, err
 	}

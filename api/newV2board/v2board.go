@@ -60,12 +60,13 @@ func New(apiConfig *api.Config) *APIClient {
 	nodeType := panelNodeType(apiConfig.NodeType, apiConfig.EnableVless)
 	// Create Key for each requests
 	queryParams := map[string]string{
-		"node_id":   strconv.Itoa(apiConfig.NodeID),
-		"node_type": nodeType,
-		"token":     apiConfig.Key,
+		"node_id": strconv.Itoa(apiConfig.NodeID),
+		"token":   apiConfig.Key,
 	}
 	if apiConfig.MachineID > 0 {
 		queryParams["machine_id"] = strconv.Itoa(apiConfig.MachineID)
+	} else {
+		queryParams["node_type"] = nodeType
 	}
 	client.SetQueryParams(queryParams)
 	// Read local rule list
@@ -211,10 +212,17 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	return nodeInfo, nil
 }
 
+func (c *APIClient) userPath() string {
+	if c != nil && c.MachineID > 0 {
+		return "/api/v2/server/user"
+	}
+	return "/api/v1/server/UniProxy/user"
+}
+
 // GetUserList will pull user form panel
 func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	var users []*user
-	path := "/api/v1/server/UniProxy/user"
+	path := c.userPath()
 
 	switch c.NodeType {
 	case "V2ray", "Trojan", "Shadowsocks", "Vmess", "Vless", "Hysteria2", "hysteria2", "Hysteria", "hysteria", "Tuic", "tuic", "AnyTLS", "anytls", "Socks", "socks", "HTTP", "http":
@@ -276,9 +284,16 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	return &userList, nil
 }
 
+func (c *APIClient) aliveListPath() string {
+	if c != nil && c.MachineID > 0 {
+		return "/api/v2/server/alivelist"
+	}
+	return "/api/v1/server/UniProxy/alivelist"
+}
+
 // GetAliveList implements the API interface
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
-	path := "/api/v1/server/UniProxy/alivelist"
+	path := c.aliveListPath()
 
 	res, err := c.client.R().
 		ForceContentType("application/json").
