@@ -10,13 +10,16 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/common/serverstatus"
 	"github.com/Mtoly/XrayRP/service"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	defaultMachineDiscoveryInterval = 60 * time.Second
+	defaultMachineStatusInterval    = 60 * time.Second
 	minMachineDiscoveryInterval     = 30 * time.Second
+	minMachineStatusInterval        = 10 * time.Second
 	removedNodeMissingThreshold     = 2
 )
 
@@ -34,9 +37,17 @@ func (d *NewV2boardDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodesR
 
 type NodeServiceFactory func(NodeBinding) (service.Service, error)
 
+type MachineStatusReporterConfig struct {
+	Reporter          MachineStatusReporter
+	Collector         MachineStatusCollector
+	StatusInterval    time.Duration
+	MinStatusInterval time.Duration
+}
+
 type SupervisorConfig struct {
 	DiscoveryInterval    time.Duration
 	MinDiscoveryInterval time.Duration
+	MachineStatus        MachineStatusReporterConfig
 	Logger               *log.Entry
 	ShowErrorDetails     bool
 }
@@ -50,7 +61,10 @@ type Supervisor struct {
 	running           map[int]*nodeRuntime
 	cancel            context.CancelFunc
 	done              chan struct{}
+	statusCancel      context.CancelFunc
+	statusDone        chan struct{}
 	discoveryInterval time.Duration
+	statusInterval    time.Duration
 	started           bool
 	closed            bool
 }
@@ -78,6 +92,11 @@ func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory N
 	if config.MinDiscoveryInterval <= 0 {
 		config.MinDiscoveryInterval = minMachineDiscoveryInterval
 	}
+	config.MachineStatus.MinStatusInterval = normalizeMinStatusInterval(config.MachineStatus.MinStatusInterval)
+	config.MachineStatus.StatusInterval = normalizeStatusInterval(config.MachineStatus.StatusInterval, config.MachineStatus.MinStatusInterval)
+	if config.MachineStatus.Collector == nil {
+		config.MachineStatus.Collector = serverstatus.GetMachineStatus
+	}
 
 	return &Supervisor{
 		config:            config,
@@ -85,6 +104,7 @@ func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory N
 		factory:           factory,
 		running:           make(map[int]*nodeRuntime),
 		discoveryInterval: config.DiscoveryInterval,
+		statusInterval:    config.MachineStatus.StatusInterval,
 	}, nil
 }
 
@@ -104,6 +124,7 @@ func (s *Supervisor) Start() error {
 	s.cancel = cancel
 	s.done = done
 	go s.run(ctx, done, s.discoveryInterval)
+	s.startStatusLoopLocked(s.statusInterval)
 	return nil
 }
 
@@ -111,15 +132,25 @@ func (s *Supervisor) Close() error {
 	s.mu.Lock()
 	cancel := s.cancel
 	done := s.done
+	statusCancel := s.statusCancel
+	statusDone := s.statusDone
 	s.cancel = nil
 	s.done = nil
+	s.statusCancel = nil
+	s.statusDone = nil
 	s.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
+	if statusCancel != nil {
+		statusCancel()
+	}
 	if done != nil {
 		<-done
+	}
+	if statusDone != nil {
+		<-statusDone
 	}
 
 	s.mu.Lock()
@@ -223,29 +254,30 @@ func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
 }
 
 func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) {
-	if baseConfig.PullInterval <= 0 {
-		return
+	if baseConfig.PullInterval > 0 {
+		nextInterval := normalizeDiscoveryInterval(time.Duration(baseConfig.PullInterval)*time.Second, s.config.MinDiscoveryInterval)
+		if nextInterval > 0 && nextInterval != s.discoveryInterval {
+			s.discoveryInterval = nextInterval
+
+			if s.cancel != nil && !s.closed {
+				oldCancel := s.cancel
+				if s.config.Logger != nil {
+					s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				done := make(chan struct{})
+				s.cancel = cancel
+				s.done = done
+				oldCancel()
+				go s.run(ctx, done, nextInterval)
+			}
+		}
 	}
 
-	nextInterval := normalizeDiscoveryInterval(time.Duration(baseConfig.PullInterval)*time.Second, s.config.MinDiscoveryInterval)
-	if nextInterval <= 0 || nextInterval == s.discoveryInterval {
-		return
+	if baseConfig.PushInterval > 0 {
+		nextInterval := normalizeStatusInterval(time.Duration(baseConfig.PushInterval)*time.Second, s.config.MachineStatus.MinStatusInterval)
+		s.replaceStatusIntervalLocked(nextInterval)
 	}
-	s.discoveryInterval = nextInterval
-
-	if s.cancel == nil || s.closed {
-		return
-	}
-	oldCancel := s.cancel
-	if s.config.Logger != nil {
-		s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	s.cancel = cancel
-	s.done = done
-	oldCancel()
-	go s.run(ctx, done, nextInterval)
 }
 
 func (s *Supervisor) reconcile(bindings []NodeBinding) error {
@@ -407,6 +439,67 @@ func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.
 	}
 }
 
+func (s *Supervisor) startStatusLoopLocked(interval time.Duration) {
+	if s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil || interval <= 0 || s.closed || s.statusCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.statusCancel = cancel
+	s.statusDone = done
+	go s.runStatus(ctx, done, interval)
+}
+
+func (s *Supervisor) replaceStatusIntervalLocked(interval time.Duration) {
+	if interval <= 0 || interval == s.statusInterval {
+		return
+	}
+	s.statusInterval = interval
+	if s.statusCancel == nil || s.closed || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
+		return
+	}
+	oldCancel := s.statusCancel
+	if s.config.Logger != nil {
+		s.config.Logger.Infof("Update machine status interval to %s", interval)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.statusCancel = cancel
+	s.statusDone = done
+	oldCancel()
+	go s.runStatus(ctx, done, interval)
+}
+
+func (s *Supervisor) runStatus(ctx context.Context, done chan struct{}, interval time.Duration) {
+	defer close(done)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	s.reportMachineStatus()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.reportMachineStatus()
+		}
+	}
+}
+
+func (s *Supervisor) reportMachineStatus() {
+	if s == nil || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
+		return
+	}
+	status, err := s.config.MachineStatus.Collector()
+	if err != nil {
+		s.logWarning(fmt.Errorf("collect machine status: %w", err))
+	}
+	if err := s.config.MachineStatus.Reporter.ReportMachineStatus(status); err != nil {
+		s.logWarning(fmt.Errorf("report machine status: %w", err))
+	}
+}
+
 func (s *Supervisor) logWarning(err error) {
 	if err == nil || s.config.Logger == nil {
 		return
@@ -428,6 +521,24 @@ func normalizeDiscoveryInterval(interval, min time.Duration) time.Duration {
 	}
 	if interval <= 0 {
 		return defaultMachineDiscoveryInterval
+	}
+	if interval < min {
+		return min
+	}
+	return interval
+}
+
+func normalizeMinStatusInterval(min time.Duration) time.Duration {
+	if min <= 0 {
+		return minMachineStatusInterval
+	}
+	return min
+}
+
+func normalizeStatusInterval(interval, min time.Duration) time.Duration {
+	min = normalizeMinStatusInterval(min)
+	if interval <= 0 {
+		return defaultMachineStatusInterval
 	}
 	if interval < min {
 		return min

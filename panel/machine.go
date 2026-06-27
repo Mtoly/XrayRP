@@ -17,6 +17,14 @@ import (
 	"github.com/Mtoly/XrayRP/service/machine"
 )
 
+type newV2boardMachineStatusReporter struct {
+	config newV2board.MachineDiscoveryConfig
+}
+
+func (r *newV2boardMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
+	return newV2board.ReportMachineStatus(r.config, status)
+}
+
 func machineModeEnabled(config *Config) bool {
 	return config != nil && config.MachineConfig != nil && config.MachineConfig.Enable
 }
@@ -73,14 +81,13 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		return nil, err
 	}
 
-	discoverer := &machine.NewV2boardDiscoverer{
-		Config: newV2board.MachineDiscoveryConfig{
-			APIHost:   mc.ApiHost,
-			MachineID: mc.MachineID,
-			Token:     mc.Token,
-			Timeout:   time.Duration(mc.Timeout) * time.Second,
-		},
+	discoveryConfig := newV2board.MachineDiscoveryConfig{
+		APIHost:   mc.ApiHost,
+		MachineID: mc.MachineID,
+		Token:     mc.Token,
+		Timeout:   time.Duration(mc.Timeout) * time.Second,
 	}
+	discoverer := &machine.NewV2boardDiscoverer{Config: discoveryConfig}
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
 		apiConfig := buildMachineNodeAPIConfig(mc, binding)
 		var apiClient api.API = newV2board.New(apiConfig)
@@ -106,8 +113,11 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
-		Logger:            p.logger.WithField("service", "machine-supervisor"),
-		ShowErrorDetails:  p.panelConfig.ShowErrorDetails(),
+		MachineStatus: machine.MachineStatusReporterConfig{
+			Reporter: &newV2boardMachineStatusReporter{config: discoveryConfig},
+		},
+		Logger:           p.logger.WithField("service", "machine-supervisor"),
+		ShowErrorDetails: p.panelConfig.ShowErrorDetails(),
 	}, discoverer, factory)
 	if err != nil {
 		return nil, err

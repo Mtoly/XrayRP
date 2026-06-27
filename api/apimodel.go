@@ -30,6 +30,19 @@ type Config struct {
 	DisableCustomConfig bool    `mapstructure:"DisableCustomConfig"`
 }
 
+// MachineStatus carries machine-level load metrics for Xboard machine mode.
+type MachineStatus struct {
+	CPU         float64
+	MemTotal    uint64
+	MemUsed     uint64
+	SwapTotal   uint64
+	SwapUsed    uint64
+	DiskTotal   uint64
+	DiskUsed    uint64
+	NetInSpeed  float64
+	NetOutSpeed float64
+}
+
 // NodeStatus Node status
 type NodeStatus struct {
 	CPU    float64

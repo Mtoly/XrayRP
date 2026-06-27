@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Mtoly/XrayRP/api"
 )
 
 func TestDiscoverMachineNodesPostsMachineCredentials(t *testing.T) {
@@ -201,6 +203,116 @@ func TestDiscoverMachineNodesAllowsMissingBaseConfig(t *testing.T) {
 	}
 	if resp.BaseConfig.PushInterval != 0 || resp.BaseConfig.PullInterval != 0 {
 		t.Fatalf("unexpected base_config: %#v", resp.BaseConfig)
+	}
+}
+
+func TestReportMachineStatusPostsMachinePayload(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan machineDiscoveryRequestCapture, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if r.URL.Path != "/api/v2/server/machine/status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if contentType := r.Header.Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+			t.Fatalf("unexpected content type: %q", contentType)
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		requests <- machineDiscoveryRequestCapture{Body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":true}`))
+	}))
+	defer server.Close()
+
+	err := ReportMachineStatus(MachineDiscoveryConfig{
+		APIHost:   server.URL,
+		MachineID: 7,
+		Token:     "machine-token",
+	}, api.MachineStatus{
+		CPU:         12.3,
+		MemTotal:    1000,
+		MemUsed:     400,
+		SwapTotal:   200,
+		SwapUsed:    50,
+		DiskTotal:   5000,
+		DiskUsed:    1234,
+		NetInSpeed:  1024,
+		NetOutSpeed: 2048,
+	})
+	if err != nil {
+		t.Fatalf("ReportMachineStatus returned error: %v", err)
+	}
+
+	got := <-requests
+	if got.Body["machine_id"] != float64(7) || got.Body["token"] != "machine-token" {
+		t.Fatalf("unexpected auth body: %#v", got.Body)
+	}
+	if got.Body["cpu"] != 12.3 {
+		t.Fatalf("unexpected cpu: %#v", got.Body["cpu"])
+	}
+	mem := got.Body["mem"].(map[string]any)
+	if mem["total"] != float64(1000) || mem["used"] != float64(400) {
+		t.Fatalf("unexpected mem: %#v", mem)
+	}
+	swap := got.Body["swap"].(map[string]any)
+	if swap["total"] != float64(200) || swap["used"] != float64(50) {
+		t.Fatalf("unexpected swap: %#v", swap)
+	}
+	disk := got.Body["disk"].(map[string]any)
+	if disk["total"] != float64(5000) || disk["used"] != float64(1234) {
+		t.Fatalf("unexpected disk: %#v", disk)
+	}
+	net := got.Body["net"].(map[string]any)
+	if net["in_speed"] != float64(1024) || net["out_speed"] != float64(2048) {
+		t.Fatalf("unexpected net: %#v", net)
+	}
+}
+
+func TestReportMachineStatusOmitsUnavailableNetworkSpeed(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan machineDiscoveryRequestCapture, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		requests <- machineDiscoveryRequestCapture{Body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":true}`))
+	}))
+	defer server.Close()
+
+	if err := ReportMachineStatus(MachineDiscoveryConfig{APIHost: server.URL, MachineID: 7, Token: "machine-token"}, api.MachineStatus{NetInSpeed: -1, NetOutSpeed: -1}); err != nil {
+		t.Fatalf("ReportMachineStatus returned error: %v", err)
+	}
+	got := <-requests
+	if _, ok := got.Body["net"]; ok {
+		t.Fatalf("expected unavailable net speeds to be omitted, got %#v", got.Body["net"])
+	}
+}
+
+func TestReportMachineStatusReturnsHTTPError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	err := ReportMachineStatus(MachineDiscoveryConfig{APIHost: server.URL, MachineID: 7, Token: "machine-token"}, api.MachineStatus{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("expected status code in error, got %v", err)
 	}
 }
 

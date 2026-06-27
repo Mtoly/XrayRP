@@ -59,6 +59,16 @@ type fakeFactory struct {
 	built         []NodeBinding
 }
 
+type fakeMachineStatusReporter struct {
+	statuses []api.MachineStatus
+	err      error
+}
+
+func (r *fakeMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
+	r.statuses = append(r.statuses, status)
+	return r.err
+}
+
 func (f *fakeFactory) build(binding NodeBinding) (service.Service, error) {
 	f.built = append(f.built, binding)
 	if err := f.buildErr[binding.NodeID]; err != nil {
@@ -643,6 +653,58 @@ func TestSupervisorStartAppliesBaseConfigPullInterval(t *testing.T) {
 	}
 	if supervisor.discoveryInterval != 45*time.Second {
 		t.Fatalf("expected discovery interval from base config, got %s", supervisor.discoveryInterval)
+	}
+}
+
+func TestSupervisorStartAppliesBaseConfigPushInterval(t *testing.T) {
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PushInterval: 15}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+	if supervisor.statusInterval != 15*time.Second {
+		t.Fatalf("expected machine status interval from base config, got %s", supervisor.statusInterval)
+	}
+}
+
+func TestSupervisorReportsMachineStatus(t *testing.T) {
+	reporter := &fakeMachineStatusReporter{}
+	collectorCalls := make(chan struct{}, 1)
+	status := api.MachineStatus{CPU: 12.3, MemTotal: 1000, MemUsed: 500, DiskTotal: 2000, DiskUsed: 1000, NetInSpeed: -1, NetOutSpeed: -1}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter:       reporter,
+			Collector:      func() (api.MachineStatus, error) { collectorCalls <- struct{}{}; return status, nil },
+			StatusInterval: 50 * time.Millisecond,
+		},
+	}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	defer supervisor.Close()
+
+	select {
+	case <-collectorCalls:
+	case <-time.After(time.Second):
+		t.Fatal("expected machine status collector to be called")
+	}
+	if len(reporter.statuses) != 1 {
+		t.Fatalf("expected one machine status report, got %d", len(reporter.statuses))
+	}
+	if reporter.statuses[0] != status {
+		t.Fatalf("unexpected machine status: %#v", reporter.statuses[0])
 	}
 }
 

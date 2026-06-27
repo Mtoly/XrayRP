@@ -11,7 +11,10 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-const machineNodesPath = "/api/v2/server/machine/nodes"
+const (
+	machineNodesPath  = "/api/v2/server/machine/nodes"
+	machineStatusPath = "/api/v2/server/machine/status"
+)
 
 type MachineNode struct {
 	ID   int    `json:"id"`
@@ -31,9 +34,29 @@ type MachineDiscoveryConfig struct {
 	Timeout   time.Duration
 }
 
-type machineNodesRequest struct {
+type machineAuthRequest struct {
 	MachineID int    `json:"machine_id"`
 	Token     string `json:"token"`
+}
+
+type machineStatusPayload struct {
+	MachineID int                        `json:"machine_id"`
+	Token     string                     `json:"token"`
+	CPU       float64                    `json:"cpu"`
+	Mem       machineStatusResource      `json:"mem"`
+	Swap      machineStatusResource      `json:"swap,omitempty"`
+	Disk      machineStatusResource      `json:"disk,omitempty"`
+	Net       *machineStatusNetworkSpeed `json:"net,omitempty"`
+}
+
+type machineStatusResource struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+}
+
+type machineStatusNetworkSpeed struct {
+	InSpeed  float64 `json:"in_speed"`
+	OutSpeed float64 `json:"out_speed"`
 }
 
 type machineNodesWireResponse struct {
@@ -41,27 +64,40 @@ type machineNodesWireResponse struct {
 	BaseConfig api.BaseConfig  `json:"base_config"`
 }
 
-func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse, error) {
+func validateMachineConfig(config MachineDiscoveryConfig) (string, string, error) {
 	apiHost := strings.TrimSpace(config.APIHost)
 	if apiHost == "" {
-		return nil, fmt.Errorf("APIHost must not be empty")
+		return "", "", fmt.Errorf("APIHost must not be empty")
 	}
 	if config.MachineID <= 0 {
-		return nil, fmt.Errorf("MachineID must be greater than 0")
+		return "", "", fmt.Errorf("MachineID must be greater than 0")
 	}
 	token := strings.TrimSpace(config.Token)
 	if token == "" {
-		return nil, fmt.Errorf("Token must not be empty")
+		return "", "", fmt.Errorf("Token must not be empty")
+	}
+	return apiHost, token, nil
+}
+
+func newMachineClient(apiHost string, timeout time.Duration) *resty.Client {
+	client := resty.New().SetBaseURL(apiHost)
+	if timeout > 0 {
+		client.SetTimeout(timeout)
+	}
+	return client
+}
+
+func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse, error) {
+	apiHost, token, err := validateMachineConfig(config)
+	if err != nil {
+		return nil, err
 	}
 
-	client := resty.New().SetBaseURL(apiHost)
-	if config.Timeout > 0 {
-		client.SetTimeout(config.Timeout)
-	}
+	client := newMachineClient(apiHost, config.Timeout)
 
 	res, err := client.R().
 		SetHeader("Content-Type", "application/json").
-		SetBody(machineNodesRequest{
+		SetBody(machineAuthRequest{
 			MachineID: config.MachineID,
 			Token:     token,
 		}).
@@ -95,4 +131,50 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 		Nodes:      nodes,
 		BaseConfig: payload.BaseConfig,
 	}, nil
+}
+
+func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus) error {
+	apiHost, token, err := validateMachineConfig(config)
+	if err != nil {
+		return err
+	}
+
+	payload := machineStatusPayload{
+		MachineID: config.MachineID,
+		Token:     token,
+		CPU:       status.CPU,
+		Mem: machineStatusResource{
+			Total: status.MemTotal,
+			Used:  status.MemUsed,
+		},
+		Swap: machineStatusResource{
+			Total: status.SwapTotal,
+			Used:  status.SwapUsed,
+		},
+		Disk: machineStatusResource{
+			Total: status.DiskTotal,
+			Used:  status.DiskUsed,
+		},
+	}
+	if status.NetInSpeed >= 0 && status.NetOutSpeed >= 0 {
+		payload.Net = &machineStatusNetworkSpeed{
+			InSpeed:  status.NetInSpeed,
+			OutSpeed: status.NetOutSpeed,
+		}
+	}
+
+	res, err := newMachineClient(apiHost, config.Timeout).R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(payload).
+		Post(machineStatusPath)
+	if err != nil {
+		return fmt.Errorf("report machine status request failed: %w", err)
+	}
+	if res == nil {
+		return fmt.Errorf("report machine status request failed: empty response")
+	}
+	if statusCode := res.StatusCode(); statusCode < 200 || statusCode >= 300 {
+		return fmt.Errorf("report machine status request failed: status %d", statusCode)
+	}
+	return nil
 }

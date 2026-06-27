@@ -6,6 +6,12 @@ type NodeStatusReporter interface {
 	ReportNodeStatus(nodeID int, nodeStatus *api.NodeStatus) error
 }
 
+type MachineStatusReporter interface {
+	ReportMachineStatus(status api.MachineStatus) error
+}
+
+type MachineStatusCollector func() (api.MachineStatus, error)
+
 type NodeDeviceReporter interface {
 	ReportNodeDevices(nodeID int, devices map[int][]string) error
 }
