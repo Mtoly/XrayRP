@@ -136,7 +136,7 @@ func TestSupervisorStartFailsWhenDiscoveryFails(t *testing.T) {
 	}
 }
 
-func TestSupervisorStartRollsBackStartedServicesWhenNodeStartFails(t *testing.T) {
+func TestSupervisorStartSkipsFailedNodeAndKeepsHealthyServices(t *testing.T) {
 	startErr := errors.New("start failed")
 	first := &fakeService{}
 	second := &fakeService{startErr: startErr}
@@ -154,21 +154,46 @@ func TestSupervisorStartRollsBackStartedServicesWhenNodeStartFails(t *testing.T)
 	factory.services[3] = third
 	supervisor := newTestSupervisor(t, discoverer, factory)
 
-	err := supervisor.Start()
-	if !errors.Is(err, startErr) {
-		t.Fatalf("expected start error, got %v", err)
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
 	}
-	if first.starts != 1 || first.closes != 1 {
-		t.Fatalf("expected first service start=1 close=1, got start=%d close=%d", first.starts, first.closes)
+	t.Cleanup(func() { _ = supervisor.Close() })
+	if first.starts != 1 || first.closes != 0 {
+		t.Fatalf("expected first service start=1 close=0, got start=%d close=%d", first.starts, first.closes)
 	}
 	if second.starts != 1 || second.closes != 0 {
 		t.Fatalf("expected failed service start=1 close=0, got start=%d close=%d", second.starts, second.closes)
 	}
-	if third.starts != 0 || third.closes != 0 {
-		t.Fatalf("expected third service untouched, got start=%d close=%d", third.starts, third.closes)
+	if third.starts != 1 || third.closes != 0 {
+		t.Fatalf("expected third service start=1 close=0, got start=%d close=%d", third.starts, third.closes)
+	}
+	if _, exists := supervisor.running[2]; exists {
+		t.Fatal("expected failed node to stay absent from running map")
+	}
+	if len(supervisor.running) != 2 {
+		t.Fatalf("expected healthy services to keep running, got %d", len(supervisor.running))
+	}
+}
+
+func TestSupervisorStartFailsWhenAllDiscoveredNodesFail(t *testing.T) {
+	startErr := errors.New("start failed")
+	service := &fakeService{startErr: startErr}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = service
+	supervisor := newTestSupervisor(t, discoverer, factory)
+
+	err := supervisor.Start()
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if service.starts != 1 || service.closes != 0 {
+		t.Fatalf("expected failed service start=1 close=0, got start=%d close=%d", service.starts, service.closes)
 	}
 	if len(supervisor.running) != 0 {
-		t.Fatalf("expected no running services after rollback, got %d", len(supervisor.running))
+		t.Fatalf("expected no running services after all nodes fail, got %d", len(supervisor.running))
 	}
 }
 
@@ -273,29 +298,38 @@ func machineNodesResponseWithBaseConfig(baseConfig api.BaseConfig, nodes ...newV
 	return &newV2board.MachineNodesResponse{Nodes: nodes, BaseConfig: baseConfig}
 }
 
-func TestSupervisorStartRollsBackStartedServicesWhenNodeBuildFails(t *testing.T) {
+func TestSupervisorStartSkipsBuildFailedNodeAndKeepsHealthyServices(t *testing.T) {
 	buildErr := fmt.Errorf("build failed")
 	first := &fakeService{}
+	third := &fakeService{}
 	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
 		machineNodesResponse(
 			newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"},
 			newV2board.MachineNode{ID: 2, Type: "vmess", Name: "second"},
+			newV2board.MachineNode{ID: 3, Type: "trojan", Name: "third"},
 		),
 	}}
 	factory := newFakeFactory()
 	factory.services[1] = first
+	factory.services[3] = third
 	factory.buildErr[2] = buildErr
 	supervisor := newTestSupervisor(t, discoverer, factory)
 
-	err := supervisor.Start()
-	if !errors.Is(err, buildErr) {
-		t.Fatalf("expected build error, got %v", err)
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
 	}
-	if first.starts != 1 || first.closes != 1 {
-		t.Fatalf("expected first service start=1 close=1, got start=%d close=%d", first.starts, first.closes)
+	t.Cleanup(func() { _ = supervisor.Close() })
+	if first.starts != 1 || first.closes != 0 {
+		t.Fatalf("expected first service start=1 close=0, got start=%d close=%d", first.starts, first.closes)
 	}
-	if len(supervisor.running) != 0 {
-		t.Fatalf("expected no running services after rollback, got %d", len(supervisor.running))
+	if third.starts != 1 || third.closes != 0 {
+		t.Fatalf("expected third service start=1 close=0, got start=%d close=%d", third.starts, third.closes)
+	}
+	if _, exists := supervisor.running[2]; exists {
+		t.Fatal("expected build-failed node to stay absent from running map")
+	}
+	if len(supervisor.running) != 2 {
+		t.Fatalf("expected healthy services to keep running, got %d", len(supervisor.running))
 	}
 }
 

@@ -157,14 +157,20 @@ func (s *Supervisor) startInitial() error {
 
 	runtimes := make(map[int]*nodeRuntime, len(bindings))
 	started := make([]*nodeRuntime, 0, len(bindings))
+	var errs []error
 	for _, binding := range bindings {
 		runtime, err := s.startRuntime(binding)
 		if err != nil {
-			s.closeRuntimesBestEffort(started)
-			return err
+			s.logWarning(err)
+			errs = append(errs, err)
+			continue
 		}
 		runtimes[binding.NodeID] = runtime
 		started = append(started, runtime)
+	}
+
+	if len(bindings) > 0 && len(runtimes) == 0 {
+		return errors.Join(errs...)
 	}
 
 	s.mu.Lock()
