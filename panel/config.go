@@ -34,9 +34,14 @@ type NodesConfig struct {
 }
 
 type LogConfig struct {
-	Level      string `mapstructure:"Level"`
-	AccessPath string `mapstructure:"AccessPath"`
-	ErrorPath  string `mapstructure:"ErrorPath"`
+	Level            string `mapstructure:"Level"`
+	AccessPath       string `mapstructure:"AccessPath"`
+	ErrorPath        string `mapstructure:"ErrorPath"`
+	ShowErrorDetails bool   `mapstructure:"ShowErrorDetails"`
+}
+
+func (c *Config) ShowErrorDetails() bool {
+	return c != nil && c.LogConfig != nil && c.LogConfig.ShowErrorDetails
 }
 
 type ConnectionConfig struct {

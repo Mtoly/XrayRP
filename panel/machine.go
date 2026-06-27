@@ -67,6 +67,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 	if err != nil {
 		return nil, err
 	}
+	baseControllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
 	sharedWS, err := buildMachineSharedWSRuntime(mc, baseControllerConfig.WebSocketConfig, p.logger.WithField("service", "machine-websocket"))
 	if err != nil {
 		return nil, err
@@ -91,6 +92,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		if err != nil {
 			return nil, err
 		}
+		controllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
 		p.mergePanelCertConfig(apiClient, controllerConfig)
 
 		if sharedWS != nil && machineSharedWSSupportedNodeType(binding.NodeType) {
@@ -105,6 +107,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
 		Logger:            p.logger.WithField("service", "machine-supervisor"),
+		ShowErrorDetails:  p.panelConfig.ShowErrorDetails(),
 	}, discoverer, factory)
 	if err != nil {
 		return nil, err
