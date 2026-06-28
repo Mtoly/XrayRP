@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"dario.cat/mergo"
 	"github.com/r3labs/diff/v2"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/dispatcher"
@@ -195,8 +194,13 @@ func (p *Panel) Start() error {
 	p.Server = server
 	p.serverMutex.Unlock()
 
+	plan, err := buildRuntimeConfigPlan(p.panelConfig)
+	if err != nil {
+		return err
+	}
+
 	var services []service.Service
-	if machineModeEnabled(p.panelConfig) {
+	if plan.mode == runtimeConfigModeMachine {
 		supervisor, err := p.buildMachineSupervisor(server)
 		if err != nil {
 			return err
@@ -228,8 +232,16 @@ func (p *Panel) Start() error {
 }
 
 func (p *Panel) buildStaticNodeServices(server *core.Instance) ([]service.Service, error) {
-	services := make([]service.Service, 0, len(p.panelConfig.NodesConfig))
-	for _, nodeConfig := range p.panelConfig.NodesConfig {
+	plan, err := buildRuntimeConfigPlan(p.panelConfig)
+	if err != nil {
+		return nil, err
+	}
+	if plan.mode != runtimeConfigModeStatic {
+		return nil, fmt.Errorf("static node mode is not enabled")
+	}
+
+	services := make([]service.Service, 0, len(plan.staticNodes))
+	for _, nodeConfig := range plan.staticNodes {
 		var apiClient api.API
 		switch nodeConfig.PanelType {
 		case "SSpanel", "SSPanel":
@@ -291,14 +303,9 @@ func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiC
 }
 
 func (p *Panel) buildControllerConfig(template *controller.Config) (*controller.Config, error) {
-	controllerConfig := getDefaultControllerConfig()
-	if template != nil {
-		if err := mergo.Merge(controllerConfig, template, mergo.WithOverride); err != nil {
-			return nil, fmt.Errorf("failed to read controller config: %w", err)
-		}
-	}
-	controllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
-	return controllerConfig, nil
+	return materializeRuntimeControllerConfig(template, runtimeControllerConfigOptions{
+		showErrorDetails: p.panelConfig.ShowErrorDetails(),
+	})
 }
 
 func (p *Panel) mergePanelCertConfig(apiClient api.API, controllerConfig *controller.Config) {

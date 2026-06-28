@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"dario.cat/mergo"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/core"
 
@@ -63,19 +62,22 @@ func validateMachineModeConfig(config *Config) error {
 }
 
 func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, error) {
-	if err := validateMachineModeConfig(p.panelConfig); err != nil {
-		return nil, err
-	}
-	if !machineModeEnabled(p.panelConfig) {
-		return nil, fmt.Errorf("machine mode is not enabled")
-	}
-
-	mc := p.panelConfig.MachineConfig
-	baseControllerConfig, err := buildMachineNodeControllerConfig(mc.ControllerConfig)
+	plan, err := buildRuntimeConfigPlan(p.panelConfig)
 	if err != nil {
 		return nil, err
 	}
-	baseControllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
+	if plan.mode != runtimeConfigModeMachine {
+		return nil, fmt.Errorf("machine mode is not enabled")
+	}
+
+	mc := plan.machineConfig
+	baseControllerConfig, err := buildMachineNodeControllerConfigWithOptions(mc.ControllerConfig, runtimeControllerConfigOptions{
+		showErrorDetails: plan.showErrorDetails,
+		clone:            true,
+	})
+	if err != nil {
+		return nil, err
+	}
 	sharedWS, err := buildMachineSharedWSRuntime(mc, baseControllerConfig.WebSocketConfig, p.logger.WithField("service", "machine-websocket"))
 	if err != nil {
 		return nil, err
@@ -95,11 +97,13 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 			apiClient = machine.WrapAPIWithReporter(apiClient, binding.NodeID, sharedWS)
 		}
 
-		controllerConfig, err := buildMachineNodeControllerConfig(mc.ControllerConfig)
+		controllerConfig, err := buildMachineNodeControllerConfigWithOptions(mc.ControllerConfig, runtimeControllerConfigOptions{
+			showErrorDetails: plan.showErrorDetails,
+			clone:            true,
+		})
 		if err != nil {
 			return nil, err
 		}
-		controllerConfig.ShowErrorDetails = p.panelConfig.ShowErrorDetails()
 		p.mergePanelCertConfig(apiClient, controllerConfig)
 
 		if sharedWS != nil && machineSharedWSSupportedNodeType(binding.NodeType) {
@@ -145,18 +149,12 @@ func buildMachineNodeAPIConfig(machineConfig *MachineConfig, binding machine.Nod
 }
 
 func buildMachineNodeControllerConfig(template *controller.Config) (*controller.Config, error) {
-	controllerConfig := getDefaultControllerConfig()
-	if template != nil {
-		if err := mergo.Merge(controllerConfig, template, mergo.WithOverride); err != nil {
-			return nil, fmt.Errorf("failed to read controller config: %w", err)
-		}
-	}
+	return buildMachineNodeControllerConfigWithOptions(template, runtimeControllerConfigOptions{clone: true})
+}
 
-	controllerConfig, err := cloneControllerConfig(controllerConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to clone controller config: %w", err)
-	}
-	return controllerConfig, nil
+func buildMachineNodeControllerConfigWithOptions(template *controller.Config, options runtimeControllerConfigOptions) (*controller.Config, error) {
+	options.clone = true
+	return materializeRuntimeControllerConfig(template, options)
 }
 
 func buildMachineSharedWSRuntime(machineConfig *MachineConfig, wsConfig *controller.WebSocketConfig, logger *log.Entry) (*machine.SharedWSRuntime, error) {
