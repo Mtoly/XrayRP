@@ -122,10 +122,14 @@ func newLifecycleTestController(apiClient api.API, enableWS bool) *Controller {
 		logger:    log.NewEntry(log.New()),
 		startAt:   time.Now().Add(time.Hour),
 		syncApplyHooks: syncApplyHooks{
-			addNewTag:         func(*api.NodeInfo, string) error { return nil },
-			addNewUser:        func(*[]api.UserInfo, *api.NodeInfo, string) error { return nil },
-			addInboundLimiter: func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error { return nil },
-			updateRule:        func(string, []api.DetectRule) error { return nil },
+			runtime: syncApplyRuntimeHooks{
+				addTag:   func(*api.NodeInfo, string) error { return nil },
+				addUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error { return nil },
+			},
+			limiter: syncApplyLimiterHooks{
+				addInbound: func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error { return nil },
+			},
+			updateRule: func(string, []api.DetectRule) error { return nil },
 		},
 	}
 }

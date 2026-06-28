@@ -28,20 +28,27 @@ type globalDeviceApply struct {
 	Clear   bool
 }
 
+type syncApplyRuntimeHooks struct {
+	cleanupTag  func(*api.NodeInfo, string) error
+	addTag      func(*api.NodeInfo, string) error
+	addUsers    func(*[]api.UserInfo, *api.NodeInfo, string) error
+	removeUsers func([]string, string) error
+}
+
+type syncApplyLimiterHooks struct {
+	addInbound         func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
+	deleteInbound      func(string) error
+	updateInbound      func(string, *[]api.UserInfo) error
+	snapshotInbound    func(string) (*limiter.InboundLimiterStateSnapshot, error)
+	restoreInbound     func(string, *limiter.InboundLimiterStateSnapshot) error
+	applyGlobalDevices func(string, globalDeviceApply) error
+}
+
 type syncApplyHooks struct {
-	cleanupRuntimeTag       func(*api.NodeInfo, string) error
-	addNewTag               func(*api.NodeInfo, string) error
-	addNewUser              func(*[]api.UserInfo, *api.NodeInfo, string) error
-	addInboundLimiter       func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
-	deleteInboundLimiter    func(string) error
-	updateInboundLimiter    func(string, *[]api.UserInfo) error
-	snapshotInboundLimiter  func(string) (*limiter.InboundLimiterStateSnapshot, error)
-	restoreInboundLimiter   func(string, *limiter.InboundLimiterStateSnapshot) error
-	applyGlobalDevices      func(string, globalDeviceApply) error
-	rebuildInboundWithUsers func(*[]api.UserInfo, *api.NodeInfo, string) error
-	removeUsers             func([]string, string) error
-	updateRule              func(string, []api.DetectRule) error
-	onSnapshotApplied       func(syncApplySnapshot)
+	runtime           syncApplyRuntimeHooks
+	limiter           syncApplyLimiterHooks
+	updateRule        func(string, []api.DetectRule) error
+	onSnapshotApplied func(syncApplySnapshot)
 }
 
 type nodeRuntimeStateApplyModule struct {
@@ -172,7 +179,7 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 	switch snapshot.Action.Type {
 	case syncActionTypeSyncDevices:
 		if currentTag != "" {
-			if err := hooks.applyGlobalDevices(currentTag, globalDeviceApply{Devices: snapshot.Action.Payload.Devices}); err != nil {
+			if err := hooks.limiter.applyGlobalDevices(currentTag, globalDeviceApply{Devices: snapshot.Action.Payload.Devices}); err != nil {
 				return err
 			}
 		}
@@ -182,7 +189,7 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 		return nil
 	case syncActionTypeClearGlobalDevices:
 		if currentTag != "" {
-			if err := hooks.applyGlobalDevices(currentTag, globalDeviceApply{Clear: true}); err != nil {
+			if err := hooks.limiter.applyGlobalDevices(currentTag, globalDeviceApply{Clear: true}); err != nil {
 				return err
 			}
 		}
@@ -256,13 +263,13 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 
 	switch {
 	case currentNodeInfo == nil || currentTag == "":
-		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 	case newTag != currentTag:
 		// When the runtime tag changes, stage the new runtime before tearing down
 		// the old one so add failures don't drop the currently serving node.
-		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 		if err := removeCurrentRuntime(); err != nil {
@@ -276,7 +283,7 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 		if err := removeCurrentRuntime(); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
-		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
 			cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag)
 			restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList)
 			switch {
@@ -292,7 +299,7 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 		}
 	}
 	if currentNodeInfo != nil && currentTag != "" {
-		if err := hooks.deleteInboundLimiter(currentTag); err != nil {
+		if err := hooks.limiter.deleteInbound(currentTag); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 	}
@@ -327,20 +334,20 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 		return nil
 	}
 	if nodeChanged || currentUserList == nil {
-		if err := hooks.addNewUser(nextUserList, nodeInfo, tag); err != nil {
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag); err != nil {
 			return err
 		}
-		return hooks.addInboundLimiter(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
+		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
 	}
 	if reflect.DeepEqual(currentUserList, nextUserList) {
 		return nil
 	}
 
 	if nodeInfo.NodeType == "Socks" || nodeInfo.NodeType == "HTTP" {
-		if err := hooks.rebuildInboundWithUsers(nextUserList, nodeInfo, tag); err != nil {
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag); err != nil {
 			return err
 		}
-		return hooks.addInboundLimiter(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
+		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
 	}
 
 	diff := diffUserList(currentUserList, nextUserList)
@@ -353,18 +360,18 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	limiterUpdates = append(limiterUpdates, diff.RuntimeUpdated...)
 	limiterUpdates = append(limiterUpdates, diff.LimitOnly...)
 
-	limiterSnapshot, err := hooks.snapshotInboundLimiter(tag)
+	limiterSnapshot, err := hooks.limiter.snapshotInbound(tag)
 	if err != nil {
 		return err
 	}
 	restoreLimiter := func(applyErr error) error {
-		if restoreErr := hooks.restoreInboundLimiter(tag, limiterSnapshot); restoreErr != nil {
+		if restoreErr := hooks.limiter.restoreInbound(tag, limiterSnapshot); restoreErr != nil {
 			return errors.Join(applyErr, fmt.Errorf("restore inbound limiter: %w", restoreErr))
 		}
 		return applyErr
 	}
 
-	if err := hooks.updateInboundLimiter(tag, &limiterUpdates); err != nil {
+	if err := hooks.limiter.updateInbound(tag, &limiterUpdates); err != nil {
 		return restoreLimiter(err)
 	}
 
@@ -375,7 +382,7 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	if len(usersToRemove) > 0 {
 		removedUserKeys := buildRemovedUserKeys(tag, currentUserList, usersToRemove)
 		if len(removedUserKeys) > 0 {
-			if err := hooks.removeUsers(removedUserKeys, tag); err != nil {
+			if err := hooks.runtime.removeUsers(removedUserKeys, tag); err != nil {
 				if rollbackErr := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore); rollbackErr != nil {
 					err = errors.Join(err, fmt.Errorf("restore runtime users after remove failure: %w", rollbackErr))
 				}
@@ -388,7 +395,7 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	usersToAdd = append(usersToAdd, diff.Added...)
 	usersToAdd = append(usersToAdd, diff.RuntimeUpdated...)
 	if len(usersToAdd) > 0 {
-		if err := hooks.addNewUser(&usersToAdd, nodeInfo, tag); err != nil {
+		if err := hooks.runtime.addUsers(&usersToAdd, nodeInfo, tag); err != nil {
 			if rollbackErr := a.rollbackRuntimeUsersAfterAddFailure(nodeInfo, tag, usersToRestore, usersToAdd); rollbackErr != nil {
 				err = errors.Join(err, rollbackErr)
 			}
@@ -432,7 +439,7 @@ func (a nodeRuntimeStateApplyModule) removeRuntimeUsersBestEffort(tag string, us
 	var rollbackErrs []error
 	for _, user := range users {
 		key := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
-		if err := a.hooks.removeUsers([]string{key}, tag); err != nil {
+		if err := a.hooks.runtime.removeUsers([]string{key}, tag); err != nil {
 			rollbackErrs = append(rollbackErrs, err)
 		}
 	}
@@ -443,7 +450,7 @@ func (a nodeRuntimeStateApplyModule) restoreRuntimeUsersBestEffort(nodeInfo *api
 	var rollbackErrs []error
 	for _, user := range users {
 		restoreUsers := []api.UserInfo{user}
-		if err := a.hooks.addNewUser(&restoreUsers, nodeInfo, tag); err != nil {
+		if err := a.hooks.runtime.addUsers(&restoreUsers, nodeInfo, tag); err != nil {
 			rollbackErrs = append(rollbackErrs, err)
 		}
 	}
@@ -488,12 +495,12 @@ func (a nodeRuntimeStateApplyModule) cleanupRuntimeTag(nodeInfo *api.NodeInfo, t
 		return nil
 	}
 	var cleanupErrs []error
-	if err := ignoreNoClue(a.hooks.cleanupRuntimeTag(nodeInfo, tag)); err != nil {
+	if err := ignoreNoClue(a.hooks.runtime.cleanupTag(nodeInfo, tag)); err != nil {
 		cleanupErrs = append(cleanupErrs, err)
 	}
 	if nodeInfo.NodeType == "Shadowsocks-Plugin" {
 		dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
-		if err := ignoreNoClue(a.hooks.cleanupRuntimeTag(nodeInfo, dokodemoTag)); err != nil {
+		if err := ignoreNoClue(a.hooks.runtime.cleanupTag(nodeInfo, dokodemoTag)); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
 	}
@@ -504,13 +511,13 @@ func (a nodeRuntimeStateApplyModule) restoreRuntimeAfterFailedApply(nodeInfo *ap
 	if nodeInfo == nil || tag == "" {
 		return nil
 	}
-	if err := a.hooks.addNewTag(nodeInfo, tag); err != nil {
+	if err := a.hooks.runtime.addTag(nodeInfo, tag); err != nil {
 		return err
 	}
 	if users == nil {
 		return nil
 	}
-	if err := a.hooks.addNewUser(users, nodeInfo, tag); err != nil {
+	if err := a.hooks.runtime.addUsers(users, nodeInfo, tag); err != nil {
 		if cleanupErr := a.cleanupRuntimeTag(nodeInfo, tag); cleanupErr != nil {
 			return errors.Join(err, fmt.Errorf("cleanup restored runtime after user restore failure: %w", cleanupErr))
 		}
@@ -570,38 +577,35 @@ func (c *Controller) restoreInboundLimiter(tag string, snapshot *limiter.Inbound
 
 func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	hooks := c.syncApplyHooks
-	if hooks.cleanupRuntimeTag == nil {
-		hooks.cleanupRuntimeTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
+	if hooks.runtime.cleanupTag == nil {
+		hooks.runtime.cleanupTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
 	}
-	if hooks.addNewTag == nil {
-		hooks.addNewTag = c.addNewTag
+	if hooks.runtime.addTag == nil {
+		hooks.runtime.addTag = c.addNewTag
 	}
-	if hooks.addNewUser == nil {
-		hooks.addNewUser = c.addNewUser
+	if hooks.runtime.addUsers == nil {
+		hooks.runtime.addUsers = c.addNewUser
 	}
-	if hooks.addInboundLimiter == nil {
-		hooks.addInboundLimiter = c.AddInboundLimiter
+	if hooks.runtime.removeUsers == nil {
+		hooks.runtime.removeUsers = c.removeUsers
 	}
-	if hooks.deleteInboundLimiter == nil {
-		hooks.deleteInboundLimiter = c.DeleteInboundLimiter
+	if hooks.limiter.addInbound == nil {
+		hooks.limiter.addInbound = c.AddInboundLimiter
 	}
-	if hooks.updateInboundLimiter == nil {
-		hooks.updateInboundLimiter = c.UpdateInboundLimiter
+	if hooks.limiter.deleteInbound == nil {
+		hooks.limiter.deleteInbound = c.DeleteInboundLimiter
 	}
-	if hooks.snapshotInboundLimiter == nil {
-		hooks.snapshotInboundLimiter = c.snapshotInboundLimiter
+	if hooks.limiter.updateInbound == nil {
+		hooks.limiter.updateInbound = c.UpdateInboundLimiter
 	}
-	if hooks.restoreInboundLimiter == nil {
-		hooks.restoreInboundLimiter = c.restoreInboundLimiter
+	if hooks.limiter.snapshotInbound == nil {
+		hooks.limiter.snapshotInbound = c.snapshotInboundLimiter
 	}
-	if hooks.applyGlobalDevices == nil {
-		hooks.applyGlobalDevices = c.applyGlobalDevices
+	if hooks.limiter.restoreInbound == nil {
+		hooks.limiter.restoreInbound = c.restoreInboundLimiter
 	}
-	if hooks.rebuildInboundWithUsers == nil {
-		hooks.rebuildInboundWithUsers = c.rebuildInboundWithUsers
-	}
-	if hooks.removeUsers == nil {
-		hooks.removeUsers = c.removeUsers
+	if hooks.limiter.applyGlobalDevices == nil {
+		hooks.limiter.applyGlobalDevices = c.applyGlobalDevices
 	}
 	if hooks.updateRule == nil {
 		hooks.updateRule = c.UpdateRule

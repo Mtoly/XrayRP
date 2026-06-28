@@ -84,7 +84,6 @@ type syncApplyRecorder struct {
 	snapshotLimiterCalls    int
 	restoreLimiterCalls     int
 	applyGlobalDevicesCalls int
-	rebuildInboundCalls     int
 	removedUsers            [][]string
 	updateRuleCalls         int
 	lastRuleTag             string
@@ -150,82 +149,82 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 		startAt:   time.Now().Add(-time.Minute),
 	}
 	controller.syncApplyHooks = syncApplyHooks{
-		cleanupRuntimeTag: func(_ *api.NodeInfo, tag string) error {
-			recorder.removedTags = append(recorder.removedTags, tag)
-			if recorder.activeRuntimes != nil {
-				delete(recorder.activeRuntimes, tag)
-			}
-			return nil
-		},
-		addNewTag: func(nodeInfo *api.NodeInfo, tag string) error {
-			recorder.addTagCalls++
-			recorder.addedTags = append(recorder.addedTags, tag)
-			recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
-			if recorder.addTagErr != nil && (recorder.addTagErrAtCall == 0 || recorder.addTagErrAtCall == recorder.addTagCalls) {
-				return recorder.addTagErr
-			}
-			if recorder.activeRuntimes == nil {
-				recorder.activeRuntimes = make(map[string]*api.NodeInfo)
-			}
-			recorder.activeRuntimes[tag] = cloneRecordedNodeInfo(nodeInfo)
-			return nil
-		},
-		addNewUser: func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
-			recorder.recordAddNewUser(tag, users)
-			return nil
-		},
-		addInboundLimiter: func(tag string, _ uint64, _ *[]api.UserInfo, _ *limiter.GlobalDeviceLimitConfig) error {
-			recorder.addLimiterCalls++
-			if recorder.activeLimiterTags == nil {
-				recorder.activeLimiterTags = make(map[string]bool)
-			}
-			recorder.activeLimiterTags[tag] = true
-			return nil
-		},
-		deleteInboundLimiter: func(tag string) error {
-			recorder.deleteLimiterCalls++
-			if recorder.activeLimiterTags != nil {
-				delete(recorder.activeLimiterTags, tag)
-			}
-			return nil
-		},
-		updateInboundLimiter: func(tag string, users *[]api.UserInfo) error {
-			recorder.recordUpdateInboundLimiter(tag, users)
-			if recorder.updateLimiterErr != nil {
-				return recorder.updateLimiterErr
-			}
-			if recorder.activeLimiterTags == nil {
-				recorder.activeLimiterTags = make(map[string]bool)
-			}
-			recorder.activeLimiterTags[tag] = true
-			return nil
-		},
-		snapshotInboundLimiter: func(string) (*limiter.InboundLimiterStateSnapshot, error) {
-			recorder.snapshotLimiterCalls++
-			return &limiter.InboundLimiterStateSnapshot{}, nil
-		},
-		restoreInboundLimiter: func(string, *limiter.InboundLimiterStateSnapshot) error {
-			recorder.restoreLimiterCalls++
-			return nil
-		},
-		applyGlobalDevices: func(tag string, apply globalDeviceApply) error {
-			recorder.applyGlobalDevicesCalls++
-			if apply.Clear {
-				recorder.clearedGlobalDeviceTags = append(recorder.clearedGlobalDeviceTags, tag)
+		runtime: syncApplyRuntimeHooks{
+			cleanupTag: func(_ *api.NodeInfo, tag string) error {
+				recorder.removedTags = append(recorder.removedTags, tag)
+				if recorder.activeRuntimes != nil {
+					delete(recorder.activeRuntimes, tag)
+				}
 				return nil
-			}
-			recorder.updatedGlobalDeviceTags = append(recorder.updatedGlobalDeviceTags, tag)
-			recorder.updatedGlobalDevices = append(recorder.updatedGlobalDevices, cloneRecordedGlobalDevices(apply.Devices))
-			return nil
+			},
+			addTag: func(nodeInfo *api.NodeInfo, tag string) error {
+				recorder.addTagCalls++
+				recorder.addedTags = append(recorder.addedTags, tag)
+				recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
+				if recorder.addTagErr != nil && (recorder.addTagErrAtCall == 0 || recorder.addTagErrAtCall == recorder.addTagCalls) {
+					return recorder.addTagErr
+				}
+				if recorder.activeRuntimes == nil {
+					recorder.activeRuntimes = make(map[string]*api.NodeInfo)
+				}
+				recorder.activeRuntimes[tag] = cloneRecordedNodeInfo(nodeInfo)
+				return nil
+			},
+			addUsers: func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
+				recorder.recordAddNewUser(tag, users)
+				return nil
+			},
+			removeUsers: func(users []string, _ string) error {
+				copied := append([]string(nil), users...)
+				recorder.removedUsers = append(recorder.removedUsers, copied)
+				return recorder.removeUsersErr
+			},
 		},
-		rebuildInboundWithUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error {
-			recorder.rebuildInboundCalls++
-			return nil
-		},
-		removeUsers: func(users []string, _ string) error {
-			copied := append([]string(nil), users...)
-			recorder.removedUsers = append(recorder.removedUsers, copied)
-			return recorder.removeUsersErr
+		limiter: syncApplyLimiterHooks{
+			addInbound: func(tag string, _ uint64, _ *[]api.UserInfo, _ *limiter.GlobalDeviceLimitConfig) error {
+				recorder.addLimiterCalls++
+				if recorder.activeLimiterTags == nil {
+					recorder.activeLimiterTags = make(map[string]bool)
+				}
+				recorder.activeLimiterTags[tag] = true
+				return nil
+			},
+			deleteInbound: func(tag string) error {
+				recorder.deleteLimiterCalls++
+				if recorder.activeLimiterTags != nil {
+					delete(recorder.activeLimiterTags, tag)
+				}
+				return nil
+			},
+			updateInbound: func(tag string, users *[]api.UserInfo) error {
+				recorder.recordUpdateInboundLimiter(tag, users)
+				if recorder.updateLimiterErr != nil {
+					return recorder.updateLimiterErr
+				}
+				if recorder.activeLimiterTags == nil {
+					recorder.activeLimiterTags = make(map[string]bool)
+				}
+				recorder.activeLimiterTags[tag] = true
+				return nil
+			},
+			snapshotInbound: func(string) (*limiter.InboundLimiterStateSnapshot, error) {
+				recorder.snapshotLimiterCalls++
+				return &limiter.InboundLimiterStateSnapshot{}, nil
+			},
+			restoreInbound: func(string, *limiter.InboundLimiterStateSnapshot) error {
+				recorder.restoreLimiterCalls++
+				return nil
+			},
+			applyGlobalDevices: func(tag string, apply globalDeviceApply) error {
+				recorder.applyGlobalDevicesCalls++
+				if apply.Clear {
+					recorder.clearedGlobalDeviceTags = append(recorder.clearedGlobalDeviceTags, tag)
+					return nil
+				}
+				recorder.updatedGlobalDeviceTags = append(recorder.updatedGlobalDeviceTags, tag)
+				recorder.updatedGlobalDevices = append(recorder.updatedGlobalDevices, cloneRecordedGlobalDevices(apply.Devices))
+				return nil
+			},
 		},
 		updateRule: func(tag string, rules []api.DetectRule) error {
 			recorder.updateRuleCalls++
@@ -565,8 +564,8 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	if len(recorder.removedTags) != 0 || len(recorder.addedTags) != 0 {
 		t.Fatalf("expected unchanged node snapshot to skip rebuild, got removed=%d added=%d", len(recorder.removedTags), len(recorder.addedTags))
 	}
-	if recorder.addUserCalls != 0 || recorder.addLimiterCalls != 0 || recorder.deleteLimiterCalls != 0 || recorder.updateLimiterCalls != 0 || recorder.rebuildInboundCalls != 0 {
-		t.Fatalf("expected unchanged user snapshot to skip apply, got addUsers=%d addLimiter=%d deleteLimiter=%d updateLimiter=%d rebuild=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.deleteLimiterCalls, recorder.updateLimiterCalls, recorder.rebuildInboundCalls)
+	if recorder.addUserCalls != 0 || recorder.addLimiterCalls != 0 || recorder.deleteLimiterCalls != 0 || recorder.updateLimiterCalls != 0 {
+		t.Fatalf("expected unchanged user snapshot to skip apply, got addUsers=%d addLimiter=%d deleteLimiter=%d updateLimiter=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.deleteLimiterCalls, recorder.updateLimiterCalls)
 	}
 	if recorder.snapshotLimiterCalls != 0 || recorder.restoreLimiterCalls != 0 {
 		t.Fatalf("expected unchanged user snapshot to skip limiter snapshot/restore, got snapshot=%d restore=%d", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
@@ -866,7 +865,7 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 	controller, recorder := newTestSyncApplyController(fakeAPI)
 	tag := controller.buildNodeTagFrom(node)
 	addUserErr := errors.New("add user failed")
-	controller.syncApplyHooks.addNewUser = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
 		recorder.recordAddNewUser(tag, users)
 		return addUserErr
 	}

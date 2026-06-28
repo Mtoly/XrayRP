@@ -405,7 +405,7 @@ func (c *Controller) Start() error {
 	c.setNodeState(newNodeInfo, tag)
 
 	// Add new tag
-	err = hooks.addNewTag(newNodeInfo, tag)
+	err = hooks.runtime.addTag(newNodeInfo, tag)
 	if err != nil {
 		c.logger.Panic(err)
 		return err
@@ -419,13 +419,13 @@ func (c *Controller) Start() error {
 	// sync controller userList
 	c.setUserList(userInfo)
 
-	err = hooks.addNewUser(userInfo, newNodeInfo, tag)
+	err = hooks.runtime.addUsers(userInfo, newNodeInfo, tag)
 	if err != nil {
 		return err
 	}
 
 	// Add Limiter
-	if err := hooks.addInboundLimiter(tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+	if err := hooks.limiter.addInbound(tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
 		c.logger.Print(err)
 	}
 
