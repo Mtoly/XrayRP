@@ -880,8 +880,8 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 	if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 1 {
 		t.Fatalf("expected limiter snapshot and restore once, got snapshot=%d restore=%d", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
 	}
-	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 1 {
-		t.Fatalf("expected limiter update and runtime add attempt, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
+	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 2 {
+		t.Fatalf("expected limiter update, runtime add attempt, and rollback restore, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
 	}
 	if len(recorder.updatedLimiterTags) != 1 || recorder.updatedLimiterTags[0] != tag {
 		t.Fatalf("expected limiter update for tag %q, got %#v", tag, recorder.updatedLimiterTags)
@@ -890,15 +890,16 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
 	}
 	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{nextUsers[0]})
-	if len(recorder.addedUserTags) != 1 || recorder.addedUserTags[0] != tag {
-		t.Fatalf("expected runtime add attempt for tag %q, got %#v", tag, recorder.addedUserTags)
+	if len(recorder.addedUserTags) != 2 || recorder.addedUserTags[0] != tag || recorder.addedUserTags[1] != tag {
+		t.Fatalf("expected runtime add attempt and rollback restore for tag %q, got %#v", tag, recorder.addedUserTags)
 	}
-	if len(recorder.addedUserPayloads) != 1 {
-		t.Fatalf("expected one runtime add payload, got %d", len(recorder.addedUserPayloads))
+	if len(recorder.addedUserPayloads) != 2 {
+		t.Fatalf("expected runtime add attempt plus old-user restore, got %d payloads", len(recorder.addedUserPayloads))
 	}
 	assertUserPayload(t, recorder.addedUserPayloads[0], []api.UserInfo{nextUsers[0]})
-	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" {
-		t.Fatalf("expected runtime update to remove old user before add, got %#v", recorder.removedUsers)
+	assertUserPayload(t, recorder.addedUserPayloads[1], []api.UserInfo{currentUsers[0]})
+	if len(recorder.removedUsers) != 2 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" || len(recorder.removedUsers[1]) != 1 || recorder.removedUsers[1][0] != tag+"|user@example.com|1" {
+		t.Fatalf("expected runtime update to remove old user then roll back partially added user, got %#v", recorder.removedUsers)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
 	if appliedUsers != &currentUsers || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
@@ -924,8 +925,8 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 	if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 1 {
 		t.Fatalf("expected limiter snapshot and restore once, got snapshot=%d restore=%d", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
 	}
-	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 0 {
-		t.Fatalf("expected limiter update and no runtime add after remove failure, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
+	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 1 {
+		t.Fatalf("expected limiter update and rollback restore after remove failure, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
 	}
 	if len(recorder.updatedLimiterTags) != 1 || recorder.updatedLimiterTags[0] != tag {
 		t.Fatalf("expected limiter update for tag %q, got %#v", tag, recorder.updatedLimiterTags)
@@ -934,9 +935,10 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
 	}
 	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{nextUsers[0]})
-	if len(recorder.addedUserPayloads) != 0 {
-		t.Fatalf("expected no runtime add payloads after remove failure, got %#v", recorder.addedUserPayloads)
+	if len(recorder.addedUserPayloads) != 1 {
+		t.Fatalf("expected runtime restore payload after remove failure, got %#v", recorder.addedUserPayloads)
 	}
+	assertUserPayload(t, recorder.addedUserPayloads[0], []api.UserInfo{currentUsers[0]})
 	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" {
 		t.Fatalf("expected runtime update to attempt old user removal, got %#v", recorder.removedUsers)
 	}

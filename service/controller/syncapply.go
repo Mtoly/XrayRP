@@ -368,15 +368,17 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 		return restoreLimiter(err)
 	}
 
-	// Task 8 restores limiter/controller state on post-limiter runtime hook
-	// failures. Full Xray runtime user rollback is future hardening.
 	usersToRemove := make([]api.UserInfo, 0, len(diff.Deleted)+len(diff.RuntimeUpdated))
 	usersToRemove = append(usersToRemove, diff.Deleted...)
 	usersToRemove = append(usersToRemove, diff.RuntimeUpdated...)
+	usersToRestore := currentRuntimeUsersForTargets(currentUserList, usersToRemove)
 	if len(usersToRemove) > 0 {
 		removedUserKeys := buildRemovedUserKeys(tag, currentUserList, usersToRemove)
 		if len(removedUserKeys) > 0 {
 			if err := hooks.removeUsers(removedUserKeys, tag); err != nil {
+				if rollbackErr := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore); rollbackErr != nil {
+					err = errors.Join(err, fmt.Errorf("restore runtime users after remove failure: %w", rollbackErr))
+				}
 				return restoreLimiter(err)
 			}
 		}
@@ -387,10 +389,65 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	usersToAdd = append(usersToAdd, diff.RuntimeUpdated...)
 	if len(usersToAdd) > 0 {
 		if err := hooks.addNewUser(&usersToAdd, nodeInfo, tag); err != nil {
+			if rollbackErr := a.rollbackRuntimeUsersAfterAddFailure(nodeInfo, tag, usersToRestore, usersToAdd); rollbackErr != nil {
+				err = errors.Join(err, rollbackErr)
+			}
 			return restoreLimiter(err)
 		}
 	}
 	return nil
+}
+
+func currentRuntimeUsersForTargets(currentUserList *[]api.UserInfo, targets []api.UserInfo) []api.UserInfo {
+	if currentUserList == nil || len(targets) == 0 {
+		return nil
+	}
+
+	currentByKey := make(map[userIdentityKey]api.UserInfo, len(*currentUserList))
+	for _, user := range *currentUserList {
+		currentByKey[userIdentityKey{UID: user.UID, Email: user.Email}] = user
+	}
+
+	users := make([]api.UserInfo, 0, len(targets))
+	for _, target := range targets {
+		if current, ok := currentByKey[userIdentityKey{UID: target.UID, Email: target.Email}]; ok {
+			users = append(users, current)
+		}
+	}
+	return users
+}
+
+func (a nodeRuntimeStateApplyModule) rollbackRuntimeUsersAfterAddFailure(nodeInfo *api.NodeInfo, tag string, usersToRestore, usersToRemove []api.UserInfo) error {
+	var rollbackErrs []error
+	if err := a.removeRuntimeUsersBestEffort(tag, usersToRemove); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("remove partially added runtime users: %w", err))
+	}
+	if err := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("restore removed runtime users: %w", err))
+	}
+	return errors.Join(rollbackErrs...)
+}
+
+func (a nodeRuntimeStateApplyModule) removeRuntimeUsersBestEffort(tag string, users []api.UserInfo) error {
+	var rollbackErrs []error
+	for _, user := range users {
+		key := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+		if err := a.hooks.removeUsers([]string{key}, tag); err != nil {
+			rollbackErrs = append(rollbackErrs, err)
+		}
+	}
+	return errors.Join(rollbackErrs...)
+}
+
+func (a nodeRuntimeStateApplyModule) restoreRuntimeUsersBestEffort(nodeInfo *api.NodeInfo, tag string, users []api.UserInfo) error {
+	var rollbackErrs []error
+	for _, user := range users {
+		restoreUsers := []api.UserInfo{user}
+		if err := a.hooks.addNewUser(&restoreUsers, nodeInfo, tag); err != nil {
+			rollbackErrs = append(rollbackErrs, err)
+		}
+	}
+	return errors.Join(rollbackErrs...)
 }
 
 func (a nodeRuntimeStateApplyModule) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig) error {
