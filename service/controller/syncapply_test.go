@@ -101,8 +101,6 @@ type syncApplyRecorder struct {
 	addTagCalls              int
 	activeRuntimes           map[string]*api.NodeInfo
 	activeLimiterTags        map[string]bool
-	removedInboundTags       []string
-	removedOutboundTags      []string
 }
 
 func (r *syncApplyRecorder) recordAppliedSnapshot(snapshot syncApplySnapshot) {
@@ -161,12 +159,10 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 			}
 			return nil
 		},
-		removeInboundTag: func(tag string) error {
-			recorder.removedInboundTags = append(recorder.removedInboundTags, tag)
-			return nil
-		},
-		removeOutboundTag: func(tag string) error {
-			recorder.removedOutboundTags = append(recorder.removedOutboundTags, tag)
+		cleanupRuntimeTag: func(_ *api.NodeInfo, tag string) error {
+			if recorder.activeRuntimes != nil {
+				delete(recorder.activeRuntimes, tag)
+			}
 			return nil
 		},
 		addNewTag: func(nodeInfo *api.NodeInfo, tag string) error {

@@ -25,8 +25,7 @@ type syncApplySnapshot struct {
 
 type syncApplyHooks struct {
 	removeOldTag            func(string) error
-	removeInboundTag        func(string) error
-	removeOutboundTag       func(string) error
+	cleanupRuntimeTag       func(*api.NodeInfo, string) error
 	addNewTag               func(*api.NodeInfo, string) error
 	addNewUser              func(*[]api.UserInfo, *api.NodeInfo, string) error
 	addInboundLimiter       func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
@@ -43,15 +42,32 @@ type syncApplyHooks struct {
 	onCertConfigApplied     func(*api.XrayRCertConfig)
 }
 
-func (c *Controller) ExecuteSyncAction(_ context.Context, action syncAction) error {
-	snapshot, err := c.fetchSyncApplySnapshot(action)
+type nodeRuntimeStateApplyModule struct {
+	controller *Controller
+	hooks      syncApplyHooks
+}
+
+func newNodeRuntimeStateApplyModule(controller *Controller) nodeRuntimeStateApplyModule {
+	return nodeRuntimeStateApplyModule{
+		controller: controller,
+		hooks:      controller.resolveSyncApplyHooks(),
+	}
+}
+
+func (c *Controller) ExecuteSyncAction(ctx context.Context, action syncAction) error {
+	return newNodeRuntimeStateApplyModule(c).Apply(ctx, action)
+}
+
+func (a nodeRuntimeStateApplyModule) Apply(_ context.Context, action syncAction) error {
+	snapshot, err := a.fetchSyncApplySnapshot(action)
 	if err != nil {
 		return err
 	}
-	return c.applySyncSnapshot(snapshot)
+	return a.applySyncSnapshot(snapshot)
 }
 
-func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapshot, error) {
+func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (syncApplySnapshot, error) {
+	c := a.controller
 	currentNodeInfo, _, currentUserList := c.getStateSnapshot()
 	snapshot := syncApplySnapshot{Action: action}
 
@@ -146,8 +162,9 @@ func (c *Controller) fetchSyncApplySnapshot(action syncAction) (syncApplySnapsho
 	return snapshot, nil
 }
 
-func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
-	hooks := c.resolveSyncApplyHooks()
+func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapshot) error {
+	c := a.controller
+	hooks := a.hooks
 	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
 
 	switch snapshot.Action.Type {
@@ -176,7 +193,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	nodeChanged := false
 	if snapshot.NodeInfo != nil {
 		var err error
-		currentNodeInfo, currentTag, nodeChanged, err = c.applyNodeSnapshot(currentNodeInfo, currentTag, currentUserList, snapshot.NodeInfo, hooks)
+		currentNodeInfo, currentTag, nodeChanged, err = a.applyNodeSnapshot(currentNodeInfo, currentTag, currentUserList, snapshot.NodeInfo)
 		if err != nil {
 			return err
 		}
@@ -187,7 +204,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	}
 
 	if snapshot.RuleList != nil && !c.config.DisableGetRule {
-		if err := c.applyRuleSnapshot(currentTag, *snapshot.RuleList, hooks); err != nil {
+		if err := a.applyRuleSnapshot(currentTag, *snapshot.RuleList); err != nil {
 			return err
 		}
 	}
@@ -197,7 +214,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 		effectiveUsers = currentUserList
 	}
 	if currentNodeInfo != nil && effectiveUsers != nil {
-		if err := c.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers, hooks); err != nil {
+		if err := a.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers); err != nil {
 			return err
 		}
 		if nodeChanged || snapshot.UserList != nil {
@@ -206,7 +223,7 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	}
 
 	if snapshot.CertConfigFetched {
-		if err := c.applyCertConfigSnapshot(snapshot.CertConfig, hooks); err != nil {
+		if err := a.applyCertConfigSnapshot(snapshot.CertConfig); err != nil {
 			return err
 		}
 	}
@@ -217,7 +234,9 @@ func (c *Controller) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	return nil
 }
 
-func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag string, currentUserList *[]api.UserInfo, nextNodeInfo *api.NodeInfo, hooks syncApplyHooks) (*api.NodeInfo, string, bool, error) {
+func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag string, currentUserList *[]api.UserInfo, nextNodeInfo *api.NodeInfo) (*api.NodeInfo, string, bool, error) {
+	c := a.controller
+	hooks := a.hooks
 	if nextNodeInfo == nil {
 		return currentNodeInfo, currentTag, false, nil
 	}
@@ -240,52 +259,6 @@ func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag
 			if err := hooks.removeOldTag(fmt.Sprintf("dokodemo-door_%s+1", currentTag)); err != nil {
 				return err
 			}
-		}
-		return nil
-	}
-	ignoreNoClue := func(err error) error {
-		if err == nil || errors.Is(err, xraycommon.ErrNoClue) {
-			return nil
-		}
-		return err
-	}
-	cleanupRuntimeTag := func(nodeInfo *api.NodeInfo, tag string) error {
-		if nodeInfo == nil || tag == "" {
-			return nil
-		}
-		var cleanupErrs []error
-		if err := ignoreNoClue(hooks.removeInboundTag(tag)); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", tag, err))
-		}
-		if err := ignoreNoClue(hooks.removeOutboundTag(tag)); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", tag, err))
-		}
-		if nodeInfo.NodeType == "Shadowsocks-Plugin" {
-			dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
-			if err := ignoreNoClue(hooks.removeInboundTag(dokodemoTag)); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", dokodemoTag, err))
-			}
-			if err := ignoreNoClue(hooks.removeOutboundTag(dokodemoTag)); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", dokodemoTag, err))
-			}
-		}
-		return errors.Join(cleanupErrs...)
-	}
-	restoreCurrentRuntime := func() error {
-		if currentNodeInfo == nil || currentTag == "" {
-			return nil
-		}
-		if err := hooks.addNewTag(currentNodeInfo, currentTag); err != nil {
-			return err
-		}
-		if currentUserList == nil {
-			return nil
-		}
-		if err := hooks.addNewUser(currentUserList, currentNodeInfo, currentTag); err != nil {
-			if cleanupErr := cleanupRuntimeTag(currentNodeInfo, currentTag); cleanupErr != nil {
-				return errors.Join(err, fmt.Errorf("cleanup restored runtime after user restore failure: %w", cleanupErr))
-			}
-			return err
 		}
 		return nil
 	}
@@ -313,8 +286,8 @@ func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag
 			return currentNodeInfo, currentTag, false, err
 		}
 		if err := hooks.addNewTag(nextNodeInfo, newTag); err != nil {
-			cleanupErr := cleanupRuntimeTag(nextNodeInfo, newTag)
-			restoreErr := restoreCurrentRuntime()
+			cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag)
+			restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList)
 			switch {
 			case cleanupErr != nil && restoreErr != nil:
 				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("cleanup partial same-tag rebuild runtime: %w", cleanupErr), fmt.Errorf("restore old runtime after failed same-tag rebuild: %w", restoreErr))
@@ -336,7 +309,9 @@ func (c *Controller) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag
 	return nextNodeInfo, newTag, true, nil
 }
 
-func (c *Controller) applyRuleSnapshot(tag string, rules []api.DetectRule, hooks syncApplyHooks) error {
+func (a nodeRuntimeStateApplyModule) applyRuleSnapshot(tag string, rules []api.DetectRule) error {
+	c := a.controller
+	hooks := a.hooks
 	if tag == "" {
 		return nil
 	}
@@ -354,7 +329,9 @@ func (c *Controller) applyRuleSnapshot(tag string, rules []api.DetectRule, hooks
 	return nil
 }
 
-func (c *Controller) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo, tag string, currentUserList, nextUserList *[]api.UserInfo, hooks syncApplyHooks) error {
+func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo, tag string, currentUserList, nextUserList *[]api.UserInfo) error {
+	c := a.controller
+	hooks := a.hooks
 	if nodeInfo == nil || nextUserList == nil {
 		return nil
 	}
@@ -425,7 +402,9 @@ func (c *Controller) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo,
 	return nil
 }
 
-func (c *Controller) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig, hooks syncApplyHooks) error {
+func (a nodeRuntimeStateApplyModule) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig) error {
+	c := a.controller
+	hooks := a.hooks
 	current := c.config.CertConfig
 	if panelCertConfigEqual(current, certConfig) {
 		return nil
@@ -454,6 +433,63 @@ func (c *Controller) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig, ho
 		hooks.onCertConfigApplied(clonePanelCertConfig(certConfig))
 	}
 	return nil
+}
+
+func ignoreNoClue(err error) error {
+	if err == nil || errors.Is(err, xraycommon.ErrNoClue) {
+		return nil
+	}
+	return err
+}
+
+func (a nodeRuntimeStateApplyModule) cleanupRuntimeTag(nodeInfo *api.NodeInfo, tag string) error {
+	if nodeInfo == nil || tag == "" {
+		return nil
+	}
+	var cleanupErrs []error
+	if err := ignoreNoClue(a.hooks.cleanupRuntimeTag(nodeInfo, tag)); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
+	}
+	if nodeInfo.NodeType == "Shadowsocks-Plugin" {
+		dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
+		if err := ignoreNoClue(a.hooks.cleanupRuntimeTag(nodeInfo, dokodemoTag)); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func (a nodeRuntimeStateApplyModule) restoreRuntimeAfterFailedApply(nodeInfo *api.NodeInfo, tag string, users *[]api.UserInfo) error {
+	if nodeInfo == nil || tag == "" {
+		return nil
+	}
+	if err := a.hooks.addNewTag(nodeInfo, tag); err != nil {
+		return err
+	}
+	if users == nil {
+		return nil
+	}
+	if err := a.hooks.addNewUser(users, nodeInfo, tag); err != nil {
+		if cleanupErr := a.cleanupRuntimeTag(nodeInfo, tag); cleanupErr != nil {
+			return errors.Join(err, fmt.Errorf("cleanup restored runtime after user restore failure: %w", cleanupErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func (a nodeRuntimeStateApplyModule) cleanupRuntimeTagViaController(nodeInfo *api.NodeInfo, tag string) error {
+	if a.controller == nil {
+		return nil
+	}
+	var cleanupErrs []error
+	if err := ignoreNoClue(a.controller.removeInbound(tag)); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", tag, err))
+	}
+	if err := ignoreNoClue(a.controller.removeOutbound(tag)); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", tag, err))
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func (c *Controller) updateLimiterGlobalDevices(tag string, devices map[int][]string) error {
@@ -489,11 +525,8 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	if hooks.removeOldTag == nil {
 		hooks.removeOldTag = c.removeOldTag
 	}
-	if hooks.removeInboundTag == nil {
-		hooks.removeInboundTag = c.removeInbound
-	}
-	if hooks.removeOutboundTag == nil {
-		hooks.removeOutboundTag = c.removeOutbound
+	if hooks.cleanupRuntimeTag == nil {
+		hooks.cleanupRuntimeTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
 	}
 	if hooks.addNewTag == nil {
 		hooks.addNewTag = c.addNewTag
