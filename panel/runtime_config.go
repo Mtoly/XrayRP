@@ -5,6 +5,7 @@ import (
 
 	"dario.cat/mergo"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
@@ -17,9 +18,16 @@ const (
 
 type runtimeConfigPlan struct {
 	mode             runtimeConfigMode
-	staticNodes      []*NodesConfig
+	staticNodes      []staticRuntimeNodePlan
 	machineConfig    *MachineConfig
 	showErrorDetails bool
+}
+
+type staticRuntimeNodePlan struct {
+	panelType                string
+	apiConfig                *api.Config
+	controllerConfigTemplate *controller.Config
+	fallbackNodeType         string
 }
 
 type runtimeControllerConfigOptions struct {
@@ -43,8 +51,25 @@ func buildRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
 		return plan, nil
 	}
 
-	plan.staticNodes = config.NodesConfig
+	plan.staticNodes = buildStaticRuntimeNodePlans(config.NodesConfig)
 	return plan, nil
+}
+
+func buildStaticRuntimeNodePlans(nodes []*NodesConfig) []staticRuntimeNodePlan {
+	plans := make([]staticRuntimeNodePlan, 0, len(nodes))
+	for _, node := range nodes {
+		fallbackNodeType := ""
+		if node.ApiConfig != nil {
+			fallbackNodeType = node.ApiConfig.NodeType
+		}
+		plans = append(plans, staticRuntimeNodePlan{
+			panelType:                node.PanelType,
+			apiConfig:                node.ApiConfig,
+			controllerConfigTemplate: node.ControllerConfig,
+			fallbackNodeType:         fallbackNodeType,
+		})
+	}
+	return plans
 }
 
 func materializeRuntimeControllerConfig(template *controller.Config, options runtimeControllerConfigOptions) (*controller.Config, error) {

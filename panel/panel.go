@@ -241,38 +241,34 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance) ([]service.Servic
 	}
 
 	services := make([]service.Service, 0, len(plan.staticNodes))
-	for _, nodeConfig := range plan.staticNodes {
+	for _, nodePlan := range plan.staticNodes {
 		var apiClient api.API
-		switch nodeConfig.PanelType {
+		switch nodePlan.panelType {
 		case "SSpanel", "SSPanel":
-			apiClient = sspanel.New(nodeConfig.ApiConfig)
+			apiClient = sspanel.New(nodePlan.apiConfig)
 		case "NewV2board", "V2board":
-			apiClient = newV2board.New(nodeConfig.ApiConfig)
+			apiClient = newV2board.New(nodePlan.apiConfig)
 		case "PMpanel":
-			apiClient = pmpanel.New(nodeConfig.ApiConfig)
+			apiClient = pmpanel.New(nodePlan.apiConfig)
 		case "Proxypanel":
-			apiClient = proxypanel.New(nodeConfig.ApiConfig)
+			apiClient = proxypanel.New(nodePlan.apiConfig)
 		case "V2RaySocks":
-			apiClient = v2raysocks.New(nodeConfig.ApiConfig)
+			apiClient = v2raysocks.New(nodePlan.apiConfig)
 		case "GoV2Panel":
-			apiClient = gov2panel.New(nodeConfig.ApiConfig)
+			apiClient = gov2panel.New(nodePlan.apiConfig)
 		case "BunPanel":
-			apiClient = bunpanel.New(nodeConfig.ApiConfig)
+			apiClient = bunpanel.New(nodePlan.apiConfig)
 		default:
-			return nil, fmt.Errorf("unsupported panel type: %s", nodeConfig.PanelType)
+			return nil, fmt.Errorf("unsupported panel type: %s", nodePlan.panelType)
 		}
 
-		controllerConfig, err := p.buildControllerConfig(nodeConfig.ControllerConfig)
+		controllerConfig, err := p.buildControllerConfig(nodePlan.controllerConfigTemplate)
 		if err != nil {
 			return nil, err
 		}
 		p.mergePanelCertConfig(apiClient, controllerConfig)
 
-		fallbackNodeType := ""
-		if nodeConfig.ApiConfig != nil {
-			fallbackNodeType = nodeConfig.ApiConfig.NodeType
-		}
-		controllerService, err := p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, nodeConfig.PanelType, fallbackNodeType)
+		controllerService, err := p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, nodePlan.panelType, nodePlan.fallbackNodeType)
 		if err != nil {
 			return nil, err
 		}

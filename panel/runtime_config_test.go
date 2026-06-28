@@ -4,12 +4,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
 func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
-	nodes := []*NodesConfig{{PanelType: "SSPanel"}}
+	apiConfig := &api.Config{NodeType: "Hysteria2"}
+	controllerTemplate := &controller.Config{UpdatePeriodic: 12}
+	nodes := []*NodesConfig{
+		{PanelType: "SSPanel", ApiConfig: apiConfig, ControllerConfig: controllerTemplate},
+		{PanelType: "NewV2board", ApiConfig: &api.Config{NodeType: "Vless"}},
+	}
 	config := &Config{
 		LogConfig:   &LogConfig{ShowErrorDetails: true},
 		NodesConfig: nodes,
@@ -23,14 +29,38 @@ func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
 	if plan.mode != runtimeConfigModeStatic {
 		t.Fatalf("expected static runtime mode, got %q", plan.mode)
 	}
-	if len(plan.staticNodes) != 1 || plan.staticNodes[0] != nodes[0] {
-		t.Fatalf("expected static nodes to be preserved, got %#v", plan.staticNodes)
+	if len(plan.staticNodes) != 2 {
+		t.Fatalf("expected two static node plans, got %#v", plan.staticNodes)
+	}
+	if plan.staticNodes[0].panelType != "SSPanel" || plan.staticNodes[0].apiConfig != apiConfig || plan.staticNodes[0].controllerConfigTemplate != controllerTemplate {
+		t.Fatalf("expected first static node plan to preserve node config pointers, got %#v", plan.staticNodes[0])
+	}
+	if plan.staticNodes[0].fallbackNodeType != "Hysteria2" {
+		t.Fatalf("expected fallback node type Hysteria2, got %q", plan.staticNodes[0].fallbackNodeType)
+	}
+	if plan.staticNodes[1].panelType != "NewV2board" || plan.staticNodes[1].fallbackNodeType != "Vless" {
+		t.Fatalf("expected second static node plan to preserve panel and fallback node type, got %#v", plan.staticNodes[1])
 	}
 	if plan.machineConfig != nil {
 		t.Fatalf("expected no machine config in static plan, got %#v", plan.machineConfig)
 	}
 	if !plan.showErrorDetails {
 		t.Fatal("expected ShowErrorDetails to be carried into runtime plan")
+	}
+}
+
+func TestBuildStaticNodeServicesRejectsUnsupportedPanelType(t *testing.T) {
+	panel := New(&Config{NodesConfig: []*NodesConfig{{PanelType: "UnsupportedPanel"}}})
+
+	services, err := panel.buildStaticNodeServices(nil)
+	if err == nil {
+		t.Fatal("expected unsupported panel type error")
+	}
+	if services != nil {
+		t.Fatalf("expected no services, got %#v", services)
+	}
+	if !strings.Contains(err.Error(), "unsupported panel type: UnsupportedPanel") {
+		t.Fatalf("expected unsupported panel type error, got %v", err)
 	}
 }
 
