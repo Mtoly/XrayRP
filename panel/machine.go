@@ -104,7 +104,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		if err != nil {
 			return nil, err
 		}
-		p.mergePanelCertConfig(apiClient, controllerConfig)
+		materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
 
 		if sharedWS != nil && machineSharedWSSupportedNodeType(binding.NodeType) {
 			controllerService := controller.New(server, apiClient, controllerConfig, mc.PanelType)
