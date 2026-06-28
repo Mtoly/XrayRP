@@ -68,38 +68,37 @@ func (f *fakeSyncApplyAPI) ReportIllegal(*[]api.DetectResult) error { return nil
 func (f *fakeSyncApplyAPI) Debug()                                  {}
 
 type syncApplyRecorder struct {
-	appliedSnapshotsMu       sync.Mutex
-	appliedSnapshots         []syncApplySnapshot
-	removedTags              []string
-	addedTags                []string
-	addedNodeInfos           []*api.NodeInfo
-	addedUserTags            []string
-	addedUserPayloads        [][]api.UserInfo
-	updatedLimiterTags       []string
-	updatedLimiterPayloads   [][]api.UserInfo
-	addUserCalls             int
-	addLimiterCalls          int
-	deleteLimiterCalls       int
-	updateLimiterCalls       int
-	snapshotLimiterCalls     int
-	restoreLimiterCalls      int
-	updateGlobalDevicesCalls int
-	clearGlobalDevicesCalls  int
-	rebuildInboundCalls      int
-	removedUsers             [][]string
-	updateRuleCalls          int
-	lastRuleTag              string
-	lastRules                []api.DetectRule
-	updatedGlobalDeviceTags  []string
-	updatedGlobalDevices     []map[int][]string
-	clearedGlobalDeviceTags  []string
-	addTagErr                error
-	updateLimiterErr         error
-	removeUsersErr           error
-	addTagErrAtCall          int
-	addTagCalls              int
-	activeRuntimes           map[string]*api.NodeInfo
-	activeLimiterTags        map[string]bool
+	appliedSnapshotsMu      sync.Mutex
+	appliedSnapshots        []syncApplySnapshot
+	removedTags             []string
+	addedTags               []string
+	addedNodeInfos          []*api.NodeInfo
+	addedUserTags           []string
+	addedUserPayloads       [][]api.UserInfo
+	updatedLimiterTags      []string
+	updatedLimiterPayloads  [][]api.UserInfo
+	addUserCalls            int
+	addLimiterCalls         int
+	deleteLimiterCalls      int
+	updateLimiterCalls      int
+	snapshotLimiterCalls    int
+	restoreLimiterCalls     int
+	applyGlobalDevicesCalls int
+	rebuildInboundCalls     int
+	removedUsers            [][]string
+	updateRuleCalls         int
+	lastRuleTag             string
+	lastRules               []api.DetectRule
+	updatedGlobalDeviceTags []string
+	updatedGlobalDevices    []map[int][]string
+	clearedGlobalDeviceTags []string
+	addTagErr               error
+	updateLimiterErr        error
+	removeUsersErr          error
+	addTagErrAtCall         int
+	addTagCalls             int
+	activeRuntimes          map[string]*api.NodeInfo
+	activeLimiterTags       map[string]bool
 }
 
 func (r *syncApplyRecorder) recordAppliedSnapshot(snapshot syncApplySnapshot) {
@@ -209,15 +208,14 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 			recorder.restoreLimiterCalls++
 			return nil
 		},
-		updateGlobalDevices: func(tag string, devices map[int][]string) error {
-			recorder.updateGlobalDevicesCalls++
+		applyGlobalDevices: func(tag string, apply globalDeviceApply) error {
+			recorder.applyGlobalDevicesCalls++
+			if apply.Clear {
+				recorder.clearedGlobalDeviceTags = append(recorder.clearedGlobalDeviceTags, tag)
+				return nil
+			}
 			recorder.updatedGlobalDeviceTags = append(recorder.updatedGlobalDeviceTags, tag)
-			recorder.updatedGlobalDevices = append(recorder.updatedGlobalDevices, cloneRecordedGlobalDevices(devices))
-			return nil
-		},
-		clearGlobalDevices: func(tag string) error {
-			recorder.clearGlobalDevicesCalls++
-			recorder.clearedGlobalDeviceTags = append(recorder.clearedGlobalDeviceTags, tag)
+			recorder.updatedGlobalDevices = append(recorder.updatedGlobalDevices, cloneRecordedGlobalDevices(apply.Devices))
 			return nil
 		},
 		rebuildInboundWithUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error {
@@ -659,8 +657,8 @@ func TestSyncApply_SyncDevicesUpdatesGlobalDeviceState(t *testing.T) {
 	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
 		t.Fatalf("ExecuteSyncAction: %v", err)
 	}
-	if recorder.updateGlobalDevicesCalls != 1 {
-		t.Fatalf("update calls=%d", recorder.updateGlobalDevicesCalls)
+	if recorder.applyGlobalDevicesCalls != 1 {
+		t.Fatalf("global device apply calls=%d", recorder.applyGlobalDevicesCalls)
 	}
 	if recorder.updatedGlobalDeviceTags[0] != tag {
 		t.Fatalf("bad update tag: got %q want %q", recorder.updatedGlobalDeviceTags[0], tag)
@@ -683,8 +681,8 @@ func TestSyncApply_ClearGlobalDevicesClearsWithoutRestFetch(t *testing.T) {
 	if err := controller.ExecuteSyncAction(context.Background(), action); err != nil {
 		t.Fatalf("ExecuteSyncAction: %v", err)
 	}
-	if recorder.clearGlobalDevicesCalls != 1 {
-		t.Fatalf("clear calls=%d", recorder.clearGlobalDevicesCalls)
+	if recorder.applyGlobalDevicesCalls != 1 {
+		t.Fatalf("global device apply calls=%d", recorder.applyGlobalDevicesCalls)
 	}
 	if recorder.clearedGlobalDeviceTags[0] != tag {
 		t.Fatalf("bad clear tag: got %q want %q", recorder.clearedGlobalDeviceTags[0], tag)
@@ -706,8 +704,8 @@ func TestSyncApply_GlobalDeviceActionsNoopWithoutCurrentTag(t *testing.T) {
 	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeClearGlobalDevices, syncActionSourceReconnect, syncActionMetadata{Trigger: "ws_disconnect"})); err != nil {
 		t.Fatalf("ExecuteSyncAction clear without current tag: %v", err)
 	}
-	if recorder.updateGlobalDevicesCalls != 0 || recorder.clearGlobalDevicesCalls != 0 {
-		t.Fatalf("expected no limiter hooks without current tag, got update=%d clear=%d", recorder.updateGlobalDevicesCalls, recorder.clearGlobalDevicesCalls)
+	if recorder.applyGlobalDevicesCalls != 0 {
+		t.Fatalf("expected no global-device hook without current tag, got calls=%d", recorder.applyGlobalDevicesCalls)
 	}
 	if fakeAPI.getNodeInfoCalls != 0 || fakeAPI.getUserListCalls != 0 {
 		t.Fatalf("unexpected REST calls")
