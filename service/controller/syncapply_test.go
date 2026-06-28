@@ -93,7 +93,6 @@ type syncApplyRecorder struct {
 	updatedGlobalDeviceTags  []string
 	updatedGlobalDevices     []map[int][]string
 	clearedGlobalDeviceTags  []string
-	appliedCertConfigs       []*api.XrayRCertConfig
 	addTagErr                error
 	updateLimiterErr         error
 	removeUsersErr           error
@@ -152,14 +151,8 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 		startAt:   time.Now().Add(-time.Minute),
 	}
 	controller.syncApplyHooks = syncApplyHooks{
-		removeOldTag: func(tag string) error {
-			recorder.removedTags = append(recorder.removedTags, tag)
-			if recorder.activeRuntimes != nil {
-				delete(recorder.activeRuntimes, tag)
-			}
-			return nil
-		},
 		cleanupRuntimeTag: func(_ *api.NodeInfo, tag string) error {
+			recorder.removedTags = append(recorder.removedTags, tag)
 			if recorder.activeRuntimes != nil {
 				delete(recorder.activeRuntimes, tag)
 			}
@@ -244,9 +237,6 @@ func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecor
 		},
 		onSnapshotApplied: func(snapshot syncApplySnapshot) {
 			recorder.recordAppliedSnapshot(snapshot)
-		},
-		onCertConfigApplied: func(cert *api.XrayRCertConfig) {
-			recorder.appliedCertConfigs = append(recorder.appliedCertConfigs, clonePanelCertConfig(cert))
 		},
 	}
 	return controller, recorder
@@ -416,9 +406,6 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	}
 	if recorder.updateRuleCalls != 1 {
 		t.Fatalf("expected route/rule compare-and-apply once, got %d", recorder.updateRuleCalls)
-	}
-	if len(recorder.appliedCertConfigs) != 1 {
-		t.Fatalf("expected cert compare-and-apply once, got %d", len(recorder.appliedCertConfigs))
 	}
 	if controller.config.CertConfig.CertMode != "file" || controller.config.CertConfig.CertDomain != "node.example.com" {
 		t.Fatalf("expected controller cert mode/domain to be updated from REST snapshot, got mode=%q domain=%q", controller.config.CertConfig.CertMode, controller.config.CertConfig.CertDomain)
@@ -592,14 +579,14 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	if recorder.updateRuleCalls != 0 {
 		t.Fatalf("expected unchanged rule snapshot to skip apply, got %d", recorder.updateRuleCalls)
 	}
-	if len(recorder.appliedCertConfigs) != 0 {
-		t.Fatalf("expected unchanged cert snapshot to skip apply, got %d", len(recorder.appliedCertConfigs))
+	if controller.config.CertConfig == nil || controller.config.CertConfig.Provider != "cloudflare" || controller.config.CertConfig.Email != "ops@example.com" || controller.config.CertConfig.DNSEnv["CF_API_TOKEN"] != "same-token" {
+		t.Fatalf("expected unchanged cert snapshot to keep existing cert config, got %#v", controller.config.CertConfig)
 	}
 }
 
 func TestSyncApply_ClearFetchedCertConfig(t *testing.T) {
 	fakeAPI := &fakeSyncApplyAPI{}
-	controller, recorder := newTestSyncApplyController(fakeAPI)
+	controller, _ := newTestSyncApplyController(fakeAPI)
 	controller.panelType = "SSPanel"
 	controller.config.CertConfig = &mylego.CertConfig{
 		CertMode: "dns",
@@ -614,12 +601,6 @@ func TestSyncApply_ClearFetchedCertConfig(t *testing.T) {
 
 	if fakeAPI.getCertCfgCalls != 1 {
 		t.Fatalf("expected cert sync to fetch cert config once, got %d", fakeAPI.getCertCfgCalls)
-	}
-	if len(recorder.appliedCertConfigs) != 1 {
-		t.Fatalf("expected cert clear to trigger compare-and-apply once, got %d", len(recorder.appliedCertConfigs))
-	}
-	if recorder.appliedCertConfigs[0] != nil {
-		t.Fatalf("expected cert clear hook payload to be nil, got %#v", recorder.appliedCertConfigs[0])
 	}
 	if controller.config.CertConfig != nil {
 		t.Fatalf("expected fetched nil cert config to clear controller cert config, got %#v", controller.config.CertConfig)
@@ -1127,8 +1108,8 @@ func TestSyncApply_SameTagRebuildAddFailureRestoresOldRuntimeState(t *testing.T)
 	if recorder.addTagCalls != 2 {
 		t.Fatalf("expected same-tag rebuild failure to attempt add then restore, got %d add calls", recorder.addTagCalls)
 	}
-	if len(recorder.removedTags) != 1 || recorder.removedTags[0] != currentTag {
-		t.Fatalf("expected same-tag rebuild to remove old runtime once before restore, got %v", recorder.removedTags)
+	if len(recorder.removedTags) != 2 || recorder.removedTags[0] != currentTag || recorder.removedTags[1] != currentTag {
+		t.Fatalf("expected same-tag rebuild to remove old runtime and cleanup failed replacement, got %v", recorder.removedTags)
 	}
 	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || runtime.NodeID != currentNode.NodeID || runtime.SpeedLimit != currentNode.SpeedLimit {
 		t.Fatalf("expected old runtime to be restored after same-tag add failure, got %#v", runtime)

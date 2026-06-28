@@ -24,7 +24,6 @@ type syncApplySnapshot struct {
 }
 
 type syncApplyHooks struct {
-	removeOldTag            func(string) error
 	cleanupRuntimeTag       func(*api.NodeInfo, string) error
 	addNewTag               func(*api.NodeInfo, string) error
 	addNewUser              func(*[]api.UserInfo, *api.NodeInfo, string) error
@@ -39,7 +38,6 @@ type syncApplyHooks struct {
 	removeUsers             func([]string, string) error
 	updateRule              func(string, []api.DetectRule) error
 	onSnapshotApplied       func(syncApplySnapshot)
-	onCertConfigApplied     func(*api.XrayRCertConfig)
 }
 
 type nodeRuntimeStateApplyModule struct {
@@ -249,18 +247,7 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 
 	newTag := c.buildNodeTagFrom(nextNodeInfo)
 	removeCurrentRuntime := func() error {
-		if currentNodeInfo == nil || currentTag == "" {
-			return nil
-		}
-		if err := hooks.removeOldTag(currentTag); err != nil {
-			return err
-		}
-		if currentNodeInfo.NodeType == "Shadowsocks-Plugin" {
-			if err := hooks.removeOldTag(fmt.Sprintf("dokodemo-door_%s+1", currentTag)); err != nil {
-				return err
-			}
-		}
-		return nil
+		return a.cleanupRuntimeTag(currentNodeInfo, currentTag)
 	}
 
 	switch {
@@ -404,16 +391,12 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 
 func (a nodeRuntimeStateApplyModule) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig) error {
 	c := a.controller
-	hooks := a.hooks
 	current := c.config.CertConfig
 	if panelCertConfigEqual(current, certConfig) {
 		return nil
 	}
 	if certConfig == nil {
 		c.config.CertConfig = nil
-		if hooks.onCertConfigApplied != nil {
-			hooks.onCertConfigApplied(nil)
-		}
 		return nil
 	}
 	if current == nil {
@@ -429,9 +412,6 @@ func (a nodeRuntimeStateApplyModule) applyCertConfigSnapshot(certConfig *api.Xra
 	current.Provider = certConfig.Provider
 	current.Email = certConfig.Email
 	current.DNSEnv = cloneStringMap(certConfig.DNSEnv)
-	if hooks.onCertConfigApplied != nil {
-		hooks.onCertConfigApplied(clonePanelCertConfig(certConfig))
-	}
 	return nil
 }
 
@@ -522,9 +502,6 @@ func (c *Controller) restoreInboundLimiter(tag string, snapshot *limiter.Inbound
 
 func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	hooks := c.syncApplyHooks
-	if hooks.removeOldTag == nil {
-		hooks.removeOldTag = c.removeOldTag
-	}
 	if hooks.cleanupRuntimeTag == nil {
 		hooks.cleanupRuntimeTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
 	}
