@@ -34,7 +34,7 @@ func TestDiscoverMachineNodesPostsMachineCredentials(t *testing.T) {
 		requests <- machineDiscoveryRequestCapture{Body: body}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"nodes":[{"id":11,"type":"Vless","name":"primary"},{"id":12,"type":"Trojan","name":"backup"}],"base_config":{"push_interval":15,"pull_interval":30}}`))
+		_, _ = w.Write([]byte(`{"nodes":[{"id":11,"type":"vless","name":"primary"},{"id":12,"type":"trojan","name":"backup"}],"base_config":{"push_interval":15,"pull_interval":30}}`))
 	}))
 	defer server.Close()
 
@@ -63,6 +63,32 @@ func TestDiscoverMachineNodesPostsMachineCredentials(t *testing.T) {
 	}
 	if resp.BaseConfig.PushInterval != 15 || resp.BaseConfig.PullInterval != 30 {
 		t.Fatalf("unexpected base_config: %#v", resp.BaseConfig)
+	}
+}
+
+func TestDiscoverMachineNodesNormalizesMachineNodeTypes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nodes":[{"id":11,"type":"vless","name":"primary"},{"id":12,"type":"hysteria","name":"hy"},{"id":13,"type":"anytls","name":"tls"}]}`))
+	}))
+	defer server.Close()
+
+	resp, err := DiscoverMachineNodes(MachineDiscoveryConfig{
+		APIHost:   server.URL,
+		MachineID: 7,
+		Token:     "machine-token",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverMachineNodes returned error: %v", err)
+	}
+
+	if len(resp.Nodes) != 3 {
+		t.Fatalf("unexpected nodes: %#v", resp.Nodes)
+	}
+	if resp.Nodes[0].Type != "Vless" || resp.Nodes[1].Type != "Hysteria2" || resp.Nodes[2].Type != "AnyTLS" {
+		t.Fatalf("expected normalized machine node types, got %#v", resp.Nodes)
 	}
 }
 

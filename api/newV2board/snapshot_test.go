@@ -32,6 +32,105 @@ func mustCompileRegex(t *testing.T, pattern string) *regexp.Regexp {
 	return re
 }
 
+func TestNormalizeUniProxySnapshotMaterializesStableOutputs(t *testing.T) {
+	localPattern := mustCompileRegex(t, "local-allow")
+	snapshot := &serverConfig{
+		ServerPort: 443,
+		BaseConfig: api.BaseConfig{PushInterval: 15, PullInterval: 45},
+		CertConfig: &certConfig{
+			CertMode:    "content",
+			Domain:      "node.example.com",
+			CertContent: "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----\n",
+			KeyContent:  "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
+		},
+		Routes: []route{
+			{Id: 10, Action: "dns", Match: []string{"dns.example"}, ActionValue: "1.1.1.1"},
+			{Id: 11, Action: "block", Match: []string{"blocked.example", "ads.example"}},
+		},
+	}
+
+	normalized := normalizeUniProxySnapshot(snapshot, "vless")
+	if normalized == nil {
+		t.Fatal("expected normalized snapshot")
+	}
+	if normalized.nodeType != "Vless" {
+		t.Fatalf("expected normalized node type Vless, got %q", normalized.nodeType)
+	}
+
+	cert := normalized.certConfig()
+	if cert == nil {
+		t.Fatal("expected normalized cert config")
+	}
+	if cert.CertMode != "content" || cert.CertDomain != "node.example.com" {
+		t.Fatalf("unexpected normalized cert config: %#v", cert)
+	}
+	if cert.CertContent == "" || cert.KeyContent == "" {
+		t.Fatalf("expected content cert materialization to preserve inline cert/key content: %#v", cert)
+	}
+
+	baseConfig := normalized.baseConfig()
+	if baseConfig == nil {
+		t.Fatal("expected normalized base config")
+	}
+	if baseConfig.PushInterval != 15 || baseConfig.PullInterval != 45 {
+		t.Fatalf("unexpected normalized base config: %#v", baseConfig)
+	}
+	baseConfig.PushInterval = 99
+	if snapshot.BaseConfig.PushInterval != 15 {
+		t.Fatalf("expected normalized base config to be a copy, raw snapshot changed to %#v", snapshot.BaseConfig)
+	}
+
+	rules, err := normalized.rules([]api.DetectRule{{ID: -1, Pattern: localPattern}})
+	if err != nil {
+		t.Fatalf("normalized rules returned error: %v", err)
+	}
+	if len(*rules) != 2 {
+		t.Fatalf("expected local rule plus block rule, got %#v", *rules)
+	}
+	if (*rules)[0].ID != -1 || !(*rules)[0].Pattern.MatchString("local-allow") {
+		t.Fatalf("expected local rule to be preserved first, got %#v", (*rules)[0])
+	}
+	if (*rules)[1].ID != 1 || !(*rules)[1].Pattern.MatchString("blocked.example") || !(*rules)[1].Pattern.MatchString("ads.example") {
+		t.Fatalf("expected block route to materialize as detect rule with route index, got %#v", (*rules)[1])
+	}
+
+	nodeInfo := &api.NodeInfo{}
+	normalized.enrichNodeInfo(nodeInfo)
+	if len(nodeInfo.NameServerConfig) != 1 {
+		t.Fatalf("expected normalized snapshot to enrich DNS config, got %d", len(nodeInfo.NameServerConfig))
+	}
+	if nodeInfo.RoutePolicy == nil {
+		t.Fatal("expected normalized snapshot to enrich route policy")
+	}
+}
+
+func TestNormalizeUniProxySnapshotNormalizesNodeTypes(t *testing.T) {
+	tests := map[string]string{
+		"vless":       "Vless",
+		"vmess":       "Vmess",
+		"v2ray":       "Vmess",
+		"trojan":      "Trojan",
+		"shadowsocks": "Shadowsocks",
+		"hysteria":    "Hysteria2",
+		"hysteria2":   "Hysteria2",
+		"tuic":        "Tuic",
+		"anytls":      "AnyTLS",
+		"socks":       "Socks",
+		"http":        "HTTP",
+	}
+	for input, want := range tests {
+		t.Run(input, func(t *testing.T) {
+			normalized := normalizeUniProxySnapshot(&serverConfig{}, input)
+			if normalized == nil {
+				t.Fatal("expected normalized snapshot")
+			}
+			if normalized.nodeType != want {
+				t.Fatalf("normalized node type for %q = %q, want %q", input, normalized.nodeType, want)
+			}
+		})
+	}
+}
+
 func TestCertConfigFromUniProxySnapshot(t *testing.T) {
 	if cert := certConfigFromUniProxySnapshot(nil); cert != nil {
 		t.Fatalf("expected nil cert config from nil snapshot, got %#v", cert)
@@ -272,6 +371,37 @@ func TestNodeInfoFromUniProxySnapshotAppliesCommonEnrichForV2ray(t *testing.T) {
 	}
 	if len(nodeInfo.NameServerConfig) != 1 {
 		t.Fatalf("expected NameServerConfig after common enrich, got %d", len(nodeInfo.NameServerConfig))
+	}
+}
+
+func TestFetchUniProxySnapshotUsesConfigPathByMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		machineID int
+		wantPath  string
+	}{
+		{name: "single node", wantPath: legacyUniProxyConfigPath},
+		{name: "machine node", machineID: 7, wantPath: xboardConfigPath},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"server_port":443,"network":"tcp"}`))
+			}))
+			defer server.Close()
+
+			client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray", MachineID: tt.machineID})
+			if _, err := client.fetchUniProxySnapshot(false); err != nil {
+				t.Fatalf("fetchUniProxySnapshot returned error: %v", err)
+			}
+			if got := <-requests; got != tt.wantPath {
+				t.Fatalf("expected config path %q, got %q", tt.wantPath, got)
+			}
+		})
 	}
 }
 

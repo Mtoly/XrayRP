@@ -40,48 +40,55 @@ func (c *APIClient) storeUniProxySnapshot(snapshot *serverConfig) {
 	c.resp.Store(snapshot)
 }
 
-func certConfigFromUniProxySnapshot(snapshot *serverConfig) *api.XrayRCertConfig {
-	if snapshot == nil || snapshot.CertConfig == nil {
+type normalizedUniProxySnapshot struct {
+	raw      *serverConfig
+	nodeType string
+}
+
+func normalizeUniProxySnapshot(snapshot *serverConfig, nodeType string) *normalizedUniProxySnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return &normalizedUniProxySnapshot{
+		raw:      snapshot,
+		nodeType: canonicalNodeType(nodeType),
+	}
+}
+
+func (s *normalizedUniProxySnapshot) certConfig() *api.XrayRCertConfig {
+	if s == nil || s.raw == nil || s.raw.CertConfig == nil {
 		return nil
 	}
 	return &api.XrayRCertConfig{
-		CertMode:    snapshot.CertConfig.CertMode,
-		CertDomain:  snapshot.CertConfig.Domain,
-		CertFile:    snapshot.CertConfig.CertFile,
-		KeyFile:     snapshot.CertConfig.KeyFile,
-		CertContent: snapshot.CertConfig.CertContent,
-		KeyContent:  snapshot.CertConfig.KeyContent,
-		Provider:    snapshot.CertConfig.Provider,
-		Email:       snapshot.CertConfig.Email,
-		DNSEnv:      snapshot.CertConfig.DNSEnv,
+		CertMode:    s.raw.CertConfig.CertMode,
+		CertDomain:  s.raw.CertConfig.Domain,
+		CertFile:    s.raw.CertConfig.CertFile,
+		KeyFile:     s.raw.CertConfig.KeyFile,
+		CertContent: s.raw.CertConfig.CertContent,
+		KeyContent:  s.raw.CertConfig.KeyContent,
+		Provider:    s.raw.CertConfig.Provider,
+		Email:       s.raw.CertConfig.Email,
+		DNSEnv:      s.raw.CertConfig.DNSEnv,
 	}
 }
 
-func baseConfigFromUniProxySnapshot(snapshot *serverConfig) *api.BaseConfig {
-	if snapshot == nil || (snapshot.BaseConfig.PushInterval <= 0 && snapshot.BaseConfig.PullInterval <= 0) {
+func (s *normalizedUniProxySnapshot) baseConfig() *api.BaseConfig {
+	if s == nil || s.raw == nil || (s.raw.BaseConfig.PushInterval <= 0 && s.raw.BaseConfig.PullInterval <= 0) {
 		return nil
 	}
-	baseConfig := snapshot.BaseConfig
+	baseConfig := s.raw.BaseConfig
 	return &baseConfig
 }
 
-func (c *APIClient) GetBaseConfig() *api.BaseConfig {
-	snapshot, ok := c.cachedUniProxySnapshot()
-	if !ok {
-		return nil
-	}
-	return baseConfigFromUniProxySnapshot(snapshot)
-}
-
-func rulesFromUniProxySnapshot(snapshot *serverConfig, localRules []api.DetectRule) (*[]api.DetectRule, error) {
-	if snapshot == nil {
+func (s *normalizedUniProxySnapshot) rules(localRules []api.DetectRule) (*[]api.DetectRule, error) {
+	if s == nil || s.raw == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving rules")
 	}
 
 	ruleList := append([]api.DetectRule(nil), localRules...)
-	for i := range snapshot.Routes {
-		if snapshot.Routes[i].Action == "block" {
-			pattern, err := common.SafeCompileRegex(strings.Join(snapshot.Routes[i].Match, "|"))
+	for i := range s.raw.Routes {
+		if s.raw.Routes[i].Action == "block" {
+			pattern, err := common.SafeCompileRegex(strings.Join(s.raw.Routes[i].Match, "|"))
 			if err != nil {
 				log.Printf("Invalid route rule regex (index=%d): %s, skipping", i, err)
 				continue
@@ -96,6 +103,34 @@ func rulesFromUniProxySnapshot(snapshot *serverConfig, localRules []api.DetectRu
 	return &ruleList, nil
 }
 
+func (s *normalizedUniProxySnapshot) enrichNodeInfo(nodeInfo *api.NodeInfo) {
+	if s == nil || s.raw == nil || nodeInfo == nil {
+		return
+	}
+	nodeInfo.NameServerConfig = s.raw.parseDNSConfig()
+	attachRoutePolicy(s.raw, nodeInfo)
+}
+
+func certConfigFromUniProxySnapshot(snapshot *serverConfig) *api.XrayRCertConfig {
+	return normalizeUniProxySnapshot(snapshot, "").certConfig()
+}
+
+func baseConfigFromUniProxySnapshot(snapshot *serverConfig) *api.BaseConfig {
+	return normalizeUniProxySnapshot(snapshot, "").baseConfig()
+}
+
+func (c *APIClient) GetBaseConfig() *api.BaseConfig {
+	snapshot, ok := c.cachedUniProxySnapshot()
+	if !ok {
+		return nil
+	}
+	return baseConfigFromUniProxySnapshot(snapshot)
+}
+
+func rulesFromUniProxySnapshot(snapshot *serverConfig, localRules []api.DetectRule) (*[]api.DetectRule, error) {
+	return normalizeUniProxySnapshot(snapshot, "").rules(localRules)
+}
+
 func nodeInfoUnsupportedTypeError(nodeType string) error {
 	switch nodeType {
 	case "Naive", "naive":
@@ -108,11 +143,7 @@ func nodeInfoUnsupportedTypeError(nodeType string) error {
 }
 
 func enrichNodeInfoFromUniProxySnapshot(snapshot *serverConfig, nodeInfo *api.NodeInfo) {
-	if snapshot == nil || nodeInfo == nil {
-		return
-	}
-	nodeInfo.NameServerConfig = snapshot.parseDNSConfig()
-	attachRoutePolicy(snapshot, nodeInfo)
+	normalizeUniProxySnapshot(snapshot, "").enrichNodeInfo(nodeInfo)
 }
 
 func canonicalNodeType(nodeType string) string {
@@ -141,16 +172,18 @@ func canonicalNodeType(nodeType string) string {
 }
 
 func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
-	if snapshot == nil {
+	normalized := normalizeUniProxySnapshot(snapshot, c.NodeType)
+	if normalized == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving node info")
 	}
 
-	nodeType := canonicalNodeType(c.NodeType)
+	nodeType := normalized.nodeType
 	var (
 		nodeInfo *api.NodeInfo
 		err      error
 	)
 
+	snapshot = normalized.raw
 	switch nodeType {
 	case "V2ray", "Vmess", "Vless":
 		nodeInfo, err = c.parseV2rayNodeResponse(snapshot)
@@ -175,7 +208,7 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 		return nil, err
 	}
 	nodeInfo.NodeType = nodeType
-	enrichNodeInfoFromUniProxySnapshot(snapshot, nodeInfo)
+	normalized.enrichNodeInfo(nodeInfo)
 	return nodeInfo, nil
 }
 

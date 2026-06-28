@@ -87,6 +87,21 @@ func newMachineClient(apiHost string, timeout time.Duration) *resty.Client {
 	return client
 }
 
+func normalizeMachineNode(node MachineNode) MachineNode {
+	node.Type = canonicalNodeType(node.Type)
+	return node
+}
+
+func normalizeMachineNodes(nodes []MachineNode) []MachineNode {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	for i := range nodes {
+		nodes[i] = normalizeMachineNode(nodes[i])
+	}
+	return nodes
+}
+
 func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse, error) {
 	apiHost, token, err := validateMachineConfig(config)
 	if err != nil {
@@ -126,6 +141,7 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 	if err := json.Unmarshal(nodesRaw, &nodes); err != nil {
 		return nil, fmt.Errorf("malformed response: nodes must be an array: %w", err)
 	}
+	nodes = normalizeMachineNodes(nodes)
 
 	return &MachineNodesResponse{
 		Nodes:      nodes,
