@@ -321,58 +321,114 @@ func materializeMachineRuntimeSchedule(baseConfig api.BaseConfig, options machin
 	return schedule
 }
 
-func (s *Supervisor) reconcile(bindings []NodeBinding) error {
+type machineReconcileAction int
+
+const (
+	machineReconcileStart machineReconcileAction = iota
+	machineReconcileKeep
+	machineReconcileRestart
+)
+
+type machineReconcilePlan struct {
+	missing  []machineMissingRuntimeDecision
+	bindings []machineBindingDecision
+}
+
+type machineMissingRuntimeDecision struct {
+	nodeID           int
+	runtime          *nodeRuntime
+	nextMissingCount int
+	remove           bool
+}
+
+type machineBindingDecision struct {
+	action  machineReconcileAction
+	binding NodeBinding
+	runtime *nodeRuntime
+}
+
+func materializeMachineReconcilePlan(running map[int]*nodeRuntime, bindings []NodeBinding) machineReconcilePlan {
 	newByID := make(map[int]NodeBinding, len(bindings))
 	for _, binding := range bindings {
 		newByID[binding.NodeID] = binding
 	}
 
-	var errs []error
-	for nodeID, runtime := range s.running {
+	plan := machineReconcilePlan{
+		bindings: make([]machineBindingDecision, 0, len(bindings)),
+	}
+	for nodeID, runtime := range running {
 		if _, exists := newByID[nodeID]; exists {
 			continue
 		}
 
-		runtime.missingCount++
-		if runtime.missingCount < removedNodeMissingThreshold {
-			continue
-		}
-
-		if err := s.closeRuntime(runtime); err != nil {
-			s.logWarning(err)
-			errs = append(errs, err)
-		}
-		delete(s.running, nodeID)
+		nextMissingCount := runtime.missingCount + 1
+		plan.missing = append(plan.missing, machineMissingRuntimeDecision{
+			nodeID:           nodeID,
+			runtime:          runtime,
+			nextMissingCount: nextMissingCount,
+			remove:           nextMissingCount >= removedNodeMissingThreshold,
+		})
 	}
 
 	for _, binding := range bindings {
-		runtime, exists := s.running[binding.NodeID]
+		runtime, exists := running[binding.NodeID]
 		if !exists {
-			nextRuntime, err := s.startRuntime(binding)
+			plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileStart, binding: binding})
+			continue
+		}
+
+		if runtime.binding.NodeType == binding.NodeType {
+			plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileKeep, binding: binding, runtime: runtime})
+			continue
+		}
+
+		plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileRestart, binding: binding, runtime: runtime})
+	}
+
+	return plan
+}
+
+func (s *Supervisor) reconcile(bindings []NodeBinding) error {
+	plan := materializeMachineReconcilePlan(s.running, bindings)
+
+	var errs []error
+	for _, decision := range plan.missing {
+		decision.runtime.missingCount = decision.nextMissingCount
+		if !decision.remove {
+			continue
+		}
+
+		if err := s.closeRuntime(decision.runtime); err != nil {
+			s.logWarning(err)
+			errs = append(errs, err)
+		}
+		delete(s.running, decision.nodeID)
+	}
+
+	for _, decision := range plan.bindings {
+		switch decision.action {
+		case machineReconcileStart:
+			nextRuntime, err := s.startRuntime(decision.binding)
 			if err != nil {
 				s.logWarning(err)
 				errs = append(errs, err)
 				continue
 			}
-			s.running[binding.NodeID] = nextRuntime
-			continue
-		}
-
-		if runtime.binding.NodeType == binding.NodeType {
-			runtime.binding = binding
-			runtime.missingCount = 0
-			continue
-		}
-
-		nextRuntime, err := s.restartRuntime(runtime, binding)
-		if nextRuntime != nil {
-			s.running[binding.NodeID] = nextRuntime
-		} else {
-			delete(s.running, binding.NodeID)
-		}
-		if err != nil {
-			s.logWarning(err)
-			errs = append(errs, err)
+			s.running[decision.binding.NodeID] = nextRuntime
+		case machineReconcileKeep:
+			decision.runtime.binding = decision.binding
+			decision.runtime.missingCount = 0
+		case machineReconcileRestart:
+			nextRuntime, err := s.restartRuntime(decision.runtime, decision.binding)
+			if nextRuntime != nil {
+				s.running[decision.binding.NodeID] = nextRuntime
+			} else {
+				delete(s.running, decision.binding.NodeID)
+			}
+			if err != nil {
+				s.logWarning(err)
+				errs = append(errs, err)
+			}
 		}
 	}
 

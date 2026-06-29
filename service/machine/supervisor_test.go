@@ -361,6 +361,102 @@ func TestMaterializeDiscoverySnapshotRejectsInvalidResponse(t *testing.T) {
 	}
 }
 
+func TestMaterializeMachineReconcilePlanClassifiesDecisions(t *testing.T) {
+	keepRuntime := &nodeRuntime{binding: NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}, missingCount: 1}
+	restartRuntime := &nodeRuntime{binding: NodeBinding{NodeID: 2, NodeType: "vmess", Name: "changed"}}
+	missingRuntime := &nodeRuntime{binding: NodeBinding{NodeID: 3, NodeType: "trojan", Name: "missing"}}
+	removeRuntime := &nodeRuntime{binding: NodeBinding{NodeID: 4, NodeType: "vless", Name: "remove"}, missingCount: removedNodeMissingThreshold - 1}
+	running := map[int]*nodeRuntime{
+		1: keepRuntime,
+		2: restartRuntime,
+		3: missingRuntime,
+		4: removeRuntime,
+	}
+	bindings := []NodeBinding{
+		{NodeID: 1, NodeType: "vless", Name: "new"},
+		{NodeID: 2, NodeType: "trojan", Name: "changed"},
+		{NodeID: 5, NodeType: "vless", Name: "added"},
+	}
+
+	plan := materializeMachineReconcilePlan(running, bindings)
+
+	if len(plan.bindings) != 3 {
+		t.Fatalf("expected 3 binding decisions, got %#v", plan.bindings)
+	}
+	wantActions := []machineReconcileAction{machineReconcileKeep, machineReconcileRestart, machineReconcileStart}
+	for i, wantAction := range wantActions {
+		if plan.bindings[i].action != wantAction || plan.bindings[i].binding != bindings[i] {
+			t.Fatalf("unexpected binding decision %d: %#v", i, plan.bindings[i])
+		}
+	}
+	if plan.bindings[0].runtime != keepRuntime {
+		t.Fatalf("expected keep decision to reference existing runtime")
+	}
+	if plan.bindings[1].runtime != restartRuntime {
+		t.Fatalf("expected restart decision to reference existing runtime")
+	}
+	if plan.bindings[2].runtime != nil {
+		t.Fatalf("expected start decision not to reference a runtime, got %#v", plan.bindings[2].runtime)
+	}
+
+	if len(plan.missing) != 2 {
+		t.Fatalf("expected 2 missing decisions, got %#v", plan.missing)
+	}
+	missingByID := make(map[int]machineMissingRuntimeDecision, len(plan.missing))
+	for _, decision := range plan.missing {
+		missingByID[decision.nodeID] = decision
+	}
+	missingDecision, ok := missingByID[3]
+	if !ok {
+		t.Fatalf("expected node 3 missing decision, got %#v", plan.missing)
+	}
+	if missingDecision.runtime != missingRuntime || missingDecision.nextMissingCount != 1 || missingDecision.remove {
+		t.Fatalf("unexpected node 3 missing decision: %#v", missingDecision)
+	}
+	removeDecision, ok := missingByID[4]
+	if !ok {
+		t.Fatalf("expected node 4 remove decision, got %#v", plan.missing)
+	}
+	if removeDecision.runtime != removeRuntime || removeDecision.nextMissingCount != removedNodeMissingThreshold || !removeDecision.remove {
+		t.Fatalf("unexpected node 4 remove decision: %#v", removeDecision)
+	}
+}
+
+func TestSupervisorReconcileCollectsRemoveAndStartErrors(t *testing.T) {
+	closeErr := errors.New("close failed")
+	startErr := errors.New("start failed")
+	removedService := &fakeService{closeErr: closeErr}
+	supervisor := &Supervisor{
+		running: map[int]*nodeRuntime{
+			1: {
+				binding:      NodeBinding{NodeID: 1, NodeType: "vless", Name: "removed"},
+				service:      removedService,
+				missingCount: removedNodeMissingThreshold - 1,
+			},
+		},
+		factory: func(NodeBinding) (service.Service, error) {
+			return &fakeService{startErr: startErr}, nil
+		},
+	}
+
+	err := supervisor.reconcile([]NodeBinding{{NodeID: 2, NodeType: "trojan", Name: "added"}})
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("expected remove close error in joined error, got %v", err)
+	}
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected added node start error in joined error, got %v", err)
+	}
+	if removedService.closes != 1 {
+		t.Fatalf("expected removed service to close once, got %d", removedService.closes)
+	}
+	if _, exists := supervisor.running[1]; exists {
+		t.Fatal("expected removed node to be deleted even when close returns an error")
+	}
+	if _, exists := supervisor.running[2]; exists {
+		t.Fatal("expected failed added node to stay absent from running map")
+	}
+}
+
 func TestSupervisorStartSkipsBuildFailedNodeAndKeepsHealthyServices(t *testing.T) {
 	buildErr := fmt.Errorf("build failed")
 	first := &fakeService{}
