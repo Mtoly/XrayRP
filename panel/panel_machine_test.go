@@ -3,10 +3,12 @@ package panel
 import (
 	"strings"
 	"testing"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
@@ -135,6 +137,47 @@ func TestValidateMachineModeRejectsInvalidMachineCredentials(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", test.want, err)
 			}
 		})
+	}
+}
+
+func TestBuildMachineReportingConfigUsesNewV2boardReporter(t *testing.T) {
+	discoveryConfig := newV2board.MachineDiscoveryConfig{
+		APIHost:   "https://panel.example.com",
+		MachineID: 7,
+		Token:     "machine-token",
+		Timeout:   3 * time.Second,
+	}
+
+	reportingConfig := buildMachineReportingConfig(discoveryConfig)
+	if reportingConfig.Collector != nil {
+		t.Fatalf("expected reporting config to leave collector unset for supervisor default, got %T", reportingConfig.Collector)
+	}
+	if reportingConfig.StatusInterval != 0 || reportingConfig.MinStatusInterval != 0 {
+		t.Fatalf("expected reporting config to leave status intervals unchanged, got %#v", reportingConfig)
+	}
+	reporter, ok := reportingConfig.Reporter.(*newV2boardMachineStatusReporter)
+	if !ok {
+		t.Fatalf("expected newV2board machine status reporter, got %T", reportingConfig.Reporter)
+	}
+	if reporter.config != discoveryConfig {
+		t.Fatalf("expected reporter to use discovery config %#v, got %#v", discoveryConfig, reporter.config)
+	}
+}
+
+func TestBuildMachineStatusReporterUsesSameMachineDiscoveryConfig(t *testing.T) {
+	discoveryConfig := newV2board.MachineDiscoveryConfig{
+		APIHost:   " https://panel.example.com ",
+		MachineID: 42,
+		Token:     " machine-token ",
+		Timeout:   31 * time.Second,
+	}
+
+	reporter, ok := buildMachineStatusReporter(discoveryConfig).(*newV2boardMachineStatusReporter)
+	if !ok {
+		t.Fatalf("expected newV2board machine status reporter, got %T", reporter)
+	}
+	if reporter.config != discoveryConfig {
+		t.Fatalf("expected reporter config %#v, got %#v", discoveryConfig, reporter.config)
 	}
 }
 

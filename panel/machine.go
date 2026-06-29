@@ -24,6 +24,16 @@ func (r *newV2boardMachineStatusReporter) ReportMachineStatus(status api.Machine
 	return newV2board.ReportMachineStatus(r.config, status)
 }
 
+func buildMachineStatusReporter(config newV2board.MachineDiscoveryConfig) machine.MachineStatusReporter {
+	return &newV2boardMachineStatusReporter{config: config}
+}
+
+func buildMachineReportingConfig(config newV2board.MachineDiscoveryConfig) machine.MachineStatusReporterConfig {
+	return machine.MachineStatusReporterConfig{
+		Reporter: buildMachineStatusReporter(config),
+	}
+}
+
 func machineModeEnabled(config *Config) bool {
 	return config != nil && config.MachineConfig != nil && config.MachineConfig.Enable
 }
@@ -101,11 +111,9 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
-		MachineStatus: machine.MachineStatusReporterConfig{
-			Reporter: &newV2boardMachineStatusReporter{config: discoveryConfig},
-		},
-		Logger:           p.logger.WithField("service", "machine-supervisor"),
-		ShowErrorDetails: p.panelConfig.ShowErrorDetails(),
+		MachineStatus:     buildMachineReportingConfig(discoveryConfig),
+		Logger:            p.logger.WithField("service", "machine-supervisor"),
+		ShowErrorDetails:  p.panelConfig.ShowErrorDetails(),
 	}, discoverer, factory)
 	if err != nil {
 		return nil, err
