@@ -765,6 +765,347 @@ func TestSupervisorNodeTypeRestartFailureRollsBackOldService(t *testing.T) {
 	}
 }
 
+func TestSupervisorStartRuntimeContracts(t *testing.T) {
+	binding := NodeBinding{NodeID: 9, NodeType: "vless", Name: "node"}
+
+	t.Run("success returns runtime after service starts", func(t *testing.T) {
+		serviceInstance := &fakeService{}
+		supervisor := &Supervisor{factory: func(got NodeBinding) (service.Service, error) {
+			if got != binding {
+				t.Fatalf("unexpected binding: got %#v want %#v", got, binding)
+			}
+			return serviceInstance, nil
+		}}
+
+		runtime, err := supervisor.startRuntime(binding)
+		if err != nil {
+			t.Fatalf("startRuntime returned error: %v", err)
+		}
+		if runtime == nil || runtime.binding != binding || runtime.service != serviceInstance {
+			t.Fatalf("unexpected runtime: %#v", runtime)
+		}
+		if serviceInstance.starts != 1 || serviceInstance.closes != 0 {
+			t.Fatalf("expected service start=1 close=0, got start=%d close=%d", serviceInstance.starts, serviceInstance.closes)
+		}
+	})
+
+	t.Run("factory error returns no runtime", func(t *testing.T) {
+		factoryErr := errors.New("factory failed")
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, factoryErr
+		}}
+
+		runtime, err := supervisor.startRuntime(binding)
+		if runtime != nil {
+			t.Fatalf("expected no runtime, got %#v", runtime)
+		}
+		if !errors.Is(err, factoryErr) {
+			t.Fatalf("expected factory error, got %v", err)
+		}
+	})
+
+	t.Run("nil service is rejected", func(t *testing.T) {
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, nil
+		}}
+
+		runtime, err := supervisor.startRuntime(binding)
+		if runtime != nil {
+			t.Fatalf("expected no runtime, got %#v", runtime)
+		}
+		if err == nil || !strings.Contains(err.Error(), "nil service") {
+			t.Fatalf("expected nil service error, got %v", err)
+		}
+	})
+
+	t.Run("service start error returns no runtime", func(t *testing.T) {
+		startErr := errors.New("start failed")
+		serviceInstance := &fakeService{startErr: startErr}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return serviceInstance, nil
+		}}
+
+		runtime, err := supervisor.startRuntime(binding)
+		if runtime != nil {
+			t.Fatalf("expected no runtime, got %#v", runtime)
+		}
+		if !errors.Is(err, startErr) {
+			t.Fatalf("expected start error, got %v", err)
+		}
+		if serviceInstance.starts != 1 || serviceInstance.closes != 0 {
+			t.Fatalf("expected service start=1 close=0, got start=%d close=%d", serviceInstance.starts, serviceInstance.closes)
+		}
+	})
+}
+
+func TestSupervisorRestartRuntimeContracts(t *testing.T) {
+	oldBinding := NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}
+	nextBinding := NodeBinding{NodeID: 1, NodeType: "trojan", Name: "new"}
+
+	t.Run("success closes old and starts replacement", func(t *testing.T) {
+		oldService := &fakeService{}
+		nextService := &fakeService{}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		supervisor := &Supervisor{factory: func(got NodeBinding) (service.Service, error) {
+			if got != nextBinding {
+				t.Fatalf("unexpected binding: got %#v want %#v", got, nextBinding)
+			}
+			return nextService, nil
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if err != nil {
+			t.Fatalf("restartRuntime returned error: %v", err)
+		}
+		if nextRuntime == nil || nextRuntime.binding != nextBinding || nextRuntime.service != nextService {
+			t.Fatalf("unexpected replacement runtime: %#v", nextRuntime)
+		}
+		if oldService.closes != 1 || nextService.starts != 1 || nextService.closes != 0 {
+			t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d", oldService.closes, nextService.starts, nextService.closes)
+		}
+	})
+
+	t.Run("replacement factory error keeps old runtime", func(t *testing.T) {
+		factoryErr := errors.New("factory failed")
+		oldService := &fakeService{}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, factoryErr
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if nextRuntime != oldRuntime {
+			t.Fatalf("expected old runtime to be preserved, got %#v", nextRuntime)
+		}
+		if !errors.Is(err, factoryErr) {
+			t.Fatalf("expected factory error, got %v", err)
+		}
+		if oldService.closes != 0 {
+			t.Fatalf("expected old service not to close, got %d", oldService.closes)
+		}
+	})
+
+	t.Run("replacement nil service keeps old runtime", func(t *testing.T) {
+		oldService := &fakeService{}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, nil
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if nextRuntime != oldRuntime {
+			t.Fatalf("expected old runtime to be preserved, got %#v", nextRuntime)
+		}
+		if err == nil || !strings.Contains(err.Error(), "nil service") {
+			t.Fatalf("expected nil service error, got %v", err)
+		}
+		if oldService.closes != 0 {
+			t.Fatalf("expected old service not to close, got %d", oldService.closes)
+		}
+	})
+
+	t.Run("old close error closes replacement and keeps old runtime", func(t *testing.T) {
+		closeErr := errors.New("close failed")
+		oldService := &fakeService{closeErr: closeErr}
+		nextService := &fakeService{}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nextService, nil
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if nextRuntime != oldRuntime {
+			t.Fatalf("expected old runtime to be preserved, got %#v", nextRuntime)
+		}
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("expected close error, got %v", err)
+		}
+		if oldService.closes != 1 || nextService.starts != 0 || nextService.closes != 1 {
+			t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d", oldService.closes, nextService.starts, nextService.closes)
+		}
+	})
+
+	t.Run("replacement start error with rollback success returns rollback runtime", func(t *testing.T) {
+		replacementStartErr := errors.New("replacement start failed")
+		oldService := &fakeService{}
+		nextService := &fakeService{startErr: replacementStartErr}
+		rollbackService := &fakeService{}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		services := []service.Service{nextService, rollbackService}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			serviceInstance := services[0]
+			services = services[1:]
+			return serviceInstance, nil
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if nextRuntime == nil || nextRuntime.binding != oldBinding || nextRuntime.service != rollbackService {
+			t.Fatalf("expected rollback runtime, got %#v", nextRuntime)
+		}
+		if !errors.Is(err, replacementStartErr) {
+			t.Fatalf("expected replacement start error, got %v", err)
+		}
+		if oldService.closes != 1 || nextService.starts != 1 || nextService.closes != 1 || rollbackService.starts != 1 || rollbackService.closes != 0 {
+			t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d rollback start=%d close=%d", oldService.closes, nextService.starts, nextService.closes, rollbackService.starts, rollbackService.closes)
+		}
+	})
+
+	t.Run("replacement start error with rollback failure returns nil runtime", func(t *testing.T) {
+		replacementStartErr := errors.New("replacement start failed")
+		rollbackErr := errors.New("rollback start failed")
+		oldService := &fakeService{}
+		nextService := &fakeService{startErr: replacementStartErr}
+		rollbackService := &fakeService{startErr: rollbackErr}
+		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
+		services := []service.Service{nextService, rollbackService}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			serviceInstance := services[0]
+			services = services[1:]
+			return serviceInstance, nil
+		}}
+
+		nextRuntime, err := supervisor.restartRuntime(oldRuntime, nextBinding)
+		if nextRuntime != nil {
+			t.Fatalf("expected nil runtime after rollback failure, got %#v", nextRuntime)
+		}
+		if !errors.Is(err, replacementStartErr) || !errors.Is(err, rollbackErr) {
+			t.Fatalf("expected replacement and rollback errors, got %v", err)
+		}
+		if oldService.closes != 1 || nextService.starts != 1 || nextService.closes != 1 || rollbackService.starts != 1 {
+			t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d rollback start=%d", oldService.closes, nextService.starts, nextService.closes, rollbackService.starts)
+		}
+	})
+}
+
+func TestSupervisorRollbackRuntimeContracts(t *testing.T) {
+	oldBinding := NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}
+	oldRuntime := &nodeRuntime{binding: oldBinding}
+
+	t.Run("success recreates and starts old runtime", func(t *testing.T) {
+		rollbackService := &fakeService{}
+		supervisor := &Supervisor{factory: func(got NodeBinding) (service.Service, error) {
+			if got != oldBinding {
+				t.Fatalf("unexpected binding: got %#v want %#v", got, oldBinding)
+			}
+			return rollbackService, nil
+		}}
+
+		runtime, err := supervisor.rollbackRuntime(oldRuntime)
+		if err != nil {
+			t.Fatalf("rollbackRuntime returned error: %v", err)
+		}
+		if runtime == nil || runtime.binding != oldBinding || runtime.service != rollbackService {
+			t.Fatalf("unexpected rollback runtime: %#v", runtime)
+		}
+		if rollbackService.starts != 1 || rollbackService.closes != 0 {
+			t.Fatalf("expected rollback service start=1 close=0, got start=%d close=%d", rollbackService.starts, rollbackService.closes)
+		}
+	})
+
+	t.Run("factory error is returned", func(t *testing.T) {
+		factoryErr := errors.New("factory failed")
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, factoryErr
+		}}
+
+		runtime, err := supervisor.rollbackRuntime(oldRuntime)
+		if runtime != nil {
+			t.Fatalf("expected no rollback runtime, got %#v", runtime)
+		}
+		if !errors.Is(err, factoryErr) {
+			t.Fatalf("expected factory error, got %v", err)
+		}
+	})
+
+	t.Run("nil service is rejected", func(t *testing.T) {
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return nil, nil
+		}}
+
+		runtime, err := supervisor.rollbackRuntime(oldRuntime)
+		if runtime != nil {
+			t.Fatalf("expected no rollback runtime, got %#v", runtime)
+		}
+		if err == nil || !strings.Contains(err.Error(), "nil rollback service") {
+			t.Fatalf("expected nil rollback service error, got %v", err)
+		}
+	})
+
+	t.Run("start error is returned", func(t *testing.T) {
+		startErr := errors.New("rollback start failed")
+		rollbackService := &fakeService{startErr: startErr}
+		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
+			return rollbackService, nil
+		}}
+
+		runtime, err := supervisor.rollbackRuntime(oldRuntime)
+		if runtime != nil {
+			t.Fatalf("expected no rollback runtime, got %#v", runtime)
+		}
+		if !errors.Is(err, startErr) {
+			t.Fatalf("expected start error, got %v", err)
+		}
+		if rollbackService.starts != 1 || rollbackService.closes != 0 {
+			t.Fatalf("expected rollback service start=1 close=0, got start=%d close=%d", rollbackService.starts, rollbackService.closes)
+		}
+	})
+}
+
+func TestSupervisorCloseRuntimeContracts(t *testing.T) {
+	supervisor := &Supervisor{}
+
+	if err := supervisor.closeRuntime(nil); err != nil {
+		t.Fatalf("expected nil runtime close to be no-op, got %v", err)
+	}
+	if err := supervisor.closeRuntime(&nodeRuntime{binding: NodeBinding{NodeID: 1}}); err != nil {
+		t.Fatalf("expected nil service close to be no-op, got %v", err)
+	}
+
+	closeErr := errors.New("close failed")
+	serviceInstance := &fakeService{closeErr: closeErr}
+	runtime := &nodeRuntime{binding: NodeBinding{NodeID: 7}, service: serviceInstance}
+	err := supervisor.closeRuntime(runtime)
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("expected close error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "machine node 7") {
+		t.Fatalf("expected node context in close error, got %v", err)
+	}
+	if serviceInstance.closes != 1 {
+		t.Fatalf("expected service close=1, got %d", serviceInstance.closes)
+	}
+}
+
+func TestSupervisorReconcileRemovesRuntimeWhenRestartRollbackFails(t *testing.T) {
+	replacementStartErr := errors.New("replacement start failed")
+	rollbackErr := errors.New("rollback start failed")
+	oldService := &fakeService{}
+	nextService := &fakeService{startErr: replacementStartErr}
+	rollbackService := &fakeService{startErr: rollbackErr}
+	supervisor := &Supervisor{
+		running: map[int]*nodeRuntime{
+			1: {binding: NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}, service: oldService},
+		},
+		factory: func(NodeBinding) (service.Service, error) {
+			if nextService.starts == 0 {
+				return nextService, nil
+			}
+			return rollbackService, nil
+		},
+	}
+
+	err := supervisor.reconcile([]NodeBinding{{NodeID: 1, NodeType: "trojan", Name: "new"}})
+	if !errors.Is(err, replacementStartErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("expected replacement and rollback errors, got %v", err)
+	}
+	if _, exists := supervisor.running[1]; exists {
+		t.Fatal("expected runtime to be removed after replacement and rollback both fail")
+	}
+	if oldService.closes != 1 || nextService.starts != 1 || nextService.closes != 1 || rollbackService.starts != 1 {
+		t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d rollback start=%d", oldService.closes, nextService.starts, nextService.closes, rollbackService.starts)
+	}
+}
+
 func TestSupervisorDiscoveryIntervalDefaultsAndClamps(t *testing.T) {
 	tests := []struct {
 		name     string
