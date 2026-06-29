@@ -281,16 +281,47 @@ func (p *Panel) buildNodeService(server *core.Instance, apiClient api.API, contr
 }
 
 func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
+	nodeType := runtimeNodeServiceType(apiClient, fallbackNodeType)
+	return p.buildRuntimeNodeService(server, apiClient, controllerConfig, panelType, nodeType)
+}
+
+type runtimeNodeServiceKind string
+
+const (
+	runtimeNodeServiceController runtimeNodeServiceKind = "controller"
+	runtimeNodeServiceHysteria2  runtimeNodeServiceKind = "hysteria2"
+	runtimeNodeServiceTuic       runtimeNodeServiceKind = "tuic"
+	runtimeNodeServiceAnyTLS     runtimeNodeServiceKind = "anytls"
+)
+
+func runtimeNodeServiceType(apiClient api.API, fallbackNodeType string) string {
 	nodeType := apiClient.Describe().NodeType
 	if nodeType == "" {
-		nodeType = fallbackNodeType
+		return fallbackNodeType
 	}
+	return nodeType
+}
+
+func runtimeNodeServiceKindForNodeType(nodeType string) runtimeNodeServiceKind {
 	switch {
 	case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
-		return hysteria2.New(apiClient, controllerConfig), nil
+		return runtimeNodeServiceHysteria2
 	case strings.EqualFold(nodeType, "Tuic"):
-		return tuic.New(apiClient, controllerConfig), nil
+		return runtimeNodeServiceTuic
 	case strings.EqualFold(nodeType, "AnyTLS"):
+		return runtimeNodeServiceAnyTLS
+	default:
+		return runtimeNodeServiceController
+	}
+}
+
+func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
+	switch runtimeNodeServiceKindForNodeType(nodeType) {
+	case runtimeNodeServiceHysteria2:
+		return hysteria2.New(apiClient, controllerConfig), nil
+	case runtimeNodeServiceTuic:
+		return tuic.New(apiClient, controllerConfig), nil
+	case runtimeNodeServiceAnyTLS:
 		return anytls.New(apiClient, controllerConfig), nil
 	default:
 		return controller.New(server, apiClient, controllerConfig, panelType), nil

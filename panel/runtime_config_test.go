@@ -64,6 +64,79 @@ func TestBuildStaticNodeServicesRejectsUnsupportedPanelType(t *testing.T) {
 	}
 }
 
+func TestRuntimeNodeServiceTypeUsesFallbackWhenDescribeNodeTypeEmpty(t *testing.T) {
+	client := &runtimeNodeServiceTestAPI{clientInfo: api.ClientInfo{NodeType: ""}}
+
+	if got := runtimeNodeServiceType(client, "Hysteria2"); got != "Hysteria2" {
+		t.Fatalf("expected fallback node type Hysteria2, got %q", got)
+	}
+}
+
+func TestRuntimeNodeServiceTypePrefersDescribedNodeType(t *testing.T) {
+	client := &runtimeNodeServiceTestAPI{clientInfo: api.ClientInfo{NodeType: "Tuic"}}
+
+	if got := runtimeNodeServiceType(client, "Hysteria2"); got != "Tuic" {
+		t.Fatalf("expected described node type Tuic, got %q", got)
+	}
+}
+
+func TestRuntimeNodeServiceKindForNodeType(t *testing.T) {
+	tests := []struct {
+		name     string
+		nodeType string
+		want     runtimeNodeServiceKind
+	}{
+		{name: "hysteria2", nodeType: "Hysteria2", want: runtimeNodeServiceHysteria2},
+		{name: "hysteria alias", nodeType: "Hysteria", want: runtimeNodeServiceHysteria2},
+		{name: "hysteria case insensitive", nodeType: "hYsTeRiA2", want: runtimeNodeServiceHysteria2},
+		{name: "tuic", nodeType: "Tuic", want: runtimeNodeServiceTuic},
+		{name: "tuic case insensitive", nodeType: "tuic", want: runtimeNodeServiceTuic},
+		{name: "anytls", nodeType: "AnyTLS", want: runtimeNodeServiceAnyTLS},
+		{name: "anytls case insensitive", nodeType: "anytls", want: runtimeNodeServiceAnyTLS},
+		{name: "vless falls back", nodeType: "Vless", want: runtimeNodeServiceController},
+		{name: "vmess falls back", nodeType: "Vmess", want: runtimeNodeServiceController},
+		{name: "trojan falls back", nodeType: "Trojan", want: runtimeNodeServiceController},
+		{name: "shadowsocks falls back", nodeType: "Shadowsocks", want: runtimeNodeServiceController},
+		{name: "socks falls back", nodeType: "Socks", want: runtimeNodeServiceController},
+		{name: "http falls back", nodeType: "HTTP", want: runtimeNodeServiceController},
+		{name: "empty falls back", nodeType: "", want: runtimeNodeServiceController},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimeNodeServiceKindForNodeType(test.nodeType); got != test.want {
+				t.Fatalf("expected %q, got %q", test.want, got)
+			}
+		})
+	}
+}
+
+type runtimeNodeServiceTestAPI struct {
+	clientInfo api.ClientInfo
+}
+
+func (a *runtimeNodeServiceTestAPI) GetNodeInfo() (*api.NodeInfo, error) { return &api.NodeInfo{}, nil }
+func (a *runtimeNodeServiceTestAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return &api.XrayRCertConfig{}, nil
+}
+func (a *runtimeNodeServiceTestAPI) GetUserList() (*[]api.UserInfo, error) {
+	users := []api.UserInfo{}
+	return &users, nil
+}
+func (a *runtimeNodeServiceTestAPI) GetAliveList() (map[int][]string, error) { return nil, nil }
+func (a *runtimeNodeServiceTestAPI) ReportNodeStatus(*api.NodeStatus) error  { return nil }
+func (a *runtimeNodeServiceTestAPI) ReportNodeOnlineUsers(*[]api.OnlineUser) error {
+	return nil
+}
+func (a *runtimeNodeServiceTestAPI) ReportUserTraffic(*[]api.UserTraffic) error { return nil }
+func (a *runtimeNodeServiceTestAPI) Describe() api.ClientInfo                   { return a.clientInfo }
+func (a *runtimeNodeServiceTestAPI) GetNodeRule() (*[]api.DetectRule, error) {
+	rules := []api.DetectRule{}
+	return &rules, nil
+}
+func (a *runtimeNodeServiceTestAPI) ReportIllegal(*[]api.DetectResult) error { return nil }
+func (a *runtimeNodeServiceTestAPI) Debug()                                  {}
+
 func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	config := validMachineModeConfig()
 	config.LogConfig = &LogConfig{ShowErrorDetails: true}
