@@ -524,15 +524,28 @@ func (s *Supervisor) runStatus(ctx context.Context, done chan struct{}, interval
 	}
 }
 
+type machineStatusSnapshot struct {
+	status api.MachineStatus
+	err    error
+}
+
+func materializeMachineStatusSnapshot(collector MachineStatusCollector) machineStatusSnapshot {
+	if collector == nil {
+		return machineStatusSnapshot{}
+	}
+	status, err := collector()
+	return machineStatusSnapshot{status: status, err: err}
+}
+
 func (s *Supervisor) reportMachineStatus() {
 	if s == nil || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
 		return
 	}
-	status, err := s.config.MachineStatus.Collector()
-	if err != nil {
-		s.logWarning(fmt.Errorf("collect machine status: %w", err))
+	snapshot := materializeMachineStatusSnapshot(s.config.MachineStatus.Collector)
+	if snapshot.err != nil {
+		s.logWarning(fmt.Errorf("collect machine status: %w", snapshot.err))
 	}
-	if err := s.config.MachineStatus.Reporter.ReportMachineStatus(status); err != nil {
+	if err := s.config.MachineStatus.Reporter.ReportMachineStatus(snapshot.status); err != nil {
 		s.logWarning(fmt.Errorf("report machine status: %w", err))
 	}
 }

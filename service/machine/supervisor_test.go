@@ -766,6 +766,30 @@ func TestSupervisorStartAppliesBaseConfigPushInterval(t *testing.T) {
 	}
 }
 
+func TestMaterializeMachineStatusSnapshot(t *testing.T) {
+	collectorErr := errors.New("collect failed")
+	status := api.MachineStatus{CPU: 12.3, MemTotal: 1000, MemUsed: 500, NetInSpeed: -1, NetOutSpeed: -1}
+	snapshot := materializeMachineStatusSnapshot(func() (api.MachineStatus, error) {
+		return status, collectorErr
+	})
+	if !errors.Is(snapshot.err, collectorErr) {
+		t.Fatalf("expected collector error, got %v", snapshot.err)
+	}
+	if snapshot.status != status {
+		t.Fatalf("expected collected status to be preserved, got %#v", snapshot.status)
+	}
+}
+
+func TestMaterializeMachineStatusSnapshotWithNilCollector(t *testing.T) {
+	snapshot := materializeMachineStatusSnapshot(nil)
+	if snapshot.err != nil {
+		t.Fatalf("expected no error for nil collector, got %v", snapshot.err)
+	}
+	if snapshot.status != (api.MachineStatus{}) {
+		t.Fatalf("expected zero status for nil collector, got %#v", snapshot.status)
+	}
+}
+
 func TestSupervisorReportsMachineStatus(t *testing.T) {
 	reporter := &fakeMachineStatusReporter{}
 	collectorCalls := make(chan struct{}, 1)

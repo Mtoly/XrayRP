@@ -232,6 +232,54 @@ func TestDiscoverMachineNodesAllowsMissingBaseConfig(t *testing.T) {
 	}
 }
 
+func TestMaterializeMachineStatusReport(t *testing.T) {
+	report, err := materializeMachineStatusReport(MachineDiscoveryConfig{
+		APIHost:   " https://panel.example.com ",
+		MachineID: 7,
+		Token:     " machine-token ",
+		Timeout:   3 * time.Second,
+	}, api.MachineStatus{
+		CPU:         12.3,
+		MemTotal:    1000,
+		MemUsed:     400,
+		SwapTotal:   200,
+		SwapUsed:    50,
+		DiskTotal:   5000,
+		DiskUsed:    1234,
+		NetInSpeed:  1024,
+		NetOutSpeed: 2048,
+	})
+	if err != nil {
+		t.Fatalf("materializeMachineStatusReport returned error: %v", err)
+	}
+	if report.APIHost != "https://panel.example.com" || report.Timeout != 3*time.Second {
+		t.Fatalf("unexpected report config: %#v", report)
+	}
+	payload := report.Payload
+	if payload.MachineID != 7 || payload.Token != "machine-token" || payload.CPU != 12.3 {
+		t.Fatalf("unexpected auth/cpu payload: %#v", payload)
+	}
+	if payload.Mem.Total != 1000 || payload.Mem.Used != 400 {
+		t.Fatalf("unexpected mem payload: %#v", payload.Mem)
+	}
+	if payload.Swap.Total != 200 || payload.Swap.Used != 50 {
+		t.Fatalf("unexpected swap payload: %#v", payload.Swap)
+	}
+	if payload.Disk.Total != 5000 || payload.Disk.Used != 1234 {
+		t.Fatalf("unexpected disk payload: %#v", payload.Disk)
+	}
+	if payload.Net == nil || payload.Net.InSpeed != 1024 || payload.Net.OutSpeed != 2048 {
+		t.Fatalf("unexpected net payload: %#v", payload.Net)
+	}
+}
+
+func TestMaterializeMachineStatusPayloadOmitsUnavailableNetworkSpeed(t *testing.T) {
+	payload := materializeMachineStatusPayload(7, "machine-token", api.MachineStatus{NetInSpeed: -1, NetOutSpeed: -1})
+	if payload.Net != nil {
+		t.Fatalf("expected unavailable net speeds to be omitted, got %#v", payload.Net)
+	}
+}
+
 func TestReportMachineStatusPostsMachinePayload(t *testing.T) {
 	t.Parallel()
 

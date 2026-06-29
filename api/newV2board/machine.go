@@ -149,14 +149,27 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 	}, nil
 }
 
-func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus) error {
+type machineStatusReport struct {
+	APIHost string
+	Timeout time.Duration
+	Payload machineStatusPayload
+}
+
+func materializeMachineStatusReport(config MachineDiscoveryConfig, status api.MachineStatus) (machineStatusReport, error) {
 	apiHost, token, err := validateMachineConfig(config)
 	if err != nil {
-		return err
+		return machineStatusReport{}, err
 	}
+	return machineStatusReport{
+		APIHost: apiHost,
+		Timeout: config.Timeout,
+		Payload: materializeMachineStatusPayload(config.MachineID, token, status),
+	}, nil
+}
 
+func materializeMachineStatusPayload(machineID int, token string, status api.MachineStatus) machineStatusPayload {
 	payload := machineStatusPayload{
-		MachineID: config.MachineID,
+		MachineID: machineID,
 		Token:     token,
 		CPU:       status.CPU,
 		Mem: machineStatusResource{
@@ -178,10 +191,18 @@ func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus
 			OutSpeed: status.NetOutSpeed,
 		}
 	}
+	return payload
+}
 
-	res, err := newMachineClient(apiHost, config.Timeout).R().
+func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus) error {
+	report, err := materializeMachineStatusReport(config, status)
+	if err != nil {
+		return err
+	}
+
+	res, err := newMachineClient(report.APIHost, report.Timeout).R().
 		SetHeader("Content-Type", "application/json").
-		SetBody(payload).
+		SetBody(report.Payload).
 		Post(machineStatusPath)
 	if err != nil {
 		return fmt.Errorf("report machine status request failed: %w", err)
