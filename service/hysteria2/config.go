@@ -49,12 +49,11 @@ func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
 			udpConn.Close()
 			return nil, fmt.Errorf("obfs_password is required when obfs is salamander")
 		}
-		ob, err := obfs.NewSalamanderObfuscator([]byte(hy.ObfsPassword))
+		packetConn, err = obfs.WrapPacketConnSalamander(udpConn, []byte(hy.ObfsPassword))
 		if err != nil {
 			udpConn.Close()
 			return nil, fmt.Errorf("failed to create salamander obfuscator")
 		}
-		packetConn = obfs.WrapPacketConn(udpConn, ob)
 	case "", "none", "plain":
 		// no obfuscation
 	default:

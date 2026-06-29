@@ -753,10 +753,16 @@ github.com/apache/arrow/go/v11 v11.0.0/go.mod h1:Eg5OsL5H+e299f7u5ssuXsuHQVEGC4x
 github.com/apache/thrift v0.16.0/go.mod h1:PHK3hniurgQaNMZYaCLEqXKsYK8upmhPbmdP2FXSqgU=
 github.com/apernet/hysteria/core/v2 v2.9.2 h1:dpqMyopdyvohtNTkB7H471RIQBJ3qNnEk14+UJkiDX0=
 github.com/apernet/hysteria/core/v2 v2.9.2/go.mod h1:b9dPkAisksVDpmqc4+7L9/S/ox0CEAJh/+Pfljac5gA=
+github.com/apernet/hysteria/core/v2 v2.9.3 h1:BwJM1nCY3oLG7KQE32HRJczQAfSKgYfIw+qa/USu4do=
+github.com/apernet/hysteria/core/v2 v2.9.3/go.mod h1:Iy4fgHAVfF8EmWWHqCfs0TPmW+bpbYslyEkasgUwdx8=
 github.com/apernet/hysteria/extras/v2 v2.9.1 h1:Od33z2/BYsC/rzK4XZQPjN5Yr13TXLZSbZzPFIqsIrE=
 github.com/apernet/hysteria/extras/v2 v2.9.1/go.mod h1:61dvzDe1Lbp/KDIW4pcOoDbLrBpissyM8WGnl8cWDfQ=
+github.com/apernet/hysteria/extras/v2 v2.9.3 h1:tQRh3YzUMgZmG1bEnDnJoZDiccx49v/S3nkBmRmrUuk=
+github.com/apernet/hysteria/extras/v2 v2.9.3/go.mod h1:hX4Gb19sjLyR+UFlGizVCzRteIraa0Y2d0lVg6y7FwU=
 github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716 h1:J1O+xpLuJWkdYbw5JPGwBqIHs2J8tiEP7Py9lPqkN2I=
 github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716/go.mod h1:Npbg8qBtAZlsAB3FWmqwlVh5jtVG6a4DlYsOylUpvzA=
+github.com/apernet/quic-go v0.60.1-0.20260618182935-599b15a1fa26 h1:LTC+O+b5tux3RUzqqepNOkdMMI264O+mG09Y5j9Cf7Y=
+github.com/apernet/quic-go v0.60.1-0.20260618182935-599b15a1fa26/go.mod h1:B5eVtZG4ZkCvDZQNaOAAEZEtdBC7DIj56Q9EIb0mGAQ=
 github.com/armon/circbuf v0.0.0-20150827004946-bbbad097214e/go.mod h1:3U/XgcO3hCbHZ8TKRvWD2dDTCfh9M9ya+I9JpbB7O8o=
 github.com/armon/go-metrics v0.0.0-20180917152333-f0300d1749da/go.mod h1:Q73ZrmVTwzkszR9V5SSuryQ31EELlFMUz1kKyl939pY=
 github.com/armon/go-metrics v0.3.9/go.mod h1:4O98XIr/9W0sxpJ8UaYkvjk10Iff7SnFrb4QAOwNTFc=
