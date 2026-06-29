@@ -136,22 +136,12 @@ func (c *Controller) closePeriodicTasks() error {
 }
 
 func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error {
-	baseConfig := c.currentBaseConfig()
-	pullInterval := time.Duration(c.config.UpdatePeriodic) * time.Second
-	pushInterval := pullInterval
-	if baseConfig != nil {
-		if normalizedPull := normalizeBaseConfigInterval(baseConfig.PullInterval, minBaseConfigPullInterval); normalizedPull > 0 {
-			pullInterval = time.Duration(normalizedPull) * time.Second
-		}
-		if normalizedPush := normalizeBaseConfigInterval(baseConfig.PushInterval, minBaseConfigPushInterval); normalizedPush > 0 {
-			pushInterval = time.Duration(normalizedPush) * time.Second
-		}
-	}
+	schedule := materializeControllerRuntimeSchedule(c.config.UpdatePeriodic, c.currentBaseConfig())
 
-	if err := c.startOrReplacePeriodicTask(periodicTaskNodeMonitor, pullInterval, c.nodeInfoMonitor); err != nil {
+	if err := c.startOrReplacePeriodicTask(periodicTaskNodeMonitor, schedule.pullInterval, c.nodeInfoMonitor); err != nil {
 		return err
 	}
-	if err := c.startOrReplacePeriodicTask(periodicTaskUserMonitor, pushInterval, c.userInfoMonitor); err != nil {
+	if err := c.startOrReplacePeriodicTask(periodicTaskUserMonitor, schedule.pushInterval, c.userInfoMonitor); err != nil {
 		return err
 	}
 	if nodeInfo != nil && nodeInfo.EnableTLS && c.config.EnableREALITY == false {
@@ -160,6 +150,30 @@ func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error 
 		}
 	}
 	return nil
+}
+
+type controllerRuntimeSchedule struct {
+	pullInterval time.Duration
+	pushInterval time.Duration
+}
+
+func materializeControllerRuntimeSchedule(localUpdatePeriodic int, baseConfig *api.BaseConfig) controllerRuntimeSchedule {
+	localInterval := time.Duration(localUpdatePeriodic) * time.Second
+	schedule := controllerRuntimeSchedule{
+		pullInterval: localInterval,
+		pushInterval: localInterval,
+	}
+	if baseConfig == nil {
+		return schedule
+	}
+
+	if normalizedPull := normalizeBaseConfigInterval(baseConfig.PullInterval, minBaseConfigPullInterval); normalizedPull > 0 {
+		schedule.pullInterval = time.Duration(normalizedPull) * time.Second
+	}
+	if normalizedPush := normalizeBaseConfigInterval(baseConfig.PushInterval, minBaseConfigPushInterval); normalizedPush > 0 {
+		schedule.pushInterval = time.Duration(normalizedPush) * time.Second
+	}
+	return schedule
 }
 
 func (c *Controller) currentBaseConfig() *api.BaseConfig {

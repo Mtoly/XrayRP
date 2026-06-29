@@ -254,30 +254,67 @@ func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
 }
 
 func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) {
-	if baseConfig.PullInterval > 0 {
-		nextInterval := normalizeDiscoveryInterval(time.Duration(baseConfig.PullInterval)*time.Second, s.config.MinDiscoveryInterval)
-		if nextInterval > 0 && nextInterval != s.discoveryInterval {
-			s.discoveryInterval = nextInterval
+	schedule := materializeMachineRuntimeSchedule(baseConfig, machineRuntimeScheduleOptions{
+		currentDiscoveryInterval: s.discoveryInterval,
+		minDiscoveryInterval:     s.config.MinDiscoveryInterval,
+		currentStatusInterval:    s.statusInterval,
+		minStatusInterval:        s.config.MachineStatus.MinStatusInterval,
+	})
+	if schedule.updateDiscovery {
+		nextInterval := schedule.discoveryInterval
+		s.discoveryInterval = nextInterval
 
-			if s.cancel != nil && !s.closed {
-				oldCancel := s.cancel
-				if s.config.Logger != nil {
-					s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
-				}
-				ctx, cancel := context.WithCancel(context.Background())
-				done := make(chan struct{})
-				s.cancel = cancel
-				s.done = done
-				oldCancel()
-				go s.run(ctx, done, nextInterval)
+		if s.cancel != nil && !s.closed {
+			oldCancel := s.cancel
+			if s.config.Logger != nil {
+				s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
 			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			s.cancel = cancel
+			s.done = done
+			oldCancel()
+			go s.run(ctx, done, nextInterval)
 		}
 	}
 
-	if baseConfig.PushInterval > 0 {
-		nextInterval := normalizeStatusInterval(time.Duration(baseConfig.PushInterval)*time.Second, s.config.MachineStatus.MinStatusInterval)
-		s.replaceStatusIntervalLocked(nextInterval)
+	if schedule.updateStatus {
+		s.replaceStatusIntervalLocked(schedule.statusInterval)
 	}
+}
+
+type machineRuntimeScheduleOptions struct {
+	currentDiscoveryInterval time.Duration
+	minDiscoveryInterval     time.Duration
+	currentStatusInterval    time.Duration
+	minStatusInterval        time.Duration
+}
+
+type machineRuntimeSchedule struct {
+	discoveryInterval time.Duration
+	statusInterval    time.Duration
+	updateDiscovery   bool
+	updateStatus      bool
+}
+
+func materializeMachineRuntimeSchedule(baseConfig api.BaseConfig, options machineRuntimeScheduleOptions) machineRuntimeSchedule {
+	schedule := machineRuntimeSchedule{
+		discoveryInterval: options.currentDiscoveryInterval,
+		statusInterval:    options.currentStatusInterval,
+	}
+	if baseConfig.PullInterval > 0 {
+		nextInterval := normalizeDiscoveryInterval(time.Duration(baseConfig.PullInterval)*time.Second, options.minDiscoveryInterval)
+		if nextInterval > 0 && nextInterval != options.currentDiscoveryInterval {
+			schedule.discoveryInterval = nextInterval
+			schedule.updateDiscovery = true
+		}
+	}
+	if baseConfig.PushInterval > 0 {
+		nextInterval := normalizeStatusInterval(time.Duration(baseConfig.PushInterval)*time.Second, options.minStatusInterval)
+		schedule.statusInterval = nextInterval
+		schedule.updateStatus = nextInterval > 0 && nextInterval != options.currentStatusInterval
+	}
+	return schedule
 }
 
 func (s *Supervisor) reconcile(bindings []NodeBinding) error {

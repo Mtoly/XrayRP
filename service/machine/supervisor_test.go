@@ -639,6 +639,99 @@ func TestSupervisorDiscoveryIntervalDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+func TestMaterializeMachineRuntimeSchedule(t *testing.T) {
+	tests := []struct {
+		name                string
+		baseConfig          api.BaseConfig
+		options             machineRuntimeScheduleOptions
+		wantDiscovery       time.Duration
+		wantStatus          time.Duration
+		wantUpdateDiscovery bool
+		wantUpdateStatus    bool
+	}{
+		{
+			name:       "missing base config intervals keep current schedule",
+			baseConfig: api.BaseConfig{},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 60 * time.Second,
+				currentStatusInterval:    60 * time.Second,
+			},
+			wantDiscovery: 60 * time.Second,
+			wantStatus:    60 * time.Second,
+		},
+		{
+			name:       "negative base config intervals keep current schedule",
+			baseConfig: api.BaseConfig{PullInterval: -1, PushInterval: -1},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 60 * time.Second,
+				currentStatusInterval:    60 * time.Second,
+			},
+			wantDiscovery: 60 * time.Second,
+			wantStatus:    60 * time.Second,
+		},
+		{
+			name:       "base config intervals update schedule",
+			baseConfig: api.BaseConfig{PullInterval: 45, PushInterval: 15},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 60 * time.Second,
+				currentStatusInterval:    60 * time.Second,
+			},
+			wantDiscovery:       45 * time.Second,
+			wantStatus:          15 * time.Second,
+			wantUpdateDiscovery: true,
+			wantUpdateStatus:    true,
+		},
+		{
+			name:       "base config intervals keep existing clamps",
+			baseConfig: api.BaseConfig{PullInterval: 5, PushInterval: 5},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 60 * time.Second,
+				currentStatusInterval:    60 * time.Second,
+			},
+			wantDiscovery:       minMachineDiscoveryInterval,
+			wantStatus:          minMachineStatusInterval,
+			wantUpdateDiscovery: true,
+			wantUpdateStatus:    true,
+		},
+		{
+			name:       "same effective intervals do not request replacement",
+			baseConfig: api.BaseConfig{PullInterval: 45, PushInterval: 15},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 45 * time.Second,
+				currentStatusInterval:    15 * time.Second,
+			},
+			wantDiscovery: 45 * time.Second,
+			wantStatus:    15 * time.Second,
+		},
+		{
+			name:       "custom minimum intervals are preserved",
+			baseConfig: api.BaseConfig{PullInterval: 20, PushInterval: 8},
+			options: machineRuntimeScheduleOptions{
+				currentDiscoveryInterval: 60 * time.Second,
+				minDiscoveryInterval:     25 * time.Second,
+				currentStatusInterval:    60 * time.Second,
+				minStatusInterval:        12 * time.Second,
+			},
+			wantDiscovery:       25 * time.Second,
+			wantStatus:          12 * time.Second,
+			wantUpdateDiscovery: true,
+			wantUpdateStatus:    true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			schedule := materializeMachineRuntimeSchedule(test.baseConfig, test.options)
+			if schedule.discoveryInterval != test.wantDiscovery || schedule.statusInterval != test.wantStatus {
+				t.Fatalf("expected discovery=%s status=%s, got discovery=%s status=%s", test.wantDiscovery, test.wantStatus, schedule.discoveryInterval, schedule.statusInterval)
+			}
+			if schedule.updateDiscovery != test.wantUpdateDiscovery || schedule.updateStatus != test.wantUpdateStatus {
+				t.Fatalf("expected update discovery=%v status=%v, got discovery=%v status=%v", test.wantUpdateDiscovery, test.wantUpdateStatus, schedule.updateDiscovery, schedule.updateStatus)
+			}
+		})
+	}
+}
+
 func TestSupervisorStartAppliesBaseConfigPullInterval(t *testing.T) {
 	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
 		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),

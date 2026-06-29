@@ -101,6 +101,33 @@ func TestNormalizeBaseConfigInterval(t *testing.T) {
 	}
 }
 
+func TestMaterializeControllerRuntimeSchedule(t *testing.T) {
+	tests := []struct {
+		name     string
+		local    int
+		base     *api.BaseConfig
+		wantPull time.Duration
+		wantPush time.Duration
+	}{
+		{name: "no base config uses local defaults", local: 60, wantPull: 60 * time.Second, wantPush: 60 * time.Second},
+		{name: "missing base config intervals use local defaults", local: 60, base: apiBaseConfig(0, 0), wantPull: 60 * time.Second, wantPush: 60 * time.Second},
+		{name: "negative base config intervals use local defaults", local: 60, base: apiBaseConfig(-1, -1), wantPull: 60 * time.Second, wantPush: 60 * time.Second},
+		{name: "base config intervals override local defaults", local: 60, base: apiBaseConfig(15, 45), wantPull: 45 * time.Second, wantPush: 15 * time.Second},
+		{name: "base config intervals keep existing clamps", local: 60, base: apiBaseConfig(3, 4), wantPull: minBaseConfigPullInterval * time.Second, wantPush: minBaseConfigPushInterval * time.Second},
+		{name: "partial pull override preserves local push", local: 60, base: apiBaseConfig(0, 45), wantPull: 45 * time.Second, wantPush: 60 * time.Second},
+		{name: "partial push override preserves local pull", local: 60, base: apiBaseConfig(15, 0), wantPull: 60 * time.Second, wantPush: 15 * time.Second},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			schedule := materializeControllerRuntimeSchedule(test.local, test.base)
+			if schedule.pullInterval != test.wantPull || schedule.pushInterval != test.wantPush {
+				t.Fatalf("expected pull=%s push=%s, got pull=%s push=%s", test.wantPull, test.wantPush, schedule.pullInterval, schedule.pushInterval)
+			}
+		})
+	}
+}
+
 func TestControllerApplyBaseConfigStartsAndReplacesIntervals(t *testing.T) {
 	created := make([]*recordingPeriodic, 0)
 	controller := &Controller{
