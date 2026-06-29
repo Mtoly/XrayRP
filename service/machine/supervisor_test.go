@@ -2,6 +2,7 @@ package machine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -66,6 +67,16 @@ type fakeMachineStatusReporter struct {
 
 func (r *fakeMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
 	r.statuses = append(r.statuses, status)
+	return r.err
+}
+
+type channelMachineStatusReporter struct {
+	statuses chan api.MachineStatus
+	err      error
+}
+
+func (r *channelMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
+	r.statuses <- status
 	return r.err
 }
 
@@ -823,6 +834,134 @@ func TestSupervisorReportsMachineStatus(t *testing.T) {
 	if reporter.statuses[0] != status {
 		t.Fatalf("unexpected machine status: %#v", reporter.statuses[0])
 	}
+}
+
+func TestSupervisorReportsPartialMachineStatusAfterCollectorError(t *testing.T) {
+	collectorErr := errors.New("collect failed")
+	status := api.MachineStatus{CPU: 12.3, MemTotal: 1000, MemUsed: 500, DiskTotal: 2000, DiskUsed: 1000, NetInSpeed: -1, NetOutSpeed: -1}
+	reporter := &fakeMachineStatusReporter{}
+	supervisor := &Supervisor{config: SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter: reporter,
+			Collector: func() (api.MachineStatus, error) {
+				return status, collectorErr
+			},
+		},
+	}}
+
+	supervisor.reportMachineStatus()
+
+	if len(reporter.statuses) != 1 {
+		t.Fatalf("expected one machine status report, got %d", len(reporter.statuses))
+	}
+	if reporter.statuses[0] != status {
+		t.Fatalf("expected partial status to be reported, got %#v", reporter.statuses[0])
+	}
+}
+
+func TestSupervisorContinuesStatusLoopAfterReporterError(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buffer)
+	logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true})
+	reporter := &channelMachineStatusReporter{
+		statuses: make(chan api.MachineStatus, 4),
+		err:      errors.New("report failed"),
+	}
+	collectorCalls := make(chan struct{}, 4)
+	nextStatus := api.MachineStatus{CPU: 1, NetInSpeed: -1, NetOutSpeed: -1}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter: reporter,
+			Collector: func() (api.MachineStatus, error) {
+				collectorCalls <- struct{}{}
+				status := nextStatus
+				nextStatus.CPU++
+				return status, nil
+			},
+			StatusInterval:    10 * time.Millisecond,
+			MinStatusInterval: 10 * time.Millisecond,
+		},
+		Logger: logrus.NewEntry(logger),
+	}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	defer supervisor.Close()
+
+	first := receiveMachineStatus(t, reporter.statuses)
+	second := receiveMachineStatus(t, reporter.statuses)
+	if first.CPU != 1 || second.CPU != 2 {
+		t.Fatalf("expected status loop to continue after reporter errors, got first=%#v second=%#v", first, second)
+	}
+	if len(collectorCalls) < 2 {
+		t.Fatalf("expected at least two collector calls, got %d", len(collectorCalls))
+	}
+	if !strings.Contains(buffer.String(), "machine supervisor operation failed") {
+		t.Fatalf("expected reporter error to be logged, got %q", buffer.String())
+	}
+}
+
+func TestSupervisorStatusLoopDoesNotRunDiscovery(t *testing.T) {
+	reporter := &channelMachineStatusReporter{statuses: make(chan api.MachineStatus, 4)}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	service := &fakeService{}
+	factory.services[1] = service
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		DiscoveryInterval:    time.Hour,
+		MinDiscoveryInterval: time.Hour,
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter: reporter,
+			Collector: func() (api.MachineStatus, error) {
+				return api.MachineStatus{CPU: 1, NetInSpeed: -1, NetOutSpeed: -1}, nil
+			},
+			StatusInterval:    10 * time.Millisecond,
+			MinStatusInterval: 10 * time.Millisecond,
+		},
+	}, discoverer, factory.build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	if err := supervisor.startInitial(); err != nil {
+		t.Fatalf("startInitial returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go supervisor.runStatus(ctx, done, 10*time.Millisecond)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	_ = receiveMachineStatus(t, reporter.statuses)
+	_ = receiveMachineStatus(t, reporter.statuses)
+	if discoverer.calls != 1 {
+		t.Fatalf("expected status loop not to run discovery, got %d discovery calls", discoverer.calls)
+	}
+	if service.starts != 1 || service.closes != 0 {
+		t.Fatalf("expected node service lifecycle unchanged, start=%d close=%d", service.starts, service.closes)
+	}
+}
+
+func receiveMachineStatus(t *testing.T, statuses <-chan api.MachineStatus) api.MachineStatus {
+	t.Helper()
+	select {
+	case status := <-statuses:
+		return status
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for machine status report")
+	}
+	return api.MachineStatus{}
 }
 
 func TestSupervisorPeriodicAppliesBaseConfigPullInterval(t *testing.T) {

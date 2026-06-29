@@ -20,6 +20,13 @@ var (
 	netSpeedPrevSent uint64
 	netSpeedPrevTime time.Time
 	netSpeedHasBase  bool
+
+	cpuPercentFunc    = cpu.Percent
+	virtualMemoryFunc = mem.VirtualMemory
+	swapMemoryFunc    = mem.SwapMemory
+	diskUsageFunc     = disk.Usage
+	netIOCountersFunc = netio.IOCounters
+	nowFunc           = time.Now
 )
 
 // GetSystemInfo get the system info of a given periodic
@@ -68,14 +75,14 @@ func GetMachineStatus() (api.MachineStatus, error) {
 	var status api.MachineStatus
 	errorString := ""
 
-	cpuPercent, err := cpu.Percent(0, false)
+	cpuPercent, err := cpuPercentFunc(0, false)
 	if len(cpuPercent) > 0 && err == nil {
 		status.CPU = cpuPercent[0]
 	} else {
 		errorString += fmt.Sprintf("get cpu usage failed: %s ", err)
 	}
 
-	memUsage, err := mem.VirtualMemory()
+	memUsage, err := virtualMemoryFunc()
 	if err != nil {
 		errorString += fmt.Sprintf("get mem usage failed: %s ", err)
 	} else {
@@ -83,7 +90,7 @@ func GetMachineStatus() (api.MachineStatus, error) {
 		status.MemUsed = memUsage.Used
 	}
 
-	swapUsage, err := mem.SwapMemory()
+	swapUsage, err := swapMemoryFunc()
 	if err != nil {
 		errorString += fmt.Sprintf("get swap usage failed: %s ", err)
 	} else {
@@ -91,7 +98,7 @@ func GetMachineStatus() (api.MachineStatus, error) {
 		status.SwapUsed = swapUsage.Used
 	}
 
-	diskUsage, err := disk.Usage("/")
+	diskUsage, err := diskUsageFunc("/")
 	if err != nil {
 		errorString += fmt.Sprintf("get disk usage failed: %s ", err)
 	} else {
@@ -118,7 +125,7 @@ func skipNetInterface(name string) bool {
 }
 
 func collectNetSpeed() (float64, float64) {
-	counters, err := netio.IOCounters(true)
+	counters, err := netIOCountersFunc(true)
 	if err != nil {
 		return -1, -1
 	}
@@ -132,7 +139,7 @@ func collectNetSpeed() (float64, float64) {
 		totalSent += counter.BytesSent
 	}
 
-	now := time.Now()
+	now := nowFunc()
 	netSpeedMu.Lock()
 	defer netSpeedMu.Unlock()
 
