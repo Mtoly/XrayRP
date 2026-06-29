@@ -242,6 +242,10 @@ func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
 	if err != nil {
 		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: %w", err)
 	}
+	return materializeDiscoverySnapshot(response)
+}
+
+func materializeDiscoverySnapshot(response *newV2board.MachineNodesResponse) (discoverySnapshot, error) {
 	if response == nil {
 		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: empty response")
 	}

@@ -34,6 +34,22 @@ func buildMachineReportingConfig(config newV2board.MachineDiscoveryConfig) machi
 	}
 }
 
+func buildMachineDiscoveryConfig(machineConfig *MachineConfig) newV2board.MachineDiscoveryConfig {
+	if machineConfig == nil {
+		return newV2board.MachineDiscoveryConfig{}
+	}
+	return newV2board.MachineDiscoveryConfig{
+		APIHost:   machineConfig.ApiHost,
+		MachineID: machineConfig.MachineID,
+		Token:     machineConfig.Token,
+		Timeout:   time.Duration(machineConfig.Timeout) * time.Second,
+	}
+}
+
+func buildMachineDiscoverer(config newV2board.MachineDiscoveryConfig) machine.NodeDiscoverer {
+	return &machine.NewV2boardDiscoverer{Config: config}
+}
+
 func machineModeEnabled(config *Config) bool {
 	return config != nil && config.MachineConfig != nil && config.MachineConfig.Enable
 }
@@ -93,13 +109,8 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		return nil, err
 	}
 
-	discoveryConfig := newV2board.MachineDiscoveryConfig{
-		APIHost:   mc.ApiHost,
-		MachineID: mc.MachineID,
-		Token:     mc.Token,
-		Timeout:   time.Duration(mc.Timeout) * time.Second,
-	}
-	discoverer := &machine.NewV2boardDiscoverer{Config: discoveryConfig}
+	discoveryConfig := buildMachineDiscoveryConfig(mc)
+	discoverer := buildMachineDiscoverer(discoveryConfig)
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
 		return p.buildMachineRuntimeNodeService(server, machineRuntimeNodePlan{
 			machineConfig:    mc,

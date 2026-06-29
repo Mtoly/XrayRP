@@ -319,6 +319,48 @@ func machineNodesResponseWithBaseConfig(baseConfig api.BaseConfig, nodes ...newV
 	return &newV2board.MachineNodesResponse{Nodes: nodes, BaseConfig: baseConfig}
 }
 
+func TestMaterializeDiscoverySnapshotPreservesNormalizedBindingsAndBaseConfig(t *testing.T) {
+	response := machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45, PushInterval: 15},
+		newV2board.MachineNode{ID: 2, Type: "trojan", Name: "second"},
+		newV2board.MachineNode{ID: 1, Type: " Vless ", Name: " first "},
+	)
+
+	snapshot, err := materializeDiscoverySnapshot(response)
+	if err != nil {
+		t.Fatalf("materializeDiscoverySnapshot returned error: %v", err)
+	}
+	if snapshot.baseConfig != response.BaseConfig {
+		t.Fatalf("expected base_config %#v, got %#v", response.BaseConfig, snapshot.baseConfig)
+	}
+	assertNodeBindingsEqual(t, "snapshot", snapshot.bindings, []NodeBinding{
+		{NodeID: 1, NodeType: "Vless", Name: " first "},
+		{NodeID: 2, NodeType: "trojan", Name: "second"},
+	})
+}
+
+func TestMaterializeDiscoverySnapshotRejectsInvalidResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *newV2board.MachineNodesResponse
+		want     string
+	}{
+		{name: "nil response", want: "empty response"},
+		{name: "invalid binding", response: machineNodesResponse(newV2board.MachineNode{ID: 0, Type: "vless"}), want: "normalize machine node bindings"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := materializeDiscoverySnapshot(test.response)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestSupervisorStartSkipsBuildFailedNodeAndKeepsHealthyServices(t *testing.T) {
 	buildErr := fmt.Errorf("build failed")
 	first := &fakeService{}

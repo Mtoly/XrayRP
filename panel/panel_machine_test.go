@@ -181,6 +181,46 @@ func TestBuildMachineStatusReporterUsesSameMachineDiscoveryConfig(t *testing.T) 
 	}
 }
 
+func TestBuildMachineDiscoveryConfigPreservesMachineConfigFields(t *testing.T) {
+	machineConfig := &MachineConfig{
+		ApiHost:   " https://panel.example.com ",
+		MachineID: 42,
+		Token:     " machine-token ",
+		Timeout:   31,
+	}
+
+	discoveryConfig := buildMachineDiscoveryConfig(machineConfig)
+	if discoveryConfig.APIHost != machineConfig.ApiHost {
+		t.Fatalf("expected APIHost %q, got %q", machineConfig.ApiHost, discoveryConfig.APIHost)
+	}
+	if discoveryConfig.MachineID != machineConfig.MachineID {
+		t.Fatalf("expected MachineID %d, got %d", machineConfig.MachineID, discoveryConfig.MachineID)
+	}
+	if discoveryConfig.Token != machineConfig.Token {
+		t.Fatalf("expected Token %q, got %q", machineConfig.Token, discoveryConfig.Token)
+	}
+	if discoveryConfig.Timeout != 31*time.Second {
+		t.Fatalf("expected Timeout 31s, got %s", discoveryConfig.Timeout)
+	}
+}
+
+func TestBuildMachineDiscovererUsesNewV2boardDiscoverer(t *testing.T) {
+	discoveryConfig := newV2board.MachineDiscoveryConfig{
+		APIHost:   "https://panel.example.com",
+		MachineID: 7,
+		Token:     "machine-token",
+		Timeout:   3 * time.Second,
+	}
+
+	discoverer, ok := buildMachineDiscoverer(discoveryConfig).(*machine.NewV2boardDiscoverer)
+	if !ok {
+		t.Fatalf("expected newV2board machine discoverer, got %T", discoverer)
+	}
+	if discoverer.Config != discoveryConfig {
+		t.Fatalf("expected discoverer config %#v, got %#v", discoveryConfig, discoverer.Config)
+	}
+}
+
 func TestBuildMachineNodeAPIConfigIncludesMachineID(t *testing.T) {
 	machineConfig := &MachineConfig{
 		ApiHost:   " https://panel.example.com ",
