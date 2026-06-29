@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
@@ -279,6 +281,152 @@ func TestApplyPanelCertConfigUsesDNSOnlyWhenPanelProvidesDNSFields(t *testing.T)
 		t.Fatalf("unexpected DNS cert config: %#v", certConfig)
 	}
 }
+
+func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(t *testing.T) {
+	panel := New(&Config{})
+	machineConfig := &MachineConfig{
+		PanelType: "NewV2board",
+		ApiHost:   "https://panel.example.com",
+		MachineID: 42,
+		Token:     "machine-token",
+		Timeout:   31,
+		ControllerConfig: &controller.Config{
+			UpdatePeriodic: 77,
+		},
+	}
+	binding := machine.NodeBinding{NodeID: 9, NodeType: "Vless"}
+	client := &machineRuntimeNodeTestAPI{clientInfo: api.ClientInfo{APIHost: machineConfig.ApiHost, NodeID: binding.NodeID, NodeType: binding.NodeType}}
+	var gotAPIConfig *api.Config
+	var materializedAPI api.API
+	var materializedControllerConfig *controller.Config
+	var materializedLogger *log.Entry
+
+	runtimeNode, err := panel.materializeMachineRuntimeNode(machineRuntimeNodePlan{
+		machineConfig:    machineConfig,
+		binding:          binding,
+		showErrorDetails: true,
+		newAPIClient: func(config *api.Config) api.API {
+			gotAPIConfig = config
+			return client
+		},
+		materializeCertConfig: func(apiClient api.API, controllerConfig *controller.Config, logger *log.Entry) {
+			materializedAPI = apiClient
+			materializedControllerConfig = controllerConfig
+			materializedLogger = logger
+			controllerConfig.CertConfig = &mylego.CertConfig{CertMode: "file", CertFile: "/panel/cert.crt", KeyFile: "/panel/cert.key"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("materialize machine runtime node: %v", err)
+	}
+	if runtimeNode == nil {
+		t.Fatal("expected runtime node")
+	}
+	if gotAPIConfig == nil {
+		t.Fatal("expected API config to be passed to client factory")
+	}
+	if gotAPIConfig.APIHost != machineConfig.ApiHost || gotAPIConfig.Key != machineConfig.Token || gotAPIConfig.MachineID != machineConfig.MachineID || gotAPIConfig.Timeout != machineConfig.Timeout {
+		t.Fatalf("unexpected API config: %#v", gotAPIConfig)
+	}
+	if gotAPIConfig.NodeID != binding.NodeID || gotAPIConfig.NodeType != binding.NodeType {
+		t.Fatalf("expected binding fields in API config, got %#v", gotAPIConfig)
+	}
+	if runtimeNode.apiClient != client || materializedAPI != client {
+		t.Fatalf("expected raw API client without shared WS wrapper, got runtime=%T materialized=%T", runtimeNode.apiClient, materializedAPI)
+	}
+	if runtimeNode.controllerConfig == nil || materializedControllerConfig != runtimeNode.controllerConfig {
+		t.Fatal("expected materialized controller config to be used by runtime node")
+	}
+	if runtimeNode.controllerConfig.UpdatePeriodic != machineConfig.ControllerConfig.UpdatePeriodic {
+		t.Fatalf("expected UpdatePeriodic override %d, got %d", machineConfig.ControllerConfig.UpdatePeriodic, runtimeNode.controllerConfig.UpdatePeriodic)
+	}
+	if !runtimeNode.controllerConfig.ShowErrorDetails {
+		t.Fatal("expected ShowErrorDetails to be materialized")
+	}
+	if runtimeNode.controllerConfig == machineConfig.ControllerConfig {
+		t.Fatal("expected controller config to be cloned")
+	}
+	if runtimeNode.controllerConfig.CertConfig == nil || runtimeNode.controllerConfig.CertConfig.CertFile != "/panel/cert.crt" || runtimeNode.controllerConfig.CertConfig.KeyFile != "/panel/cert.key" {
+		t.Fatalf("expected cert materializer to run before service construction, got %#v", runtimeNode.controllerConfig.CertConfig)
+	}
+	if materializedLogger != panel.logger {
+		t.Fatal("expected panel logger to be passed to cert materializer")
+	}
+}
+
+func TestMachineRuntimeNodePlanUseSharedWSRuntime(t *testing.T) {
+	sharedWS := machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{})
+	tests := []struct {
+		name     string
+		plan     machineRuntimeNodePlan
+		expected bool
+	}{
+		{
+			name:     "shared ws nil",
+			plan:     machineRuntimeNodePlan{binding: machine.NodeBinding{NodeType: "Vless"}},
+			expected: false,
+		},
+		{
+			name:     "shared ws supported vless",
+			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "Vless"}},
+			expected: true,
+		},
+		{
+			name:     "shared ws supported vmess case insensitive",
+			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "vmess"}},
+			expected: true,
+		},
+		{
+			name:     "hysteria2 falls back",
+			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "Hysteria2"}},
+			expected: false,
+		},
+		{
+			name:     "tuic falls back",
+			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "Tuic"}},
+			expected: false,
+		},
+		{
+			name:     "anytls falls back",
+			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "AnyTLS"}},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.plan.useSharedWSRuntime(); got != test.expected {
+				t.Fatalf("expected useSharedWSRuntime=%v, got %v", test.expected, got)
+			}
+		})
+	}
+}
+
+type machineRuntimeNodeTestAPI struct {
+	clientInfo api.ClientInfo
+}
+
+func (a *machineRuntimeNodeTestAPI) GetNodeInfo() (*api.NodeInfo, error) { return &api.NodeInfo{}, nil }
+func (a *machineRuntimeNodeTestAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return &api.XrayRCertConfig{}, nil
+}
+func (a *machineRuntimeNodeTestAPI) GetUserList() (*[]api.UserInfo, error) {
+	users := []api.UserInfo{}
+	return &users, nil
+}
+func (a *machineRuntimeNodeTestAPI) GetAliveList() (map[int][]string, error) { return nil, nil }
+func (a *machineRuntimeNodeTestAPI) ReportNodeStatus(*api.NodeStatus) error  { return nil }
+func (a *machineRuntimeNodeTestAPI) ReportNodeOnlineUsers(*[]api.OnlineUser) error {
+	return nil
+}
+func (a *machineRuntimeNodeTestAPI) ReportUserTraffic(*[]api.UserTraffic) error { return nil }
+func (a *machineRuntimeNodeTestAPI) Describe() api.ClientInfo                   { return a.clientInfo }
+func (a *machineRuntimeNodeTestAPI) GetNodeRule() (*[]api.DetectRule, error) {
+	rules := []api.DetectRule{}
+	return &rules, nil
+}
+func (a *machineRuntimeNodeTestAPI) ReportIllegal(*[]api.DetectResult) error { return nil }
+func (a *machineRuntimeNodeTestAPI) Debug()                                  {}
 
 func validMachineModeConfig() *Config {
 	return &Config{

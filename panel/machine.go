@@ -91,28 +91,12 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 	}
 	discoverer := &machine.NewV2boardDiscoverer{Config: discoveryConfig}
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
-		apiConfig := buildMachineNodeAPIConfig(mc, binding)
-		var apiClient api.API = newV2board.New(apiConfig)
-		if sharedWS != nil {
-			apiClient = machine.WrapAPIWithReporter(apiClient, binding.NodeID, sharedWS)
-		}
-
-		controllerConfig, err := buildMachineNodeControllerConfigWithOptions(mc.ControllerConfig, runtimeControllerConfigOptions{
+		return p.buildMachineRuntimeNodeService(server, machineRuntimeNodePlan{
+			machineConfig:    mc,
+			binding:          binding,
+			sharedWS:         sharedWS,
 			showErrorDetails: plan.showErrorDetails,
-			clone:            true,
 		})
-		if err != nil {
-			return nil, err
-		}
-		materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
-
-		if sharedWS != nil && machineSharedWSSupportedNodeType(binding.NodeType) {
-			controllerService := controller.New(server, apiClient, controllerConfig, mc.PanelType)
-			controllerService.SetWSEventRuntimeFactory(sharedWS.NewNodeRuntimeFactory(binding.NodeID))
-			return controllerService, nil
-		}
-
-		return p.buildNodeService(server, apiClient, controllerConfig, mc.PanelType)
 	}
 
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
@@ -130,6 +114,73 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		return machine.NewRuntimeService(supervisor, sharedWS), nil
 	}
 	return supervisor, nil
+}
+
+type machineRuntimeNodePlan struct {
+	machineConfig         *MachineConfig
+	binding               machine.NodeBinding
+	sharedWS              *machine.SharedWSRuntime
+	showErrorDetails      bool
+	newAPIClient          func(*api.Config) api.API
+	materializeCertConfig func(api.API, *controller.Config, *log.Entry)
+}
+
+type machineRuntimeNode struct {
+	apiClient        api.API
+	controllerConfig *controller.Config
+}
+
+func (plan machineRuntimeNodePlan) useSharedWSRuntime() bool {
+	return plan.sharedWS != nil && machineSharedWSSupportedNodeType(plan.binding.NodeType)
+}
+
+func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, plan machineRuntimeNodePlan) (service.Service, error) {
+	runtimeNode, err := p.materializeMachineRuntimeNode(plan)
+	if err != nil {
+		return nil, err
+	}
+
+	machineConfig := plan.machineConfig
+	if plan.useSharedWSRuntime() {
+		controllerService := controller.New(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
+		controllerService.SetWSEventRuntimeFactory(plan.sharedWS.NewNodeRuntimeFactory(plan.binding.NodeID))
+		return controllerService, nil
+	}
+
+	return p.buildNodeService(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
+}
+
+func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*machineRuntimeNode, error) {
+	machineConfig := plan.machineConfig
+	apiConfig := buildMachineNodeAPIConfig(machineConfig, plan.binding)
+	newAPIClient := plan.newAPIClient
+	if newAPIClient == nil {
+		newAPIClient = func(apiConfig *api.Config) api.API {
+			return newV2board.New(apiConfig)
+		}
+	}
+	var apiClient api.API = newAPIClient(apiConfig)
+	if plan.sharedWS != nil {
+		apiClient = machine.WrapAPIWithReporter(apiClient, plan.binding.NodeID, plan.sharedWS)
+	}
+
+	controllerConfig, err := buildMachineNodeControllerConfigWithOptions(machineConfig.ControllerConfig, runtimeControllerConfigOptions{
+		showErrorDetails: plan.showErrorDetails,
+		clone:            true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	materializeCertConfig := plan.materializeCertConfig
+	if materializeCertConfig == nil {
+		materializeCertConfig = materializeRuntimeCertConfig
+	}
+	materializeCertConfig(apiClient, controllerConfig, p.logger)
+
+	return &machineRuntimeNode{
+		apiClient:        apiClient,
+		controllerConfig: controllerConfig,
+	}, nil
 }
 
 func buildMachineNodeAPIConfig(machineConfig *MachineConfig, binding machine.NodeBinding) *api.Config {
