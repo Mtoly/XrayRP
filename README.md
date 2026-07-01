@@ -90,8 +90,25 @@ Xboard / NewV2board 相关的 WebSocket 双通道同步、机器/服务器管理
 ### 一键安装
 
 ```
-wget -N https://raw.githubusercontent.com/Mtoly/XrayRP-release/master/install.sh && bash install.sh
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
 ```
+
+### Xboard Machine Mode 一键安装
+
+此脚本只生成 XrayRP `MachineConfig` 并安装/启动 XrayR 服务，不会在 Xboard 中创建或注册机器。请先在 Xboard 创建/绑定机器，并复制对应的 `MachineID` 和 `Token`。
+
+`MachineConfig` 与静态 `Nodes` 配置互斥。启用机器模式时，`/etc/XrayR/config.yml` 不会生成静态 `Nodes`。
+
+```
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
+  --api-host https://panel.example.com \
+  --machine-id 1 \
+  --token "machine-token" \
+  --panel-type NewV2board \
+  --enable-ws
+```
+
+如果 `/etc/XrayR/config.yml` 已存在，脚本默认不会覆盖；确认要覆盖时添加 `--force`。
 
 ### 使用Docker部署软件
 

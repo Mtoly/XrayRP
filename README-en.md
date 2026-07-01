@@ -71,8 +71,25 @@ This project is just my personal learning and development and maintenance. I do 
 ### 1-Click installation
 
 ```
-wget -N https://raw.githubusercontent.com/Mtoly/XrayRP-release/master/install.sh && bash install.sh
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
 ```
+
+### Xboard Machine Mode 1-click installation
+
+This script only writes the XrayRP `MachineConfig` and installs/starts the XrayR service. It does not create or register a machine in Xboard. Create/bind the machine in Xboard first, then copy the `MachineID` and `Token`.
+
+`MachineConfig` is mutually exclusive with static `Nodes`. When machine mode is enabled, `/etc/XrayR/config.yml` will not generate static `Nodes`.
+
+```
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
+  --api-host https://panel.example.com \
+  --machine-id 1 \
+  --token "machine-token" \
+  --panel-type NewV2board \
+  --enable-ws
+```
+
+If `/etc/XrayR/config.yml` already exists, the script will not overwrite it by default. Add `--force` only when you want to overwrite the existing config.
 
 ### Docker
 
