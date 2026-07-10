@@ -50,9 +50,15 @@ func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
 }
 
 func TestBuildStaticNodeServicesRejectsUnsupportedPanelType(t *testing.T) {
-	panel := New(&Config{NodesConfig: []*NodesConfig{{PanelType: "UnsupportedPanel"}}})
+	panel := New(&Config{})
+	plan := runtimeConfigPlan{
+		mode: runtimeConfigModeStatic,
+		staticNodes: []staticRuntimeNodePlan{{
+			panelType: "UnsupportedPanel",
+		}},
+	}
 
-	services, err := panel.buildStaticNodeServices(nil)
+	services, err := panel.buildStaticNodeServices(nil, plan)
 	if err == nil {
 		t.Fatal("expected unsupported panel type error")
 	}

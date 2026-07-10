@@ -2,6 +2,7 @@ package controller
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -16,6 +17,19 @@ type stubWSEndpointDiscoverer struct {
 func (d *stubWSEndpointDiscoverer) DiscoverWSEndpoint() (string, error) {
 	d.calls++
 	return d.endpoint, d.err
+}
+
+func TestResolveWSEndpointRejectsMissingConfigBeforeDiscoveryValidation(t *testing.T) {
+	t.Parallel()
+
+	discoverer := &stubWSEndpointDiscoverer{endpoint: "wss://panel.example/ws"}
+	endpoint, err := resolveWSEndpoint(discoverer, nil, &WebSocketConfig{})
+	if err == nil {
+		t.Fatalf("expected missing websocket config to fail, got endpoint %q", endpoint)
+	}
+	if endpoint != "" {
+		t.Fatalf("expected no endpoint with missing websocket config, got %q", endpoint)
+	}
 }
 
 func TestResolveWSEndpointExplicitEndpointWins(t *testing.T) {
@@ -57,6 +71,86 @@ func TestResolveWSEndpointUsesDiscoveryWhenNoExplicitEndpoint(t *testing.T) {
 		t.Fatalf("expected discovery to be called once, got %d", discoverer.calls)
 	}
 	want := "wss://panel.example/ws?node_id=7&node_type=vless&token=secret"
+	if endpoint != want {
+		t.Fatalf("unexpected endpoint: got %q want %q", endpoint, want)
+	}
+}
+
+func TestResolveWSEndpointRejectsCrossOriginDiscoveredEndpoint(t *testing.T) {
+	t.Parallel()
+
+	discoverer := &stubWSEndpointDiscoverer{endpoint: "wss://attacker.example/ws"}
+	endpoint, err := resolveWSEndpoint(discoverer, &api.WSConfig{
+		APIHost:  "https://panel.example",
+		NodeID:   7,
+		NodeType: "vless",
+		Key:      "secret-token",
+	}, &WebSocketConfig{})
+	if err == nil {
+		t.Fatalf("expected cross-origin discovery to fail, got endpoint %q", endpoint)
+	}
+	if endpoint != "" {
+		t.Fatalf("expected no endpoint on validation failure, got %q", endpoint)
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("validation error leaked token: %v", err)
+	}
+}
+
+func TestResolveWSEndpointRejectsHTTPSDowngradeFromDiscovery(t *testing.T) {
+	t.Parallel()
+
+	discoverer := &stubWSEndpointDiscoverer{endpoint: "ws://panel.example/ws"}
+	endpoint, err := resolveWSEndpoint(discoverer, &api.WSConfig{
+		APIHost:  "https://panel.example",
+		NodeID:   7,
+		NodeType: "vless",
+		Key:      "secret-token",
+	}, &WebSocketConfig{})
+	if err == nil {
+		t.Fatalf("expected HTTPS downgrade discovery to fail, got endpoint %q", endpoint)
+	}
+	if endpoint != "" {
+		t.Fatalf("expected no endpoint on validation failure, got %q", endpoint)
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("validation error leaked token: %v", err)
+	}
+}
+
+func TestResolveWSEndpointAllowsSameOriginWSSDiscovery(t *testing.T) {
+	t.Parallel()
+
+	discoverer := &stubWSEndpointDiscoverer{endpoint: "wss://PANEL.EXAMPLE:443/ws"}
+	endpoint, err := resolveWSEndpoint(discoverer, &api.WSConfig{
+		APIHost:  "https://panel.example",
+		NodeID:   7,
+		NodeType: "vless",
+		Key:      "secret",
+	}, &WebSocketConfig{})
+	if err != nil {
+		t.Fatalf("resolveWSEndpoint returned error: %v", err)
+	}
+	want := "wss://PANEL.EXAMPLE:443/ws?node_id=7&node_type=vless&token=secret"
+	if endpoint != want {
+		t.Fatalf("unexpected endpoint: got %q want %q", endpoint, want)
+	}
+}
+
+func TestResolveWSEndpointAllowsRelativeDiscovery(t *testing.T) {
+	t.Parallel()
+
+	discoverer := &stubWSEndpointDiscoverer{endpoint: "/custom/ws"}
+	endpoint, err := resolveWSEndpoint(discoverer, &api.WSConfig{
+		APIHost:  "https://panel.example/base/",
+		NodeID:   7,
+		NodeType: "vless",
+		Key:      "secret",
+	}, &WebSocketConfig{})
+	if err != nil {
+		t.Fatalf("resolveWSEndpoint returned error: %v", err)
+	}
+	want := "wss://panel.example/custom/ws?node_id=7&node_type=vless&token=secret"
 	if endpoint != want {
 		t.Fatalf("unexpected endpoint: got %q want %q", endpoint, want)
 	}

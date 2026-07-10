@@ -397,6 +397,37 @@ func TestWSClient_InvalidMessageDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestWSClient_RejectsOversizedInboundMessage(t *testing.T) {
+	t.Parallel()
+
+	oversizedMessage := []byte(`{"event":"ping","payload":{"padding":"` + strings.Repeat("x", 1<<20) + `"}}`)
+	server, connected := newMockWSServer(t, func(conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, oversizedMessage); err != nil {
+			return
+		}
+		deadline := time.Now().Add(time.Second)
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bye"), deadline)
+	})
+
+	client, err := newV2board.NewWSClient(wsURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewWSClient returned error: %v", err)
+	}
+	defer client.Close()
+
+	waitForConnection(t, connected)
+
+	transportErr := receiveError(t, client.Errors())
+	if !errors.Is(transportErr, newV2board.ErrWSClientTransport) {
+		t.Fatalf("expected ErrWSClientTransport, got %v", transportErr)
+	}
+
+	waitDone(t, client.Done())
+	for event := range client.Events() {
+		t.Fatalf("unexpected event from oversized message: %#v", event)
+	}
+}
+
 func TestWSClient_ReportsTransportError(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,77 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+func TestNodeRuntimeStateUpdatePreservesOneGeneration(t *testing.T) {
+	controller := &Controller{}
+	node := &api.NodeInfo{NodeID: 1, NodeType: "Vless"}
+	users := &[]api.UserInfo{{UID: 1, Email: "user@example.test"}}
+	controller.commitRuntimeState(nodeRuntimeState{
+		nodeInfo: node,
+		tag:      "node-tag",
+		userList: users,
+	})
+
+	controller.setAppliedRuleState("node-tag", []api.DetectRule{{ID: 3, Pattern: regexp.MustCompile("ads")}})
+
+	snapshot := controller.runtimeStateSnapshot()
+	if snapshot.nodeInfo != node || snapshot.tag != "node-tag" || snapshot.userList != users {
+		t.Fatalf("expected rule update to preserve node generation, got %#v", snapshot)
+	}
+	if snapshot.appliedRuleTag != "node-tag" || len(snapshot.appliedRuleList) != 1 || snapshot.appliedRuleList[0].ID != 3 {
+		t.Fatalf("expected rule update in committed generation, got %#v", snapshot)
+	}
+}
+
+func TestNodeRuntimeStateCommitIsAtomic(t *testing.T) {
+	controller := &Controller{}
+	oldNode := &api.NodeInfo{NodeID: 1, NodeType: "Vless"}
+	oldUsers := &[]api.UserInfo{{UID: 1, Email: "old@example.test"}}
+	controller.commitRuntimeState(nodeRuntimeState{
+		nodeInfo:       oldNode,
+		tag:            "old-tag",
+		userList:       oldUsers,
+		appliedRuleTag: "old-tag",
+		appliedRuleList: []api.DetectRule{{
+			ID:      1,
+			Pattern: regexp.MustCompile("old"),
+		}},
+	})
+
+	nextNode := &api.NodeInfo{NodeID: 2, NodeType: "Trojan"}
+	nextUsers := &[]api.UserInfo{{UID: 2, Email: "new@example.test"}}
+	controller.commitRuntimeState(nodeRuntimeState{
+		nodeInfo:       nextNode,
+		tag:            "new-tag",
+		userList:       nextUsers,
+		appliedRuleTag: "new-tag",
+		appliedRuleList: []api.DetectRule{{
+			ID:      2,
+			Pattern: regexp.MustCompile("new"),
+		}},
+	})
+
+	snapshot := controller.runtimeStateSnapshot()
+	if snapshot.nodeInfo != nextNode || snapshot.tag != "new-tag" || snapshot.userList != nextUsers {
+		t.Fatalf("expected one committed node generation, got %#v", snapshot)
+	}
+	if snapshot.appliedRuleTag != "new-tag" || len(snapshot.appliedRuleList) != 1 || snapshot.appliedRuleList[0].ID != 2 {
+		t.Fatalf("expected matching committed rule generation, got %#v", snapshot)
+	}
+}
+
+func TestNodeRuntimeStateSnapshotRuleListIsIndependent(t *testing.T) {
+	controller := &Controller{}
+	controller.setAppliedRuleState("node-tag", []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("blocked")}})
+
+	snapshot := controller.runtimeStateSnapshot()
+	snapshot.appliedRuleList[0].ID = 99
+
+	next := controller.runtimeStateSnapshot()
+	if next.appliedRuleList[0].ID != 1 {
+		t.Fatalf("expected state snapshot rules to be independent, got %#v", next.appliedRuleList)
+	}
+}
+
 func TestNodeRuntimeStateSnapshot(t *testing.T) {
 	controller := &Controller{}
 	nodeInfo := &api.NodeInfo{NodeID: 42, NodeType: "Vless"}

@@ -168,10 +168,7 @@ func cipherFromString(c string) shadowsocks.CipherType {
 }
 
 func (c *Controller) buildUserTag(user *api.UserInfo) string {
-	c.stateMu.RLock()
-	tag := c.Tag
-	c.stateMu.RUnlock()
-	return c.buildUserTagFrom(*user, tag)
+	return c.buildUserTagFrom(*user, c.runtimeStateSnapshot().tag)
 }
 
 func (c *Controller) buildUserTagFrom(user api.UserInfo, tag string) string {

@@ -200,13 +200,13 @@ func (p *Panel) Start() error {
 
 	var services []service.Service
 	if plan.mode == runtimeConfigModeMachine {
-		supervisor, err := p.buildMachineSupervisor(server)
+		supervisor, err := p.buildMachineSupervisor(server, plan)
 		if err != nil {
 			return err
 		}
 		services = []service.Service{supervisor}
 	} else {
-		services, err = p.buildStaticNodeServices(server)
+		services, err = p.buildStaticNodeServices(server, plan)
 		if err != nil {
 			return err
 		}
@@ -230,11 +230,7 @@ func (p *Panel) Start() error {
 	return nil
 }
 
-func (p *Panel) buildStaticNodeServices(server *core.Instance) ([]service.Service, error) {
-	plan, err := buildRuntimeConfigPlan(p.panelConfig)
-	if err != nil {
-		return nil, err
-	}
+func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
 	if plan.mode != runtimeConfigModeStatic {
 		return nil, fmt.Errorf("static node mode is not enabled")
 	}
@@ -261,7 +257,9 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance) ([]service.Servic
 			return nil, fmt.Errorf("unsupported panel type: %s", nodePlan.panelType)
 		}
 
-		controllerConfig, err := p.buildControllerConfig(nodePlan.controllerConfigTemplate)
+		controllerConfig, err := materializeRuntimeControllerConfig(nodePlan.controllerConfigTemplate, runtimeControllerConfigOptions{
+			showErrorDetails: plan.showErrorDetails,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -326,12 +324,6 @@ func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient api.API
 	default:
 		return controller.New(server, apiClient, controllerConfig, panelType), nil
 	}
-}
-
-func (p *Panel) buildControllerConfig(template *controller.Config) (*controller.Config, error) {
-	return materializeRuntimeControllerConfig(template, runtimeControllerConfigOptions{
-		showErrorDetails: p.panelConfig.ShowErrorDetails(),
-	})
 }
 
 // Close the panel

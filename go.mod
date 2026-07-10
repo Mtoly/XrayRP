@@ -1,6 +1,6 @@
 module github.com/Mtoly/XrayRP
 
-go 1.26.1
+go 1.26.5
 
 require (
 	dario.cat/mergo v1.0.2

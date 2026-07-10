@@ -2,23 +2,64 @@ package controller
 
 import "github.com/Mtoly/XrayRP/api"
 
-func (c *Controller) getStateSnapshot() (nodeInfo *api.NodeInfo, tag string, userList *[]api.UserInfo) {
+type nodeRuntimeState struct {
+	nodeInfo        *api.NodeInfo
+	tag             string
+	userList        *[]api.UserInfo
+	appliedRuleTag  string
+	appliedRuleList []api.DetectRule
+}
+
+func cloneDetectRules(rules []api.DetectRule) []api.DetectRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	cloned := make([]api.DetectRule, len(rules))
+	copy(cloned, rules)
+	return cloned
+}
+
+func cloneNodeRuntimeState(state nodeRuntimeState) nodeRuntimeState {
+	state.appliedRuleList = cloneDetectRules(state.appliedRuleList)
+	return state
+}
+
+func (c *Controller) runtimeStateSnapshot() nodeRuntimeState {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
-	return c.nodeInfo, c.Tag, c.userList
+	return cloneNodeRuntimeState(c.runtimeState)
+}
+
+func (c *Controller) commitRuntimeState(state nodeRuntimeState) {
+	c.stateMu.Lock()
+	c.runtimeState = cloneNodeRuntimeState(state)
+	c.stateMu.Unlock()
+}
+
+func (c *Controller) updateRuntimeState(update func(*nodeRuntimeState)) {
+	c.stateMu.Lock()
+	state := cloneNodeRuntimeState(c.runtimeState)
+	update(&state)
+	c.runtimeState = state
+	c.stateMu.Unlock()
+}
+
+func (c *Controller) getStateSnapshot() (nodeInfo *api.NodeInfo, tag string, userList *[]api.UserInfo) {
+	state := c.runtimeStateSnapshot()
+	return state.nodeInfo, state.tag, state.userList
 }
 
 func (c *Controller) setNodeState(nodeInfo *api.NodeInfo, tag string) {
-	c.stateMu.Lock()
-	c.nodeInfo = nodeInfo
-	c.Tag = tag
-	c.stateMu.Unlock()
+	c.updateRuntimeState(func(state *nodeRuntimeState) {
+		state.nodeInfo = nodeInfo
+		state.tag = tag
+	})
 }
 
 func (c *Controller) setUserList(userList *[]api.UserInfo) {
-	c.stateMu.Lock()
-	c.userList = userList
-	c.stateMu.Unlock()
+	c.updateRuntimeState(func(state *nodeRuntimeState) {
+		state.userList = userList
+	})
 }
 
 func (c *Controller) withStateLock(fn func()) {
@@ -28,40 +69,27 @@ func (c *Controller) withStateLock(fn func()) {
 }
 
 func (c *Controller) getAppliedRuleTag() string {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	return c.appliedRuleTag
+	return c.runtimeStateSnapshot().appliedRuleTag
 }
 
 func (c *Controller) setAppliedRuleState(tag string, rules []api.DetectRule) {
-	c.stateMu.Lock()
-	c.appliedRuleTag = tag
-	if len(rules) == 0 {
-		c.appliedRuleList = nil
-	} else {
-		c.appliedRuleList = make([]api.DetectRule, len(rules))
-		copy(c.appliedRuleList, rules)
-	}
-	c.stateMu.Unlock()
+	c.updateRuntimeState(func(state *nodeRuntimeState) {
+		state.appliedRuleTag = tag
+		state.appliedRuleList = cloneDetectRules(rules)
+	})
 }
 
 func (c *Controller) getAppliedRuleList() []api.DetectRule {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	if len(c.appliedRuleList) == 0 {
-		return nil
-	}
-	rules := make([]api.DetectRule, len(c.appliedRuleList))
-	copy(rules, c.appliedRuleList)
-	return rules
+	return c.runtimeStateSnapshot().appliedRuleList
 }
 
 func (c *Controller) setAppliedRuleList(rules []api.DetectRule) {
-	c.stateMu.RLock()
-	tag := c.appliedRuleTag
-	if tag == "" {
-		tag = c.Tag
-	}
-	c.stateMu.RUnlock()
-	c.setAppliedRuleState(tag, rules)
+	c.updateRuntimeState(func(state *nodeRuntimeState) {
+		tag := state.appliedRuleTag
+		if tag == "" {
+			tag = state.tag
+		}
+		state.appliedRuleTag = tag
+		state.appliedRuleList = cloneDetectRules(rules)
+	})
 }

@@ -87,11 +87,7 @@ func validateMachineModeConfig(config *Config) error {
 	return nil
 }
 
-func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, error) {
-	plan, err := buildRuntimeConfigPlan(p.panelConfig)
-	if err != nil {
-		return nil, err
-	}
+func (p *Panel) buildMachineSupervisor(server *core.Instance, plan runtimeConfigPlan) (service.Service, error) {
 	if plan.mode != runtimeConfigModeMachine {
 		return nil, fmt.Errorf("machine mode is not enabled")
 	}
@@ -124,7 +120,7 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance) (service.Service, 
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
 		MachineStatus:     buildMachineReportingConfig(discoveryConfig),
 		Logger:            p.logger.WithField("service", "machine-supervisor"),
-		ShowErrorDetails:  p.panelConfig.ShowErrorDetails(),
+		ShowErrorDetails:  plan.showErrorDetails,
 	}, discoverer, factory)
 	if err != nil {
 		return nil, err

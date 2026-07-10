@@ -5,16 +5,55 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/outbound"
 
 	"github.com/Mtoly/XrayRP/api"
 )
 
 type runtimeRoutingSelector struct {
-	baseTag     string
-	baseHandler outbound.Handler
-	routePolicy *api.PanelRoutePolicy
-	obm         outbound.Manager
+	baseTag        string
+	baseHandler    outbound.Handler
+	currentWrapper outbound.Handler
+	routePolicy    *api.PanelRoutePolicy
+	obm            outbound.Manager
+}
+
+type managedDataPathHandler interface {
+	outbound.Handler
+	isManagedDataPathWrapper()
+}
+
+type runtimeDispatchDecision struct {
+	handler        outbound.Handler
+	managedHandoff bool
+	rejectReason   string
+}
+
+func (s runtimeRoutingSelector) selectDispatch(ctx context.Context) runtimeDispatchDecision {
+	if inbound := session.InboundFromContext(ctx); inbound != nil {
+		inboundTag := inbound.Tag
+		if inboundTag != "" && inboundTag != s.baseTag && isXrayRManagedTag(inboundTag) {
+			if s.obm != nil {
+				if handler := s.obm.GetHandler(inboundTag); handler != nil {
+					if handler == s.currentWrapper || handler.Tag() != inboundTag {
+						return runtimeDispatchDecision{rejectReason: fmt.Sprintf("unsafe outbound handler for managed inbound tag %q", inboundTag)}
+					}
+					if _, ok := handler.(managedDataPathHandler); !ok {
+						return runtimeDispatchDecision{rejectReason: fmt.Sprintf("managed inbound tag %q is not backed by a data path wrapper", inboundTag)}
+					}
+					return runtimeDispatchDecision{handler: handler, managedHandoff: true}
+				}
+			}
+			return runtimeDispatchDecision{rejectReason: fmt.Sprintf("no outbound handler for managed inbound tag %q", inboundTag)}
+		}
+	}
+
+	handler, err := s.selectPolicyHandler()
+	if err != nil {
+		return runtimeDispatchDecision{rejectReason: err.Error()}
+	}
+	return runtimeDispatchDecision{handler: handler}
 }
 
 func (s runtimeRoutingSelector) resolveTagToHandler(tag string) (outbound.Handler, bool) {
@@ -39,6 +78,10 @@ func (s runtimeRoutingSelector) resolveTagToHandler(tag string) (outbound.Handle
 }
 
 func (s runtimeRoutingSelector) selectHandler(_ context.Context) (outbound.Handler, error) {
+	return s.selectPolicyHandler()
+}
+
+func (s runtimeRoutingSelector) selectPolicyHandler() (outbound.Handler, error) {
 	candidates := []string{s.baseTag}
 	if s.routePolicy != nil && len(s.routePolicy.Outbound.Candidates) > 0 {
 		candidates = append([]string(nil), s.routePolicy.Outbound.Candidates...)

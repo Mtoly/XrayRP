@@ -38,11 +38,7 @@ type Controller struct {
 	clientInfo             api.ClientInfo
 	apiClient              api.API
 	stateMu                sync.RWMutex
-	nodeInfo               *api.NodeInfo
-	Tag                    string
-	userList               *[]api.UserInfo
-	appliedRuleTag         string
-	appliedRuleList        []api.DetectRule
+	runtimeState           nodeRuntimeState
 	syncApplyHooks         syncApplyHooks
 	tasks                  []periodicTask
 	limitedUsers           map[api.UserInfo]LimitInfo
@@ -309,12 +305,18 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 }
 
 func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	if wsConfig == nil {
+		return "", errors.New("controller: websocket config unavailable")
+	}
 	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.Endpoint) != "" {
 		return BuildWSEndpoint(wsConfig, runtimeConfig)
 	}
 
 	if discoverer, ok := apiClient.(api.WSEndpointDiscoverer); ok {
 		if endpoint, err := discoverer.DiscoverWSEndpoint(); err == nil && strings.TrimSpace(endpoint) != "" {
+			if err := validateDiscoveredWSEndpoint(wsConfig.APIHost, endpoint); err != nil {
+				return "", err
+			}
 			derived := WebSocketConfig{}
 			if runtimeConfig != nil {
 				derived = *runtimeConfig
@@ -325,6 +327,57 @@ func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *Web
 	}
 
 	return BuildWSEndpoint(wsConfig, runtimeConfig)
+}
+
+func validateDiscoveredWSEndpoint(apiHost, endpoint string) error {
+	base, err := url.Parse(strings.TrimSpace(apiHost))
+	if err != nil {
+		return fmt.Errorf("controller: parse panel api host: %w", err)
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return errors.New("controller: panel api host must be absolute")
+	}
+
+	discovered, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return fmt.Errorf("controller: parse discovered websocket endpoint: %w", err)
+	}
+	discovered = base.ResolveReference(discovered)
+
+	baseScheme, basePort, err := websocketOrigin(base)
+	if err != nil {
+		return err
+	}
+	discoveredScheme, discoveredPort, err := websocketOrigin(discovered)
+	if err != nil {
+		return err
+	}
+	if baseScheme != discoveredScheme ||
+		!strings.EqualFold(base.Hostname(), discovered.Hostname()) ||
+		basePort != discoveredPort {
+		return errors.New("controller: discovered websocket endpoint must use the panel origin")
+	}
+	return nil
+}
+
+func websocketOrigin(endpoint *url.URL) (scheme, port string, err error) {
+	switch strings.ToLower(endpoint.Scheme) {
+	case "http", "ws":
+		scheme = "ws"
+		port = endpoint.Port()
+		if port == "" {
+			port = "80"
+		}
+	case "https", "wss":
+		scheme = "wss"
+		port = endpoint.Port()
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return "", "", fmt.Errorf("controller: unsupported websocket endpoint scheme %q", endpoint.Scheme)
+	}
+	return scheme, port, nil
 }
 
 func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
@@ -888,13 +941,11 @@ func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {
 }
 
 func (c *Controller) buildNodeTag() string {
-	c.stateMu.RLock()
-	nodeInfo := c.nodeInfo
-	c.stateMu.RUnlock()
-	if nodeInfo == nil {
+	state := c.runtimeStateSnapshot()
+	if state.nodeInfo == nil {
 		return ""
 	}
-	return c.buildNodeTagFrom(nodeInfo)
+	return c.buildNodeTagFrom(state.nodeInfo)
 }
 
 func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error {

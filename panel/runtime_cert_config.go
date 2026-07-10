@@ -28,10 +28,6 @@ func mergeRuntimePanelCertConfig(controllerConfig *controller.Config, panelCert 
 	return applyPanelCertConfig(controllerConfig.CertConfig, panelCert)
 }
 
-func (p *Panel) mergePanelCertConfig(apiClient api.API, controllerConfig *controller.Config) {
-	materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
-}
-
 func panelCertHasConfig(panelCert *api.XrayRCertConfig) bool {
 	if panelCert == nil {
 		return false

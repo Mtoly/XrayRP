@@ -75,6 +75,8 @@ func (w *dataPathWrapper) Tag() string {
 	return w.tag
 }
 
+func (w *dataPathWrapper) isManagedDataPathWrapper() {}
+
 func (w *dataPathWrapper) targetHostFromContext(ctx context.Context) string {
 	outs := session.OutboundsFromContext(ctx)
 	if len(outs) == 0 {
@@ -87,13 +89,25 @@ func (w *dataPathWrapper) targetHostFromContext(ctx context.Context) string {
 	return target.Address.String()
 }
 
-func (w *dataPathWrapper) selectDispatchHandler(ctx context.Context) (outbound.Handler, error) {
+func (w *dataPathWrapper) selectDispatch(ctx context.Context) runtimeDispatchDecision {
 	return runtimeRoutingSelector{
-		baseTag:     w.tag,
-		baseHandler: w.Handler,
-		routePolicy: w.routePolicy,
-		obm:         w.obm,
-	}.selectHandler(ctx)
+		baseTag:        w.tag,
+		baseHandler:    w.Handler,
+		currentWrapper: w,
+		routePolicy:    w.routePolicy,
+		obm:            w.obm,
+	}.selectDispatch(ctx)
+}
+
+func (w *dataPathWrapper) selectDispatchHandler(ctx context.Context) (outbound.Handler, error) {
+	decision := w.selectDispatch(ctx)
+	if decision.rejectReason != "" {
+		return nil, fmt.Errorf("%s", decision.rejectReason)
+	}
+	if decision.handler == nil {
+		return nil, fmt.Errorf("outbound policy selection returned no handler")
+	}
+	return decision.handler, nil
 }
 
 func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
@@ -102,32 +116,27 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 		sess.CanSpliceCopy = 3
 	}
 
-	// --- FIRST: Enforce "same node in, same node out" semantics -------------
-	// This runs on EVERY connection so it must be as fast as possible.
-	if sess := session.InboundFromContext(ctx); sess != nil {
-		inTag := sess.Tag
-		if inTag != "" && inTag != w.tag && isXrayRManagedTag(inTag) {
-			if w.obm != nil {
-				if h := w.obm.GetHandler(inTag); h != nil && h != w {
-					h.Dispatch(ctx, link)
-					return
-				}
-			}
-			// No matching outbound found or obm is nil — reject
-			common.Close(link.Writer)
-			common.Interrupt(link.Reader)
-			return
+	decision := w.selectDispatch(ctx)
+	if decision.rejectReason != "" || decision.handler == nil {
+		if w.logger != nil {
+			w.logger.WithField("reason", decision.rejectReason).Warn("Outbound dispatch rejected")
 		}
+		common.Close(link.Writer)
+		common.Interrupt(link.Reader)
+		return
+	}
+	if decision.managedHandoff {
+		decision.handler.Dispatch(ctx, link)
+		return
 	}
 
-	// --- Now we're in the correct wrapper (inTag matches w.tag) -------------
 	if sess := session.InboundFromContext(ctx); sess != nil && sess.User != nil {
 		email := sess.User.Email
 		if email != "" {
 			srcIP := sess.Source.Address.IP().String()
 			nodeTag := w.tag
 
-			// Rule check (single pass — dispatcher no longer duplicates this)
+			// Rule check (single pass - dispatcher no longer duplicates this).
 			if w.ruleMgr != nil {
 				var destStr string
 				if outs := session.OutboundsFromContext(ctx); len(outs) > 0 {
@@ -140,7 +149,7 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 				}
 			}
 
-			// Device limit + rate limit (single pass — dispatcher no longer duplicates this)
+			// Device limit and rate limit are owned by the active node wrapper.
 			if w.limiter != nil {
 				if bucket, ok, reject := w.limiter.GetUserBucket(nodeTag, email, srcIP); reject {
 					common.Close(link.Writer)
@@ -154,17 +163,7 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 		}
 	}
 
-	handlerToUse, err := w.selectDispatchHandler(ctx)
-	if err != nil {
-		if w.logger != nil {
-			w.logger.WithError(err).Warn("Outbound policy selection failed")
-		}
-		common.Close(link.Writer)
-		common.Interrupt(link.Reader)
-		return
-	}
-
-	handlerToUse.Dispatch(ctx, link)
+	decision.handler.Dispatch(ctx, link)
 }
 
 func (c *Controller) removeOutbound(tag string) error {
