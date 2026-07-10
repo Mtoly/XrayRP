@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -8,6 +9,92 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 )
+
+func TestUniProxySnapshotCacheOwnsCommittedData(t *testing.T) {
+	client := New(&api.Config{APIHost: "http://127.0.0.1", NodeID: 1, NodeType: "V2ray"})
+	snapshot := &serverConfig{
+		ServerPort: 443,
+		CertConfig: &certConfig{DNSEnv: map[string]string{"TOKEN": "committed"}},
+	}
+
+	if err := client.storeUniProxySnapshot(snapshot); err != nil {
+		t.Fatalf("store snapshot: %v", err)
+	}
+	snapshot.ServerPort = 8443
+	snapshot.CertConfig.DNSEnv["TOKEN"] = "mutated"
+
+	cached, ok := client.cachedUniProxySnapshot()
+	if !ok {
+		t.Fatal("expected cached UniProxy snapshot")
+	}
+	if cached.ServerPort != 443 {
+		t.Fatalf("expected committed port 443, got %d", cached.ServerPort)
+	}
+	if cached.CertConfig.DNSEnv["TOKEN"] != "committed" {
+		t.Fatalf("expected committed cert environment, got %#v", cached.CertConfig.DNSEnv)
+	}
+}
+
+func TestUniProxySnapshotCacheReturnsIndependentReads(t *testing.T) {
+	client := New(&api.Config{APIHost: "http://127.0.0.1", NodeID: 1, NodeType: "V2ray"})
+	if err := client.storeUniProxySnapshot(&serverConfig{
+		ServerPort: 443,
+		CertConfig: &certConfig{DNSEnv: map[string]string{"TOKEN": "committed"}},
+	}); err != nil {
+		t.Fatalf("store snapshot: %v", err)
+	}
+
+	first, ok := client.cachedUniProxySnapshot()
+	if !ok {
+		t.Fatal("expected cached UniProxy snapshot")
+	}
+	first.ServerPort = 8443
+	first.CertConfig.DNSEnv["TOKEN"] = "mutated"
+
+	second, ok := client.cachedUniProxySnapshot()
+	if !ok {
+		t.Fatal("expected cached UniProxy snapshot on second read")
+	}
+	if second.ServerPort != 443 || second.CertConfig.DNSEnv["TOKEN"] != "committed" {
+		t.Fatalf("expected independent cached read, got %#v", second)
+	}
+}
+
+func TestUniProxySnapshotCacheRejectsInvalidSnapshotAndKeepsCommittedData(t *testing.T) {
+	client := New(&api.Config{APIHost: "http://127.0.0.1", NodeID: 1, NodeType: "V2ray"})
+	if err := client.storeUniProxySnapshot(&serverConfig{ServerPort: 443}); err != nil {
+		t.Fatalf("store initial snapshot: %v", err)
+	}
+
+	invalidRaw := json.RawMessage(`{"unterminated"`)
+	invalid := &serverConfig{ServerPort: 8443}
+	invalid.NetworkSettings.Headers = &invalidRaw
+	if err := client.storeUniProxySnapshot(invalid); err == nil {
+		t.Fatal("expected invalid snapshot to be rejected")
+	}
+
+	cached, ok := client.cachedUniProxySnapshot()
+	if !ok {
+		t.Fatal("expected previous cached snapshot to remain available")
+	}
+	if cached.ServerPort != 443 {
+		t.Fatalf("expected previous cached port 443, got %d", cached.ServerPort)
+	}
+}
+
+func TestNormalizedUniProxySnapshotReturnsIndependentCertConfig(t *testing.T) {
+	normalized := normalizeUniProxySnapshot(&serverConfig{
+		CertConfig: &certConfig{DNSEnv: map[string]string{"TOKEN": "committed"}},
+	}, "vless")
+
+	first := normalized.certConfig()
+	first.DNSEnv["TOKEN"] = "mutated"
+	second := normalized.certConfig()
+
+	if second.DNSEnv["TOKEN"] != "committed" {
+		t.Fatalf("expected independent cert environment, got %#v", second.DNSEnv)
+	}
+}
 
 func TestUniProxySnapshotCacheRoundTrip(t *testing.T) {
 	client := New(&api.Config{APIHost: "http://127.0.0.1", NodeID: 1, NodeType: "V2ray"})
@@ -18,8 +105,11 @@ func TestUniProxySnapshotCacheRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("expected cached UniProxy snapshot")
 	}
-	if cached != snapshot {
-		t.Fatalf("expected cached snapshot pointer %p, got %p", snapshot, cached)
+	if cached == snapshot {
+		t.Fatal("expected cache to own an independent snapshot")
+	}
+	if cached.ServerPort != snapshot.ServerPort {
+		t.Fatalf("expected cached port %d, got %d", snapshot.ServerPort, cached.ServerPort)
 	}
 }
 
@@ -430,8 +520,14 @@ func TestFetchUniProxySnapshotWithoutETagDoesNotSendOrStoreETag(t *testing.T) {
 		t.Fatalf("expected fetch without ETag to leave node etag empty, got %q", got)
 	}
 	cached, ok := client.cachedUniProxySnapshot()
-	if !ok || cached != snapshot {
-		t.Fatalf("expected fetched snapshot to be cached, got ok=%v cached=%p snapshot=%p", ok, cached, snapshot)
+	if !ok {
+		t.Fatal("expected fetched snapshot to be cached")
+	}
+	if cached == snapshot {
+		t.Fatal("expected cache to own an independent fetched snapshot")
+	}
+	if cached.ServerPort != snapshot.ServerPort || cached.Network != snapshot.Network {
+		t.Fatalf("expected cached snapshot content to match fetch result, got %#v", cached)
 	}
 }
 
@@ -462,8 +558,14 @@ func TestFetchUniProxySnapshotWithETagSendsAndUpdatesETag(t *testing.T) {
 		t.Fatalf("expected updated node etag new-etag, got %q", got)
 	}
 	cached, ok := client.cachedUniProxySnapshot()
-	if !ok || cached != snapshot {
-		t.Fatalf("expected fetched snapshot to be cached, got ok=%v cached=%p snapshot=%p", ok, cached, snapshot)
+	if !ok {
+		t.Fatal("expected fetched snapshot to be cached")
+	}
+	if cached == snapshot {
+		t.Fatal("expected cache to own an independent fetched snapshot")
+	}
+	if cached.ServerPort != snapshot.ServerPort || cached.Network != snapshot.Network {
+		t.Fatalf("expected cached snapshot content to match fetch result, got %#v", cached)
 	}
 }
 

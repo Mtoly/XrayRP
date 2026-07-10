@@ -88,6 +88,10 @@ func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
 		QUICConfig: server.QUICConfig{},
 		Conn:       packetConn,
 
+		// Keep RequestHook nil. Hysteria installs sniffing through this hook, and
+		// enabling it exposes GHSA-9fw6-xgg2-mq9q until upstream ships a fix.
+		RequestHook: nil,
+
 		BandwidthConfig:       bandwidth,
 		IgnoreClientBandwidth: hy.IgnoreClientBandwidth,
 		Authenticator:         &hyAuthenticator{svc: h},

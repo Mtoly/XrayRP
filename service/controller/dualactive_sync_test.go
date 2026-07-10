@@ -170,7 +170,8 @@ func TestDualActive_WSTriggerThenPollingConverges(t *testing.T) {
 	if secondSnapshot.Action.Source != syncActionSourcePolling || secondSnapshot.Action.Type != syncActionTypeResyncAll {
 		t.Fatalf("expected second apply from polling resync, got source=%q type=%q", secondSnapshot.Action.Source, secondSnapshot.Action.Type)
 	}
-	if recorder.lastRuleTag != controller.Tag || len(recorder.lastRules) != 1 || recorder.lastRules[0].Pattern.String() != "poll.example" {
+	state := controller.runtimeStateSnapshot()
+	if recorder.lastRuleTag != state.tag || len(recorder.lastRules) != 1 || recorder.lastRules[0].Pattern.String() != "poll.example" {
 		t.Fatalf("expected polling correction to update rules on converged runtime, got tag=%q rules=%#v", recorder.lastRuleTag, recorder.lastRules)
 	}
 }

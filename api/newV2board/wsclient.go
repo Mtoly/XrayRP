@@ -16,6 +16,8 @@ var (
 	ErrWSClientTransport = errors.New("websocket client transport error")
 )
 
+const wsClientReadLimit int64 = 1 << 20
+
 // WSClient is a minimal websocket reader that parses upstream events.
 type WSClient struct {
 	conn      *websocket.Conn
@@ -173,6 +175,8 @@ func (c *WSClient) readLoop() {
 	defer close(c.done)
 	defer close(c.events)
 	defer close(c.errs)
+
+	c.conn.SetReadLimit(wsClientReadLimit)
 
 	for {
 		_, data, err := c.conn.ReadMessage()

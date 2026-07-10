@@ -6,6 +6,7 @@ import (
 
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/transport"
@@ -62,6 +63,108 @@ func (m *fakeOutboundManager) ListHandlers(ctx context.Context) []outbound.Handl
 		result = append(result, h)
 	}
 	return result
+}
+
+func TestRuntimeRoutingDecisionUsesMatchingManagedInbound(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	otherBase := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_2"}
+	otherNode := &dataPathWrapper{Handler: otherBase, tag: otherBase.tag}
+	selector := runtimeRoutingSelector{
+		baseTag:     base.tag,
+		baseHandler: base,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			otherNode.tag: otherNode,
+		}},
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: otherNode.tag})
+
+	decision := selector.selectDispatch(ctx)
+	if decision.rejectReason != "" {
+		t.Fatalf("expected managed inbound routing decision, got rejection %q", decision.rejectReason)
+	}
+	if decision.handler != otherNode || !decision.managedHandoff {
+		t.Fatalf("expected matching managed wrapper handoff, got %#v", decision)
+	}
+}
+
+func TestRuntimeRoutingDecisionRejectsRawManagedHandler(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	rawManaged := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_2"}
+	selector := runtimeRoutingSelector{
+		baseTag:     base.tag,
+		baseHandler: base,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			rawManaged.tag: rawManaged,
+		}},
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: rawManaged.tag})
+
+	decision := selector.selectDispatch(ctx)
+	if decision.handler != nil || decision.rejectReason == "" {
+		t.Fatalf("expected raw managed handler rejection, got %#v", decision)
+	}
+}
+
+func TestRuntimeRoutingDecisionRejectsCurrentWrapperHandoff(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	current := &dataPathWrapper{Handler: base, tag: base.tag}
+	requestedTag := "VLESS_10.0.0.1_443_2"
+	selector := runtimeRoutingSelector{
+		baseTag:        base.tag,
+		baseHandler:    base,
+		currentWrapper: current,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			requestedTag: current,
+		}},
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: requestedTag})
+
+	decision := selector.selectDispatch(ctx)
+	if decision.handler != nil || decision.rejectReason == "" {
+		t.Fatalf("expected recursive handoff rejection, got %#v", decision)
+	}
+}
+
+func TestRuntimeRoutingDecisionRejectsMissingManagedInbound(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	selector := runtimeRoutingSelector{
+		baseTag:     base.tag,
+		baseHandler: base,
+		obm:         &fakeOutboundManager{handlers: map[string]outbound.Handler{}},
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: "VLESS_10.0.0.1_443_2"})
+
+	decision := selector.selectDispatch(ctx)
+	if decision.handler != nil {
+		t.Fatalf("expected missing managed inbound to reject, got %s", decision.handler.Tag())
+	}
+	if decision.rejectReason == "" {
+		t.Fatal("expected explicit managed inbound rejection reason")
+	}
+}
+
+func TestRuntimeRoutingDecisionFallsBackToPolicyForMatchingInbound(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "VLESS_10.0.0.1_443_1"}
+	direct := &fakeOutboundHandler{tag: "direct"}
+	selector := runtimeRoutingSelector{
+		baseTag:     base.tag,
+		baseHandler: base,
+		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
+			"direct": direct,
+		}},
+		routePolicy: &api.PanelRoutePolicy{Outbound: api.OutboundFilterPolicy{
+			Candidates: []string{"missing", "direct"},
+		}},
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: base.tag})
+
+	decision := selector.selectDispatch(ctx)
+	if decision.rejectReason != "" {
+		t.Fatalf("expected policy routing decision, got rejection %q", decision.rejectReason)
+	}
+	if decision.handler != direct {
+		t.Fatalf("expected direct policy handler, got %#v", decision.handler)
+	}
 }
 
 func TestRuntimeRoutingSelectorUsesDirectHandlerFromOutboundManager(t *testing.T) {
