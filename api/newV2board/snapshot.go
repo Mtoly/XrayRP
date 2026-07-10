@@ -30,14 +30,39 @@ func (c *APIClient) cachedUniProxySnapshot() (*serverConfig, bool) {
 	if !ok || snapshot == nil {
 		return nil, false
 	}
-	return snapshot, true
+	cloned, err := cloneUniProxyServerConfig(snapshot)
+	if err != nil {
+		return nil, false
+	}
+	return cloned, true
 }
 
-func (c *APIClient) storeUniProxySnapshot(snapshot *serverConfig) {
+func (c *APIClient) storeUniProxySnapshot(snapshot *serverConfig) error {
 	if snapshot == nil {
-		return
+		return nil
 	}
-	c.resp.Store(snapshot)
+	cloned, err := cloneUniProxyServerConfig(snapshot)
+	if err != nil {
+		return err
+	}
+	c.resp.Store(cloned)
+	return nil
+}
+
+func cloneUniProxyServerConfig(snapshot *serverConfig) (*serverConfig, error) {
+	if snapshot == nil {
+		return nil, nil
+	}
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("clone UniProxy snapshot: %w", err)
+	}
+	cloned := new(serverConfig)
+	if err := json.Unmarshal(data, cloned); err != nil {
+		return nil, fmt.Errorf("clone UniProxy snapshot: %w", err)
+	}
+	return cloned, nil
 }
 
 type normalizedUniProxySnapshot struct {
@@ -68,8 +93,19 @@ func (s *normalizedUniProxySnapshot) certConfig() *api.XrayRCertConfig {
 		KeyContent:  s.raw.CertConfig.KeyContent,
 		Provider:    s.raw.CertConfig.Provider,
 		Email:       s.raw.CertConfig.Email,
-		DNSEnv:      s.raw.CertConfig.DNSEnv,
+		DNSEnv:      cloneStringMap(s.raw.CertConfig.DNSEnv),
 	}
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (s *normalizedUniProxySnapshot) baseConfig() *api.BaseConfig {
@@ -241,6 +277,8 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 		return nil, err
 	}
 
-	c.storeUniProxySnapshot(snapshot)
+	if err := c.storeUniProxySnapshot(snapshot); err != nil {
+		return nil, err
+	}
 	return snapshot, nil
 }

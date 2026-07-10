@@ -40,20 +40,19 @@ func TestValidateMachineModeAllowsWebSocketEnabled(t *testing.T) {
 	}
 }
 
-func TestBuildMachineSupervisorRejectsStaticNodes(t *testing.T) {
-	config := validMachineModeConfig()
-	config.NodesConfig = []*NodesConfig{{PanelType: "SSPanel"}}
-	panel := New(config)
+func TestBuildMachineSupervisorRejectsStaticPlan(t *testing.T) {
+	panel := New(validMachineModeConfig())
+	plan := runtimeConfigPlan{mode: runtimeConfigModeStatic}
 
-	service, err := panel.buildMachineSupervisor(nil)
+	service, err := panel.buildMachineSupervisor(nil, plan)
 	if err == nil {
-		t.Fatal("expected static Nodes conflict error")
+		t.Fatal("expected static runtime plan error")
 	}
 	if service != nil {
 		t.Fatalf("expected no supervisor service, got %T", service)
 	}
-	if !strings.Contains(err.Error(), "static Nodes") {
-		t.Fatalf("expected static Nodes error, got %v", err)
+	if !strings.Contains(err.Error(), "machine mode") {
+		t.Fatalf("expected machine mode error, got %v", err)
 	}
 }
 
@@ -64,7 +63,11 @@ func TestBuildMachineSupervisorAllowsWebSocketEnabled(t *testing.T) {
 	}
 	panel := New(config)
 
-	service, err := panel.buildMachineSupervisor(nil)
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatalf("build runtime config plan: %v", err)
+	}
+	service, err := panel.buildMachineSupervisor(nil, plan)
 	if err != nil {
 		t.Fatalf("expected machine supervisor with shared WebSocket, got %v", err)
 	}
