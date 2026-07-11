@@ -19,8 +19,18 @@ type queuedSyncAction struct {
 	seq    uint64
 }
 
+type syncExecutionObserver func(syncAction, error)
+
+type syncExecutionResult struct {
+	action syncAction
+	err    error
+}
+
 type syncCoordinator struct {
 	executor syncActionExecutor
+	recorder *syncExecutionState
+	observer syncExecutionObserver
+	results  chan syncExecutionResult
 
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -35,12 +45,23 @@ type syncCoordinator struct {
 }
 
 func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
+	return newSyncCoordinatorWithResultHandling(executor, nil, nil)
+}
+
+func newSyncCoordinatorWithObserver(executor syncActionExecutor, observer syncExecutionObserver) *syncCoordinator {
+	return newSyncCoordinatorWithResultHandling(executor, nil, observer)
+}
+
+func newSyncCoordinatorWithResultHandling(executor syncActionExecutor, recorder *syncExecutionState, observer syncExecutionObserver) *syncCoordinator {
 	if executor == nil {
 		panic("controller: nil sync coordinator executor")
 	}
 
 	coordinator := &syncCoordinator{
 		executor: executor,
+		recorder: recorder,
+		observer: observer,
+		results:  make(chan syncExecutionResult, 1),
 		pending:  make(map[syncActionType]queuedSyncAction),
 		dirty:    make(map[syncActionType]syncAction),
 		done:     make(chan struct{}),
@@ -48,6 +69,9 @@ func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
 	coordinator.cond = sync.NewCond(&coordinator.mu)
 
 	go coordinator.run()
+	if observer != nil {
+		go coordinator.observeResults()
+	}
 
 	return coordinator
 }
@@ -111,14 +135,42 @@ func (c *syncCoordinator) Stop() {
 
 func (c *syncCoordinator) run() {
 	defer close(c.done)
+	defer close(c.results)
 
 	for {
 		action, ok := c.takeNextAction()
 		if !ok {
 			return
 		}
-		_ = c.executor.ExecuteSyncAction(context.Background(), action)
+		err := c.executor.ExecuteSyncAction(context.Background(), action)
+		if c.recorder != nil {
+			c.recorder.Record(action, err)
+		}
 		c.finishAction(action)
+		c.notifyObserver(action, err)
+	}
+}
+
+func (c *syncCoordinator) notifyObserver(action syncAction, err error) {
+	if c.observer == nil {
+		return
+	}
+
+	select {
+	case c.results <- syncExecutionResult{action: action, err: err}:
+	default:
+		// Observability is best-effort and must not delay coordinator progress.
+	}
+}
+
+func (c *syncCoordinator) observeResults() {
+	for result := range c.results {
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			c.observer(result.action, result.err)
+		}()
 	}
 }
 

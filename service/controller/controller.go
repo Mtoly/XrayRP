@@ -54,6 +54,7 @@ type Controller struct {
 	syncCoordinator        syncCoordinatorLifecycle
 	wsRuntime              wsRuntimeLifecycle
 	deviceReportState      *deviceReportState
+	syncExecutionState     *syncExecutionState
 	newPeriodicTask        periodicTaskFactory
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
@@ -108,12 +109,50 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 		logger:     logger,
 	}
 	controller.deviceReportState = newDeviceReportState()
+	controller.syncExecutionState = newSyncExecutionState()
 	controller.syncCoordinatorFactory = func(executor syncActionExecutor) syncCoordinatorLifecycle {
-		return newSyncCoordinator(executor)
+		return newSyncCoordinatorWithResultHandling(executor, controller.syncExecutionState, controller.logSyncExecutionResult)
 	}
 	controller.wsRuntimeFactory = controller.newConfiguredWSRuntime
 
 	return controller
+}
+
+func (c *Controller) recordSyncExecutionResult(action syncAction, err error) {
+	if c == nil {
+		return
+	}
+	if c.syncExecutionState != nil {
+		c.syncExecutionState.Record(action, err)
+	}
+	c.logSyncExecutionResult(action, err)
+}
+
+func (c *Controller) logSyncExecutionResult(action syncAction, err error) {
+	if c == nil {
+		return
+	}
+	if err == nil || c.logger == nil {
+		return
+	}
+
+	entry := c.logger.WithFields(log.Fields{
+		"action_type":   action.Type,
+		"action_source": action.Source,
+		"trigger":       action.Metadata.Trigger,
+	})
+	if c.showErrorDetails() {
+		entry.WithError(err).Warn("sync action failed")
+		return
+	}
+	entry.Warn("sync action failed; error details omitted because they may contain credentials")
+}
+
+func (c *Controller) syncExecutionSnapshot() syncExecutionSnapshot {
+	if c == nil || c.syncExecutionState == nil {
+		return syncExecutionSnapshot{}
+	}
+	return c.syncExecutionState.Snapshot()
 }
 
 func (c *Controller) buildSyncCoordinator() syncCoordinatorLifecycle {
