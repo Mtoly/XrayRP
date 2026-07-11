@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"time"
 
@@ -307,7 +308,7 @@ func (h *Hysteria2Service) userMonitor() error {
 	usersChanged := true
 	newUserInfo, err := h.apiClient.GetUserList()
 	if err != nil {
-		if err.Error() == api.UserNotModified {
+		if errors.Is(err, api.ErrUserNotModified) {
 			usersChanged = false
 		} else {
 			h.logger.Print(err)
@@ -325,7 +326,7 @@ func (h *Hysteria2Service) userMonitor() error {
 	// Check Rule
 	if !h.config.DisableGetRule && h.rules != nil {
 		if ruleList, err := h.apiClient.GetNodeRule(); err != nil {
-			if err.Error() != api.RuleNotModified {
+			if !errors.Is(err, api.ErrRuleNotModified) {
 				h.logger.Printf("Get rule list filed: %s", err)
 			}
 		} else if len(*ruleList) > 0 {
@@ -382,7 +383,7 @@ func (h *Hysteria2Service) nodeMonitor() error {
 
 	nodeInfo, err := h.apiClient.GetNodeInfo()
 	if err != nil {
-		if err.Error() == api.NodeNotModified {
+		if errors.Is(err, api.ErrNodeNotModified) {
 			return nil
 		}
 		h.logger.Print(err)

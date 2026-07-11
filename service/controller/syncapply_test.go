@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sync"
@@ -17,6 +18,75 @@ import (
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
+
+func TestFetchSyncApplySnapshotUsesCurrentStateForWrappedNotModifiedErrors(t *testing.T) {
+	currentNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	currentUsers := []api.UserInfo{{UID: 1, Email: "current@example.com"}}
+	currentRules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("current.example")}}
+
+	tests := []struct {
+		name      string
+		configure func(*fakeSyncApplyAPI)
+		action    syncAction
+		assert    func(*testing.T, syncApplySnapshot)
+	}{
+		{
+			name: "node",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.nodeErr = fmt.Errorf("fetch node: %w", api.ErrNodeNotModified)
+				client.ruleList = &currentRules
+			},
+			action: newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.NodeInfo != currentNode {
+					t.Fatalf("expected current node state, got %#v", snapshot.NodeInfo)
+				}
+			},
+		},
+		{
+			name: "user",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.userErr = fmt.Errorf("fetch users: %w", api.ErrUserNotModified)
+			},
+			action: newSyncAction(syncActionTypeSyncUsers, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.UserList != &currentUsers {
+					t.Fatalf("expected current user state, got %#v", snapshot.UserList)
+				}
+			},
+		},
+		{
+			name: "rule",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.nodeInfo = currentNode
+				client.ruleErr = fmt.Errorf("fetch rules: %w", api.ErrRuleNotModified)
+			},
+			action: newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.RuleList == nil || !reflect.DeepEqual(*snapshot.RuleList, currentRules) {
+					t.Fatalf("expected current rule state, got %#v", snapshot.RuleList)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeSyncApplyAPI{}
+			test.configure(client)
+			controller, _ := newTestSyncApplyController(client)
+			controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+			controller.setUserList(&currentUsers)
+			controller.setAppliedRuleList(currentRules)
+
+			snapshot, err := newNodeRuntimeStateApplyModule(controller).fetchSyncApplySnapshot(test.action)
+			if err != nil {
+				t.Fatalf("fetchSyncApplySnapshot returned wrapped not-modified error: %v", err)
+			}
+			test.assert(t, snapshot)
+		})
+	}
+}
 
 type fakeSyncApplyAPI struct {
 	nodeInfo   *api.NodeInfo

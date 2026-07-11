@@ -115,7 +115,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchNode {
 		nodeInfo, err := c.apiClient.GetNodeInfo()
 		if err != nil {
-			if err.Error() == api.NodeNotModified {
+			if errors.Is(err, api.ErrNodeNotModified) {
 				snapshot.NodeInfo = currentNodeInfo
 			} else {
 				return snapshot, err
@@ -132,7 +132,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchUsers {
 		userList, err := c.apiClient.GetUserList()
 		if err != nil {
-			if err.Error() == api.UserNotModified {
+			if errors.Is(err, api.ErrUserNotModified) {
 				snapshot.UserList = currentUserList
 			} else {
 				return snapshot, err
@@ -145,7 +145,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchRules && !c.config.DisableGetRule {
 		ruleList, err := c.apiClient.GetNodeRule()
 		if err != nil {
-			if err.Error() == api.RuleNotModified {
+			if errors.Is(err, api.ErrRuleNotModified) {
 				rules := c.getAppliedRuleList()
 				snapshot.RuleList = &rules
 			} else {

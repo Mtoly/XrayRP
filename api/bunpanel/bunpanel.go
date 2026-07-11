@@ -3,7 +3,6 @@ package bunpanel
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -174,7 +173,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		Get(path)
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.NodeNotModified)
+		return nil, api.ErrNodeNotModified
 	}
 
 	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["node"] {
@@ -211,7 +210,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		Get(path)
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.UserNotModified)
+		return nil, api.ErrUserNotModified
 	}
 
 	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["users"] {

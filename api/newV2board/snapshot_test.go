@@ -2,6 +2,7 @@ package newV2board
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -582,7 +583,7 @@ func TestFetchUniProxySnapshotWithETagReturnsNodeNotModified(t *testing.T) {
 	client.eTags["node"] = "old-etag"
 
 	_, err := client.fetchUniProxySnapshot(true)
-	if err == nil || err.Error() != api.NodeNotModified {
+	if err == nil || !errors.Is(err, api.ErrNodeNotModified) {
 		t.Fatalf("expected NodeNotModified error, got %v", err)
 	}
 }

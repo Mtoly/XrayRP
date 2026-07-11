@@ -239,7 +239,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, fmt.Errorf(api.UserNotModified)
+		return nil, api.ErrUserNotModified
 	}
 	// update etag
 	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["users"] {
