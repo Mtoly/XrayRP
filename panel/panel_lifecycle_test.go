@@ -327,6 +327,101 @@ func TestPanelStartWhileRunningDoesNotDuplicateResources(t *testing.T) {
 	}
 }
 
+func TestPanelStartAfterCloseCreatesFreshResources(t *testing.T) {
+	events := []string{}
+	servers := []*core.Instance{{}, {}}
+	services := []*lifecycleTestService{
+		{name: "first", events: &events},
+		{name: "second", events: &events},
+	}
+	loadCalls := 0
+	buildCalls := 0
+	p := New(&Config{})
+	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) {
+		server := servers[loadCalls]
+		loadCalls++
+		return server, nil
+	}
+	p.lifecycle.startCore = func(*core.Instance) error {
+		events = append(events, "core:start")
+		return nil
+	}
+	p.lifecycle.closeCore = func(*core.Instance) error {
+		events = append(events, "core:close")
+		return nil
+	}
+	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
+		return runtimeConfigPlan{mode: runtimeConfigModeStatic}, nil
+	}
+	p.lifecycle.buildStaticModules = func(*Panel, *core.Instance, runtimeConfigPlan) ([]service.Service, error) {
+		module := services[buildCalls]
+		buildCalls++
+		return []service.Service{module}, nil
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := p.Start(); err != nil {
+		t.Fatalf("second Start() error = %v", err)
+	}
+
+	wantEvents := []string{
+		"core:start", "first:start", "first:close", "core:close",
+		"core:start", "second:start",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+	}
+	if loadCalls != 2 || buildCalls != 2 {
+		t.Fatalf("fresh resource calls: load=%d build=%d, want 2 each", loadCalls, buildCalls)
+	}
+	if !p.Running || p.Server != servers[1] || len(p.Service) != 1 || p.Service[0] != services[1] {
+		t.Fatalf("restarted panel state: Running=%v Server=%p Service=%#v", p.Running, p.Server, p.Service)
+	}
+}
+
+func TestPanelLifecycleUsesInternalStateWhenPublicRunningIsMutated(t *testing.T) {
+	events := []string{}
+	module := &lifecycleTestService{name: "service", events: &events}
+	p := newLifecycleTestPanel(t, &events, func() ([]service.Service, error) {
+		return []service.Service{module}, nil
+	})
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	p.Running = false
+	if err := p.Start(); err != nil {
+		t.Fatalf("second Start() error = %v", err)
+	}
+	wantEvents := []string{"core:start", "service:start"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("public Running mutation duplicated resources: events=%#v", events)
+	}
+	if !p.Running {
+		t.Fatal("Running = false after running-state no-op, want compatibility field resynchronized")
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	p.Running = true
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if p.Running {
+		t.Fatal("Running = true after stopped-state no-op, want compatibility field resynchronized")
+	}
+	wantEvents = []string{"core:start", "service:start", "service:close", "core:close"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("public Running mutation duplicated cleanup: events=%#v", events)
+	}
+}
+
 func TestPanelCloseRepeatedlyClosesResourcesOnce(t *testing.T) {
 	events := []string{}
 	first := &lifecycleTestService{name: "first", events: &events}

@@ -42,11 +42,21 @@ type Panel struct {
 	serviceMutex sync.RWMutex
 	panelConfig  *Config
 	lifecycle    panelLifecycleOps
+	state        panelLifecycleState
 	Server       *core.Instance
 	Service      []service.Service
 	Running      bool
 	logger       *log.Entry
 }
+
+type panelLifecycleState uint8
+
+const (
+	panelStateStopped panelLifecycleState = iota
+	panelStateStarting
+	panelStateRunning
+	panelStateStopping
+)
 
 type panelLifecycleOps struct {
 	loadCore           func(*Panel, *Config) (*core.Instance, error)
@@ -238,12 +248,16 @@ func (p *Panel) Start() error {
 	defer p.access.Unlock()
 	p.logger.Info("Starting panel")
 	ops := p.lifecycleOps()
-	if p.isRunning() {
+	if p.state == panelStateRunning {
+		p.Running = true
 		return nil
 	}
+	p.state = panelStateStarting
+	p.Running = false
 
 	server, err := ops.loadCore(p, p.panelConfig)
 	if err != nil {
+		p.state = panelStateStopped
 		return fmt.Errorf("failed to load core: %w", err)
 	}
 
@@ -261,6 +275,7 @@ func (p *Panel) Start() error {
 			p.logLifecycleError("Failed to roll back core", err)
 		}
 		p.clearPublishedState()
+		p.state = panelStateStopped
 		return errors.Join(errs...)
 	}
 	if err := ops.startCore(server); err != nil {
@@ -298,6 +313,7 @@ func (p *Panel) Start() error {
 	p.serviceMutex.Lock()
 	p.Server = server
 	p.Service = append([]service.Service(nil), services...)
+	p.state = panelStateRunning
 	p.Running = true
 	p.serviceMutex.Unlock()
 	p.serverMutex.Unlock()
@@ -312,12 +328,6 @@ func (p *Panel) clearPublishedState() {
 	p.Running = false
 	p.serviceMutex.Unlock()
 	p.serverMutex.Unlock()
-}
-
-func (p *Panel) isRunning() bool {
-	p.serverMutex.RLock()
-	defer p.serverMutex.RUnlock()
-	return p.Running
 }
 
 func (p *Panel) logLifecycleError(message string, err error) {
@@ -429,6 +439,13 @@ func (p *Panel) Close() error {
 	p.access.Lock()
 	defer p.access.Unlock()
 
+	if p.state == panelStateStopped {
+		p.clearPublishedState()
+		return nil
+	}
+	p.state = panelStateStopping
+	p.Running = false
+
 	p.serviceMutex.RLock()
 	services := make([]service.Service, len(p.Service))
 	copy(services, p.Service)
@@ -459,6 +476,7 @@ func (p *Panel) Close() error {
 	}
 
 	p.serverMutex.Lock()
+	p.state = panelStateStopped
 	p.Running = false
 	p.serverMutex.Unlock()
 	return errors.Join(errs...)
