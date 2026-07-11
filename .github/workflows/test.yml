@@ -1,0 +1,97 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: "1"
+
+jobs:
+  test:
+    name: Test and vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./...
+      - name: Run vet
+        run: go vet ./...
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run focused race tests
+        run: go test -race ./service/controller ./service/machine ./common/limiter
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Generate repository coverage
+        run: go test -coverprofile=coverage.out ./...
+      - name: Print repository coverage
+        run: go tool cover -func=coverage.out
+      - name: Enforce core package baselines
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          check_coverage() {
+            local package="$1"
+            local baseline="$2"
+            local profile
+            local actual
+
+            profile="$(mktemp)"
+            go test -coverprofile="$profile" "./$package"
+            actual="$(go tool cover -func="$profile" | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+            rm -f "$profile"
+
+            printf '%s coverage: %s%% (baseline: %s%%)\n' "$package" "$actual" "$baseline"
+            awk -v actual="$actual" -v baseline="$baseline" 'BEGIN { exit !(actual + 0.05 >= baseline) }' || {
+              printf 'Coverage for %s dropped below %s%% (actual: %s%%)\n' "$package" "$baseline" "$actual" >&2
+              exit 1
+            }
+          }
+
+          check_coverage service/controller 57.3
+          check_coverage service/machine 68.5
+          check_coverage common/limiter 56.6
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 14
