@@ -304,7 +304,7 @@ func requireGov2panelIntegration(t *testing.T) {
 	}
 }
 
-func integrationClient() api.API {
+func integrationClient() *gov2panel.APIClient {
 	return gov2panel.New(&api.Config{APIHost: "http://localhost:8080", Key: "123456", NodeID: 90, NodeType: "V2ray"})
 }
 

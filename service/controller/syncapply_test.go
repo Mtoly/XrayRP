@@ -203,7 +203,7 @@ func (r *syncApplyRecorder) recordUpdateInboundLimiter(tag string, users *[]api.
 	r.updatedLimiterPayloads = append(r.updatedLimiterPayloads, cloneRecordedUsers(users))
 }
 
-func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecorder) {
+func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyRecorder) {
 	logger := log.NewEntry(log.New())
 	recorder := &syncApplyRecorder{}
 	controller := &Controller{
@@ -648,6 +648,19 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	}
 	if controller.config.CertConfig == nil || controller.config.CertConfig.Provider != "cloudflare" || controller.config.CertConfig.Email != "ops@example.com" || controller.config.CertConfig.DNSEnv["CF_API_TOKEN"] != "same-token" {
 		t.Fatalf("expected unchanged cert snapshot to keep existing cert config, got %#v", controller.config.CertConfig)
+	}
+}
+
+func TestSyncApply_MissingCertCapabilityIsNoOp(t *testing.T) {
+	controller, _ := newTestSyncApplyController(panelClientWithoutDebug{})
+	original := &mylego.CertConfig{CertMode: "file", CertFile: "/existing/cert.crt", KeyFile: "/existing/cert.key"}
+	controller.config.CertConfig = original
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction returned error without cert capability: %v", err)
+	}
+	if controller.config.CertConfig != original {
+		t.Fatalf("expected missing cert capability to preserve existing config, got %#v", controller.config.CertConfig)
 	}
 }
 

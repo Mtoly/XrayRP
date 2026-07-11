@@ -371,7 +371,7 @@ func TestTransportErrorsDoNotPanic(t *testing.T) {
 	}
 }
 
-func integrationClient() api.API {
+func integrationClient() *bunpanel.APIClient {
 	return bunpanel.New(&api.Config{
 		APIHost:  "http://localhost:8080",
 		Key:      "123456",
@@ -380,7 +380,7 @@ func integrationClient() api.API {
 	})
 }
 
-func CreateClient() api.API {
+func CreateClient() *bunpanel.APIClient {
 	return integrationClient()
 }
 

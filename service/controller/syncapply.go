@@ -157,7 +157,11 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchCert {
-		certConfig, err := c.apiClient.GetXrayRCertConfig()
+		provider, ok := c.apiClient.(certConfigProvider)
+		if !ok {
+			return snapshot, nil
+		}
+		certConfig, err := provider.GetXrayRCertConfig()
 		if err != nil {
 			if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
 				return snapshot, err

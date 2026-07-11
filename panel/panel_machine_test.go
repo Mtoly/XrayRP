@@ -383,7 +383,7 @@ func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(
 	binding := machine.NodeBinding{NodeID: 9, NodeType: "Vless"}
 	client := &machineRuntimeNodeTestAPI{clientInfo: api.ClientInfo{APIHost: machineConfig.ApiHost, NodeID: binding.NodeID, NodeType: binding.NodeType}}
 	var gotAPIConfig *api.Config
-	var materializedAPI api.API
+	var materializedAPI any
 	var materializedControllerConfig *controller.Config
 	var materializedLogger *log.Entry
 
@@ -391,11 +391,11 @@ func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(
 		machineConfig:    machineConfig,
 		binding:          binding,
 		showErrorDetails: true,
-		newAPIClient: func(config *api.Config) api.API {
+		newAPIClient: func(config *api.Config) runtimePanelClient {
 			gotAPIConfig = config
 			return client
 		},
-		materializeCertConfig: func(apiClient api.API, controllerConfig *controller.Config, logger *log.Entry) {
+		materializeCertConfig: func(apiClient any, controllerConfig *controller.Config, logger *log.Entry) {
 			materializedAPI = apiClient
 			materializedControllerConfig = controllerConfig
 			materializedLogger = logger

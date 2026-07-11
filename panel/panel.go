@@ -345,7 +345,7 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 
 	services := make([]service.Service, 0, len(plan.staticNodes))
 	for _, nodePlan := range plan.staticNodes {
-		var apiClient api.API
+		var apiClient runtimePanelClient
 		switch nodePlan.panelType {
 		case "SSpanel", "SSPanel":
 			apiClient = sspanel.New(nodePlan.apiConfig)
@@ -382,11 +382,22 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 	return services, nil
 }
 
-func (p *Panel) buildNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType string) (service.Service, error) {
+type runtimePanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
+func (p *Panel) buildNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType string) (service.Service, error) {
 	return p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, panelType, "")
 }
 
-func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
+func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
 	nodeType := runtimeNodeServiceType(apiClient, fallbackNodeType)
 	return p.buildRuntimeNodeService(server, apiClient, controllerConfig, panelType, nodeType)
 }
@@ -400,7 +411,11 @@ const (
 	runtimeNodeServiceAnyTLS     runtimeNodeServiceKind = "anytls"
 )
 
-func runtimeNodeServiceType(apiClient api.API, fallbackNodeType string) string {
+type describer interface {
+	Describe() api.ClientInfo
+}
+
+func runtimeNodeServiceType(apiClient describer, fallbackNodeType string) string {
 	nodeType := apiClient.Describe().NodeType
 	if nodeType == "" {
 		return fallbackNodeType
@@ -421,7 +436,7 @@ func runtimeNodeServiceKindForNodeType(nodeType string) runtimeNodeServiceKind {
 	}
 }
 
-func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
+func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
 	switch runtimeNodeServiceKindForNodeType(nodeType) {
 	case runtimeNodeServiceHysteria2:
 		return hysteria2.New(apiClient, controllerConfig), nil

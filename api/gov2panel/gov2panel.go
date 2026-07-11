@@ -212,7 +212,7 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return
 }
 
-// GetAliveList implements api.API
+// GetAliveList returns no panel-managed alive list for this adapter.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 	return nil, nil
 }

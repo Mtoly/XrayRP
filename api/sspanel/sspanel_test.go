@@ -317,7 +317,7 @@ func TestContractETagNotModified(t *testing.T) {
 	}
 }
 
-func integrationClient() api.API {
+func integrationClient() *APIClient {
 	return New(&api.Config{APIHost: "http://127.0.0.1:667", Key: "123", NodeID: 3, NodeType: "V2ray"})
 }
 func TestGetV2rayNodeInfo(t *testing.T) {

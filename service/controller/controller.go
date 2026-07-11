@@ -26,6 +26,25 @@ import (
 	"github.com/Mtoly/XrayRP/common/serverstatus"
 )
 
+type PanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
+type certConfigProvider interface {
+	GetXrayRCertConfig() (*api.XrayRCertConfig, error)
+}
+
+type aliveListProvider interface {
+	GetAliveList() (map[int][]string, error)
+}
+
 type LimitInfo struct {
 	end               int64
 	currentSpeedLimit int
@@ -36,7 +55,7 @@ type Controller struct {
 	server                 *core.Instance
 	config                 *Config
 	clientInfo             api.ClientInfo
-	apiClient              api.API
+	apiClient              PanelClient
 	stateMu                sync.RWMutex
 	runtimeState           nodeRuntimeState
 	syncApplyHooks         syncApplyHooks
@@ -63,11 +82,11 @@ type Controller struct {
 type periodicTask = controllerPeriodicTask
 
 // New return a Controller service with default parameters.
-func New(server *core.Instance, api api.API, config *Config, panelType string) *Controller {
+func New(server *core.Instance, apiClient PanelClient, config *Config, panelType string) *Controller {
 	logger := log.NewEntry(log.StandardLogger()).WithFields(log.Fields{
-		"Host": api.Describe().APIHost,
-		"Type": api.Describe().NodeType,
-		"ID":   api.Describe().NodeID,
+		"Host": apiClient.Describe().APIHost,
+		"Type": apiClient.Describe().NodeType,
+		"ID":   apiClient.Describe().NodeID,
 	})
 	ibmRaw := server.GetFeature(inbound.ManagerType())
 	ibmTyped, ok := ibmRaw.(inbound.Manager)
@@ -98,7 +117,7 @@ func New(server *core.Instance, api api.API, config *Config, panelType string) *
 	controller := &Controller{
 		server:     server,
 		config:     config,
-		apiClient:  api,
+		apiClient:  apiClient,
 		panelType:  panelType,
 		ibm:        ibmTyped,
 		obm:        obmTyped,
@@ -938,9 +957,11 @@ func (c *Controller) userInfoMonitor() (err error) {
 	}
 
 	// Sync alive list from panel for device limit accuracy
-	if aliveList, err := c.apiClient.GetAliveList(); err == nil && aliveList != nil && len(aliveList) > 0 {
-		if err := c.dispatcher.Limiter.SyncAliveList(currentTag, aliveList); err != nil {
-			c.logger.Print(err)
+	if provider, ok := c.apiClient.(aliveListProvider); ok {
+		if aliveList, err := provider.GetAliveList(); err == nil && aliveList != nil && len(aliveList) > 0 {
+			if err := c.dispatcher.Limiter.SyncAliveList(currentTag, aliveList); err != nil {
+				c.logger.Print(err)
+			}
 		}
 	}
 

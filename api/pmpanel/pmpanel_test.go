@@ -148,7 +148,7 @@ func TestContractRules(t *testing.T) {
 	}
 }
 
-func CreateClient() api.API {
+func CreateClient() *pmpanel.APIClient {
 	apiConfig := &api.Config{
 		APIHost:  "http://webapi.yyds.me",
 		Key:      "123456",

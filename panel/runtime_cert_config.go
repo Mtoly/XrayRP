@@ -10,8 +10,16 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
-func materializeRuntimeCertConfig(apiClient api.API, controllerConfig *controller.Config, logger *log.Entry) {
-	if panelCert, err := apiClient.GetXrayRCertConfig(); err != nil {
+type certConfigProvider interface {
+	GetXrayRCertConfig() (*api.XrayRCertConfig, error)
+}
+
+func materializeRuntimeCertConfig(apiClient any, controllerConfig *controller.Config, logger *log.Entry) {
+	provider, ok := apiClient.(certConfigProvider)
+	if !ok {
+		return
+	}
+	if panelCert, err := provider.GetXrayRCertConfig(); err != nil {
 		logger.Warnf("Failed to get XrayR cert config from panel: %v", err)
 	} else if err := mergeRuntimePanelCertConfig(controllerConfig, panelCert); err != nil {
 		logger.Warnf("Failed to apply XrayR cert config from panel: %v", err)

@@ -179,7 +179,7 @@ func TestContractRules(t *testing.T) {
 	}
 }
 
-func CreateClient() api.API {
+func CreateClient() *proxypanel.APIClient {
 	apiConfig := &api.Config{
 		APIHost:  "http://127.0.0.1:8888",
 		Key:      "naBDpLvREiwY9qPr",

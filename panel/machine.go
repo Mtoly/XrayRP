@@ -136,12 +136,12 @@ type machineRuntimeNodePlan struct {
 	binding               machine.NodeBinding
 	sharedWS              *machine.SharedWSRuntime
 	showErrorDetails      bool
-	newAPIClient          func(*api.Config) api.API
-	materializeCertConfig func(api.API, *controller.Config, *log.Entry)
+	newAPIClient          func(*api.Config) runtimePanelClient
+	materializeCertConfig func(any, *controller.Config, *log.Entry)
 }
 
 type machineRuntimeNode struct {
-	apiClient        api.API
+	apiClient        runtimePanelClient
 	controllerConfig *controller.Config
 }
 
@@ -170,14 +170,11 @@ func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*mac
 	apiConfig := buildMachineNodeAPIConfig(machineConfig, plan.binding)
 	newAPIClient := plan.newAPIClient
 	if newAPIClient == nil {
-		newAPIClient = func(apiConfig *api.Config) api.API {
+		newAPIClient = func(apiConfig *api.Config) runtimePanelClient {
 			return newV2board.New(apiConfig)
 		}
 	}
-	var apiClient api.API = newAPIClient(apiConfig)
-	if plan.sharedWS != nil {
-		apiClient = machine.WrapAPIWithReporter(apiClient, plan.binding.NodeID, plan.sharedWS)
-	}
+	apiClient := newAPIClient(apiConfig)
 
 	controllerConfig, err := buildMachineNodeControllerConfigWithOptions(machineConfig.ControllerConfig, runtimeControllerConfigOptions{
 		showErrorDetails: plan.showErrorDetails,
@@ -191,6 +188,9 @@ func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*mac
 		materializeCertConfig = materializeRuntimeCertConfig
 	}
 	materializeCertConfig(apiClient, controllerConfig, p.logger)
+	if plan.sharedWS != nil {
+		apiClient = machine.WrapAPIWithReporter(apiClient, plan.binding.NodeID, plan.sharedWS)
+	}
 
 	return &machineRuntimeNode{
 		apiClient:        apiClient,

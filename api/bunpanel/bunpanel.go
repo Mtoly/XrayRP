@@ -35,12 +35,12 @@ type APIClient struct {
 	eTags            map[string]string
 }
 
-// ReportIllegal implements api.API.
+// ReportIllegal accepts illegal-access reports for this adapter.
 func (*APIClient) ReportIllegal(detectResultList *[]api.DetectResult) (err error) {
 	return nil
 }
 
-// ReportNodeStatus implements api.API.
+// ReportNodeStatus accepts node status reports for this adapter.
 func (*APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return nil
 }
@@ -50,7 +50,7 @@ func (*APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 	return nil, nil
 }
 
-// GetNodeRule implements api.API.
+// GetNodeRule returns the configured local detection rules.
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 	ruleList := c.LocalRuleList
 	return &ruleList, nil

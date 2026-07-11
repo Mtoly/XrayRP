@@ -140,25 +140,7 @@ type runtimeCertConfigAPI struct {
 	certCalls int
 }
 
-func (a *runtimeCertConfigAPI) GetNodeInfo() (*api.NodeInfo, error) { return &api.NodeInfo{}, nil }
 func (a *runtimeCertConfigAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 	a.certCalls++
 	return a.cert, a.certErr
 }
-func (a *runtimeCertConfigAPI) GetUserList() (*[]api.UserInfo, error) {
-	users := []api.UserInfo{}
-	return &users, nil
-}
-func (a *runtimeCertConfigAPI) GetAliveList() (map[int][]string, error)       { return nil, nil }
-func (a *runtimeCertConfigAPI) ReportNodeStatus(*api.NodeStatus) error        { return nil }
-func (a *runtimeCertConfigAPI) ReportNodeOnlineUsers(*[]api.OnlineUser) error { return nil }
-func (a *runtimeCertConfigAPI) ReportUserTraffic(*[]api.UserTraffic) error    { return nil }
-func (a *runtimeCertConfigAPI) Describe() api.ClientInfo {
-	return api.ClientInfo{APIHost: "https://panel.example.com", NodeID: 1, NodeType: "Vless"}
-}
-func (a *runtimeCertConfigAPI) GetNodeRule() (*[]api.DetectRule, error) {
-	rules := []api.DetectRule{}
-	return &rules, nil
-}
-func (a *runtimeCertConfigAPI) ReportIllegal(*[]api.DetectResult) error { return nil }
-func (a *runtimeCertConfigAPI) Debug()                                  {}

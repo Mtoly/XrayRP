@@ -16,7 +16,7 @@ import (
 )
 
 type AnyTLSService struct {
-	apiClient api.API
+	apiClient PanelClient
 	config    *controller.Config
 
 	clientInfo api.ClientInfo

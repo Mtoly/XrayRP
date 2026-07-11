@@ -20,32 +20,89 @@ type DeviceReporterReadiness interface {
 	DeviceReporterReady() bool
 }
 
-func WrapAPIWithReporter(apiClient api.API, nodeID int, reporter any) api.API {
+type PanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
+type certConfigProvider interface {
+	GetXrayRCertConfig() (*api.XrayRCertConfig, error)
+}
+
+type aliveListProvider interface {
+	GetAliveList() (map[int][]string, error)
+}
+
+func WrapAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) PanelClient {
 	if apiClient == nil || reporter == nil || nodeID <= 0 {
 		return apiClient
 	}
-	return &reportingAPI{
-		API:      apiClient,
-		nodeID:   nodeID,
-		reporter: reporter,
+	wrapped := &reportingAPI{
+		PanelClient: apiClient,
+		nodeID:      nodeID,
+		reporter:    reporter,
+	}
+	certProvider, hasCert := apiClient.(certConfigProvider)
+	aliveProvider, hasAlive := apiClient.(aliveListProvider)
+	switch {
+	case hasCert && hasAlive:
+		return &reportingAPIWithCertAndAlive{
+			reportingAPI:       wrapped,
+			certConfigProvider: certProvider,
+			aliveListProvider:  aliveProvider,
+		}
+	case hasCert:
+		return &reportingAPIWithCert{
+			reportingAPI:       wrapped,
+			certConfigProvider: certProvider,
+		}
+	case hasAlive:
+		return &reportingAPIWithAlive{
+			reportingAPI:      wrapped,
+			aliveListProvider: aliveProvider,
+		}
+	default:
+		return wrapped
 	}
 }
 
-func WrapAPIWithStatusReporter(apiClient api.API, nodeID int, reporter NodeStatusReporter) api.API {
+func WrapAPIWithStatusReporter(apiClient PanelClient, nodeID int, reporter NodeStatusReporter) PanelClient {
 	return WrapAPIWithReporter(apiClient, nodeID, reporter)
 }
 
 type reportingAPI struct {
-	api.API
+	PanelClient
 	nodeID   int
 	reporter any
+}
+
+type reportingAPIWithCert struct {
+	*reportingAPI
+	certConfigProvider
+}
+
+type reportingAPIWithAlive struct {
+	*reportingAPI
+	aliveListProvider
+}
+
+type reportingAPIWithCertAndAlive struct {
+	*reportingAPI
+	certConfigProvider
+	aliveListProvider
 }
 
 func (a *reportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
 	if reporter, ok := a.reporter.(NodeStatusReporter); ok {
 		_ = reporter.ReportNodeStatus(a.nodeID, nodeStatus)
 	}
-	return a.API.ReportNodeStatus(nodeStatus)
+	return a.PanelClient.ReportNodeStatus(nodeStatus)
 }
 
 func (a *reportingAPI) ReportNodeDevices(devices map[int][]string) error {
@@ -61,7 +118,7 @@ func (a *reportingAPI) DeviceReporterReady() bool {
 }
 
 func (a *reportingAPI) GetWSConfig() *api.WSConfig {
-	capable, ok := a.API.(api.WSCapable)
+	capable, ok := a.PanelClient.(api.WSCapable)
 	if !ok {
 		return nil
 	}
@@ -69,7 +126,7 @@ func (a *reportingAPI) GetWSConfig() *api.WSConfig {
 }
 
 func (a *reportingAPI) DiscoverWSEndpoint() (string, error) {
-	discoverer, ok := a.API.(api.WSEndpointDiscoverer)
+	discoverer, ok := a.PanelClient.(api.WSEndpointDiscoverer)
 	if !ok {
 		return "", nil
 	}

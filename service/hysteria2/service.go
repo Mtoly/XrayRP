@@ -16,10 +16,21 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
+type PanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
 var _ service.Service = (*Hysteria2Service)(nil)
 
 // New creates a new Hysteria2 service bound to a SSPanel node.
-func New(apiClient api.API, cfg *controller.Config) *Hysteria2Service {
+func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 	clientInfo := apiClient.Describe()
 	logger := log.NewEntry(log.StandardLogger()).WithFields(log.Fields{
 		"Host": clientInfo.APIHost,
