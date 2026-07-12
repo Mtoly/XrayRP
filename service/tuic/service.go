@@ -7,7 +7,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/xtls/xray-core/common/task"
+	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/rule"
@@ -52,6 +52,7 @@ func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
 		runtimeFactory: defaultRuntimeFactory,
 		startRuntime:   defaultStartRuntime,
 		closeRuntime:   defaultCloseRuntime,
+		taskFactory:    defaultTaskFactory,
 		logger:         logger,
 		rules:          rule.New(),
 		users:          make(map[string]userRecord),
@@ -69,123 +70,211 @@ func (s *TuicService) buildRuntime() (runtimeInstance, string, error) {
 	return factory(s)
 }
 
-func (s *TuicService) Start() error {
-	s.clientInfo = s.apiClient.Describe()
+func (s *TuicService) Start() (err error) {
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return errors.New("TUIC service cannot start after close")
+	}
+	if s.state != stateStopped {
+		state := s.state
+		s.lifecycleMu.Unlock()
+		return fmt.Errorf("TUIC service cannot start from state %d", state)
+	}
+	s.state = stateStarting
+	s.runtimeErr = nil
+	s.lifecycleMu.Unlock()
 
+	fail := func(primary error) error {
+		s.lifecycleMu.Lock()
+		s.state = stateFailed
+		s.runtimeErr = primary
+		s.lifecycleMu.Unlock()
+		return primary
+	}
+
+	clientInfo := s.apiClient.Describe()
 	nodeInfo, err := s.apiClient.GetNodeInfo()
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if nodeInfo == nil || nodeInfo.NodeType != "Tuic" {
-		return fmt.Errorf("TuicService can only be used with Tuic node, got %v", nodeInfo)
+		return fail(fmt.Errorf("TuicService can only be used with Tuic node, got %v", nodeInfo))
 	}
 	if nodeInfo.Port == 0 {
-		return errors.New("server port must > 0")
+		return fail(errors.New("server port must > 0"))
 	}
 	if s.config == nil || s.config.CertConfig == nil {
-		return errors.New("CertConfig is required for TUIC")
+		return fail(errors.New("CertConfig is required for TUIC"))
 	}
 	if nodeInfo.TuicConfig == nil {
 		nodeInfo.TuicConfig = &api.TuicConfig{}
 	}
 
-	s.nodeInfo = nodeInfo
-	// Ensure tag is unique per TUIC node by embedding NodeID so that
-	// limiter and rule manager state remain per-node, even when
-	// multiple TUIC nodes share the same listen endpoint.
-	s.tag = fmt.Sprintf("%s_%s_%d_%d", s.nodeInfo.NodeType, s.config.ListenIP, s.nodeInfo.Port, s.nodeInfo.NodeID)
-	s.startAt = time.Now()
-	s.inboundTag = s.tag
+	tag := fmt.Sprintf("%s_%s_%d_%d", nodeInfo.NodeType, s.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
+	startAt := time.Now()
 
 	userInfo, err := s.apiClient.GetUserList()
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	if userInfo == nil || len(*userInfo) == 0 {
 		s.logger.Warn("No users found for TUIC node, authentication may fail")
 	} else {
 		s.logger.Infof("Syncing %d users for TUIC node", len(*userInfo))
 	}
-	s.syncUsers(userInfo)
 
-	// Initial rule list.
-	if !s.config.DisableGetRule && s.rules != nil {
-		if ruleList, err := s.apiClient.GetNodeRule(); err != nil {
-			s.logger.Printf("Get rule list filed: %s", err)
-		} else if len(*ruleList) > 0 {
-			if err := s.rules.UpdateRule(s.tag, *ruleList); err != nil {
-				s.logger.Print(err)
-			}
+	oldNodeInfo, oldTag, oldInboundTag := s.nodeInfo, s.tag, s.inboundTag
+	s.mu.Lock()
+	oldUsers := s.users
+	oldTraffic := s.traffic
+	oldOnlineIPs := s.onlineIPs
+	oldIPLastActive := s.ipLastActive
+	oldAuthUsers := s.authUsers
+	oldRateLimiters := s.rateLimiters
+	startupRateLimiters := make(map[string]*rate.Limiter, len(oldRateLimiters))
+	for key, limiter := range oldRateLimiters {
+		if limiter != nil {
+			startupRateLimiters[key] = rate.NewLimiter(limiter.Limit(), limiter.Burst())
 		}
 	}
-
-	boxInstance, _, err := s.buildRuntime()
-	if err != nil {
-		return err
+	s.rateLimiters = startupRateLimiters
+	s.mu.Unlock()
+	restoreStartupState := func() {
+		s.nodeInfo, s.tag, s.inboundTag = oldNodeInfo, oldTag, oldInboundTag
+		s.mu.Lock()
+		s.users = oldUsers
+		s.traffic = oldTraffic
+		s.onlineIPs = oldOnlineIPs
+		s.ipLastActive = oldIPLastActive
+		s.authUsers = oldAuthUsers
+		s.rateLimiters = oldRateLimiters
+		s.mu.Unlock()
 	}
-	s.box = boxInstance
+	s.nodeInfo, s.tag, s.inboundTag = nodeInfo, tag, tag
+	s.syncUsers(userInfo)
+	s.mu.Lock()
+	startupUsers := s.users
+	startupTraffic := s.traffic
+	startupOnlineIPs := s.onlineIPs
+	startupIPLastActive := s.ipLastActive
+	startupAuthUsers := s.authUsers
+	startupRateLimiters = s.rateLimiters
+	s.mu.Unlock()
 
+	boxInstance, inboundTag, err := s.buildRuntime()
+	restoreStartupState()
+	if err != nil {
+		return fail(err)
+	}
+
+	closeRuntime := s.closeRuntime
+	if closeRuntime == nil {
+		closeRuntime = defaultCloseRuntime
+	}
 	startRuntime := s.startRuntime
 	if startRuntime == nil {
 		startRuntime = defaultStartRuntime
 	}
-	go func(runtime runtimeInstance) {
-		if err := startRuntime(runtime); err != nil {
-			s.logger.Errorf("TUIC sing-box start error: %v", err)
-		}
-	}(boxInstance)
-
-	interval := time.Duration(s.config.UpdatePeriodic) * time.Second
-	s.tasks = []periodicTask{
-		{
-			tag: s.tag,
-			Periodic: &task.Periodic{
-				Interval: interval,
-				Execute:  s.userMonitor,
-			},
-		},
-		{
-			tag: "node monitor",
-			Periodic: &task.Periodic{
-				Interval: interval,
-				Execute:  s.nodeMonitor,
-			},
-		},
+	if err := startRuntime(boxInstance); err != nil {
+		return fail(errors.Join(err, closeRuntime(boxInstance)))
 	}
 
-	if s.nodeInfo.EnableTLS {
-		s.tasks = append(s.tasks, periodicTask{
-			tag: "cert monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(s.config.UpdatePeriodic) * time.Second * 60,
-				Execute:  s.certMonitor,
-			},
+	factory := s.taskFactory
+	if factory == nil {
+		factory = defaultTaskFactory
+	}
+	interval := time.Duration(s.config.UpdatePeriodic) * time.Second
+	tasks := []periodicTask{
+		{tag: tag, task: factory(tag, interval, s.userMonitor)},
+		{tag: "node monitor", task: factory("node monitor", interval, s.nodeMonitor)},
+	}
+	if nodeInfo.EnableTLS {
+		tasks = append(tasks, periodicTask{
+			tag:  "cert monitor",
+			task: factory("cert monitor", interval*60, s.certMonitor),
 		})
 	}
 
-	for _, t := range s.tasks {
-		go t.Start()
+	for i := range tasks {
+		if err := tasks[i].Start(); err != nil {
+			cleanupErrs := []error{err}
+			for j := i; j >= 0; j-- {
+				cleanupErrs = append(cleanupErrs, tasks[j].Close())
+			}
+			cleanupErrs = append(cleanupErrs, closeRuntime(boxInstance))
+			return fail(errors.Join(cleanupErrs...))
+		}
 	}
 
-	s.logger.Infof("TUIC node started on %s:%d (sing-box %s)", s.config.ListenIP, s.nodeInfo.Port, getSingBoxVersion())
+	s.lifecycleMu.Lock()
+	s.clientInfo = clientInfo
+	s.nodeInfo = nodeInfo
+	s.box = boxInstance
+	s.inboundTag = inboundTag
+	s.tag = tag
+	s.startAt = startAt
+	s.tasks = tasks
+	s.mu.Lock()
+	s.users = startupUsers
+	s.traffic = startupTraffic
+	s.onlineIPs = startupOnlineIPs
+	s.ipLastActive = startupIPLastActive
+	s.authUsers = startupAuthUsers
+	s.rateLimiters = startupRateLimiters
+	s.mu.Unlock()
+	s.state = stateRunning
+	s.runtimeErr = nil
+	s.lifecycleMu.Unlock()
+
+	if !s.config.DisableGetRule && s.rules != nil {
+		if ruleList, ruleErr := s.apiClient.GetNodeRule(); ruleErr != nil {
+			s.logger.Printf("Get rule list filed: %s", ruleErr)
+		} else if ruleList != nil && len(*ruleList) > 0 {
+			if ruleErr := s.rules.UpdateRule(tag, *ruleList); ruleErr != nil {
+				s.logger.Print(ruleErr)
+			}
+		}
+	}
+
+	s.logger.Infof("TUIC node started on %s:%d (sing-box %s)", s.config.ListenIP, nodeInfo.Port, getSingBoxVersion())
 	return nil
 }
 
 func (s *TuicService) Close() error {
-	for _, t := range s.tasks {
-		if t.Periodic != nil {
-			t.Periodic.Close()
-		}
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return nil
 	}
-	s.tasks = nil
-	if s.box != nil {
+	if s.state == stateStarting {
+		s.lifecycleMu.Unlock()
+		return errors.New("TUIC service cannot close while starting")
+	}
+	s.closed = true
+	s.state = stateStopping
+	tasks := s.tasks
+	boxInstance := s.box
+	s.lifecycleMu.Unlock()
+
+	var errs []error
+	for i := len(tasks) - 1; i >= 0; i-- {
+		errs = append(errs, tasks[i].Close())
+	}
+	if boxInstance != nil {
 		closeRuntime := s.closeRuntime
 		if closeRuntime == nil {
 			closeRuntime = defaultCloseRuntime
 		}
-		return closeRuntime(s.box)
+		errs = append(errs, closeRuntime(boxInstance))
 	}
-	return nil
+
+	s.lifecycleMu.Lock()
+	s.tasks = nil
+	s.box = nil
+	s.state = stateStopped
+	s.lifecycleMu.Unlock()
+	return errors.Join(errs...)
 }
 
 // reloadNode replaces in-memory node information and rebuilds the underlying

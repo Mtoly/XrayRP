@@ -23,6 +23,28 @@ type runtimeFactory func(*AnyTLSService) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error
 type closeRuntimeFunc func(runtimeInstance) error
 
+type lifecycleState uint8
+
+const (
+	stateStopped lifecycleState = iota
+	stateStarting
+	stateRunning
+	stateReloading
+	stateStopping
+	stateFailed
+)
+
+type lifecycleTask interface {
+	Start() error
+	Close() error
+}
+
+type taskFactory func(tag string, interval time.Duration, execute func() error) lifecycleTask
+
+func defaultTaskFactory(tag string, interval time.Duration, execute func() error) lifecycleTask {
+	return &task.Periodic{Interval: interval, Execute: execute}
+}
+
 type AnyTLSService struct {
 	apiClient PanelClient
 	config    *controller.Config
@@ -34,7 +56,13 @@ type AnyTLSService struct {
 	runtimeFactory runtimeFactory
 	startRuntime   startRuntimeFunc
 	closeRuntime   closeRuntimeFunc
+	taskFactory    taskFactory
 	inboundTag     string
+
+	lifecycleMu sync.Mutex
+	state       lifecycleState
+	runtimeErr  error
+	closed      bool
 
 	tag     string
 	startAt time.Time
@@ -69,6 +97,20 @@ type userTraffic struct {
 }
 
 type periodicTask struct {
-	tag string
-	*task.Periodic
+	tag  string
+	task lifecycleTask
+}
+
+func (t periodicTask) Start() error {
+	if t.task == nil {
+		return nil
+	}
+	return t.task.Start()
+}
+
+func (t periodicTask) Close() error {
+	if t.task == nil {
+		return nil
+	}
+	return t.task.Close()
 }

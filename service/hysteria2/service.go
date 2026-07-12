@@ -8,7 +8,7 @@ import (
 
 	"github.com/apernet/hysteria/core/v2/server"
 	log "github.com/sirupsen/logrus"
-	"github.com/xtls/xray-core/common/task"
+	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/rule"
@@ -59,6 +59,8 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		runtimeServerFactory: defaultRuntimeServerFactory,
 		serveRuntime:         defaultServeRuntime,
 		closeRuntime:         defaultCloseRuntime,
+		taskFactory:          defaultTaskFactory,
+		serveHandshake:       defaultServeHandshake,
 		logger:               logger,
 		rules:                rule.New(),
 		users:                make(map[string]userRecord),
@@ -87,117 +89,214 @@ func (h *Hysteria2Service) buildRuntimeServer() (runtimeServer, error) {
 	return runtimeFactory(cfg)
 }
 
-// Start implements service.Service.Start.
-func (h *Hysteria2Service) Start() error {
-	h.clientInfo = h.apiClient.Describe()
+func (h *Hysteria2Service) Start() (err error) {
+	h.lifecycleMu.Lock()
+	if h.closed {
+		h.lifecycleMu.Unlock()
+		return errors.New("Hysteria2 service cannot start after close")
+	}
+	if h.state != stateStopped {
+		state := h.state
+		h.lifecycleMu.Unlock()
+		return fmt.Errorf("Hysteria2 service cannot start from state %d", state)
+	}
+	h.state = stateStarting
+	h.runtimeErr = nil
+	h.lifecycleMu.Unlock()
 
-	// Fetch node info.
+	fail := func(primary error) error {
+		h.lifecycleMu.Lock()
+		h.state = stateFailed
+		h.runtimeErr = primary
+		h.lifecycleMu.Unlock()
+		return primary
+	}
+
+	clientInfo := h.apiClient.Describe()
 	nodeInfo, err := h.apiClient.GetNodeInfo()
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	if nodeInfo.NodeType != "Hysteria2" {
-		return fmt.Errorf("Hysteria2Service can only be used with Hysteria2 node, got %s", nodeInfo.NodeType)
+	if nodeInfo == nil || nodeInfo.NodeType != "Hysteria2" {
+		return fail(fmt.Errorf("Hysteria2Service can only be used with Hysteria2 node, got %v", nodeInfo))
 	}
 	if nodeInfo.Port == 0 {
-		return errors.New("server port must > 0")
+		return fail(errors.New("server port must > 0"))
 	}
 	if nodeInfo.Hysteria2Config == nil {
-		return errors.New("Hysteria2Config is nil in node info")
+		return fail(errors.New("Hysteria2Config is nil in node info"))
 	}
 	if h.config == nil || h.config.CertConfig == nil {
-		return errors.New("CertConfig is required for Hysteria2")
+		return fail(errors.New("CertConfig is required for Hysteria2"))
 	}
 
-	h.nodeInfo = nodeInfo
-	// Tag must be unique per logical node, even if multiple nodes share
-	// the same listen IP and port. Include NodeID to keep limiter and
-	// audit rule state isolated.
-	h.tag = fmt.Sprintf("%s_%s_%d_%d", h.nodeInfo.NodeType, h.config.ListenIP, h.nodeInfo.Port, h.nodeInfo.NodeID)
-	h.startAt = time.Now()
+	tag := fmt.Sprintf("%s_%s_%d_%d", nodeInfo.NodeType, h.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
+	startAt := time.Now()
 
-	// Initial user list.
 	userInfo, err := h.apiClient.GetUserList()
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	h.syncUsers(userInfo)
 
-	// Initial rule list.
-	if !h.config.DisableGetRule && h.rules != nil {
-		if ruleList, err := h.apiClient.GetNodeRule(); err != nil {
-			h.logger.Printf("Get rule list filed: %s", err)
-		} else if len(*ruleList) > 0 {
-			if err := h.rules.UpdateRule(h.tag, *ruleList); err != nil {
-				h.logger.Print(err)
-			}
+	oldNodeInfo, oldTag := h.nodeInfo, h.tag
+	h.mu.Lock()
+	oldUsers := h.users
+	oldTraffic := h.traffic
+	oldOverLimit := h.overLimit
+	oldOnlineIPs := h.onlineIPs
+	oldIPLastActive := h.ipLastActive
+	oldRateLimiters := h.rateLimiters
+	startupRateLimiters := make(map[string]*rate.Limiter, len(oldRateLimiters))
+	for key, limiter := range oldRateLimiters {
+		if limiter != nil {
+			startupRateLimiters[key] = rate.NewLimiter(limiter.Limit(), limiter.Burst())
 		}
 	}
-
-	// Build Hysteria2 server.
-	srv, err := h.buildRuntimeServer()
-	if err != nil {
-		return err
+	h.rateLimiters = startupRateLimiters
+	h.mu.Unlock()
+	restoreStartupState := func() {
+		h.nodeInfo, h.tag = oldNodeInfo, oldTag
+		h.mu.Lock()
+		h.users = oldUsers
+		h.traffic = oldTraffic
+		h.overLimit = oldOverLimit
+		h.onlineIPs = oldOnlineIPs
+		h.ipLastActive = oldIPLastActive
+		h.rateLimiters = oldRateLimiters
+		h.mu.Unlock()
 	}
-	h.server = srv
+	h.nodeInfo, h.tag = nodeInfo, tag
+	h.syncUsers(userInfo)
+	h.mu.Lock()
+	startupUsers := h.users
+	startupTraffic := h.traffic
+	startupOverLimit := h.overLimit
+	startupOnlineIPs := h.onlineIPs
+	startupIPLastActive := h.ipLastActive
+	startupRateLimiters = h.rateLimiters
+	h.mu.Unlock()
 
+	srv, err := h.buildRuntimeServer()
+	restoreStartupState()
+	if err != nil {
+		return fail(err)
+	}
+
+	closeRuntime := h.closeRuntime
+	if closeRuntime == nil {
+		closeRuntime = defaultCloseRuntime
+	}
 	serveRuntime := h.serveRuntime
 	if serveRuntime == nil {
 		serveRuntime = defaultServeRuntime
 	}
-	go func(runtime runtimeServer) {
-		if err := serveRuntime(runtime); err != nil {
-			h.logger.Errorf("Hysteria2 Serve error: %v", err)
-		}
-	}(srv)
-
-	// Apply Hysteria2 port hopping iptables rules for the initial node
-	// configuration, if the panel enabled port hopping for this node.
-	h.refreshPortHopRules()
-
-	// Periodic tasks: user/traffic monitor, node monitor and optional cert
-	// monitor for ACME (dns/http/tls) certificates.
-	interval := time.Duration(h.config.UpdatePeriodic) * time.Second
-	h.tasks = []periodicTask{
-		{
-			tag: h.tag,
-			Periodic: &task.Periodic{
-				Interval: interval,
-				Execute:  h.userMonitor,
-			},
-		},
-		{
-			tag: "node monitor",
-			Periodic: &task.Periodic{
-				Interval: interval,
-				Execute:  h.nodeMonitor,
-			},
-		},
+	serveResult := make(chan error, 1)
+	serveStarted := make(chan struct{})
+	startServe := func() {
+		go func() {
+			close(serveStarted)
+			serveResult <- serveRuntime(srv)
+		}()
+	}
+	handshake := h.serveHandshake
+	if handshake == nil {
+		handshake = defaultServeHandshake
+	}
+	if err := handshake(startServe, serveStarted, serveResult); err != nil {
+		return fail(errors.Join(err, closeRuntime(srv)))
 	}
 
-	// Check cert service in need (dns/http/tls auto-renewal)
-	if h.nodeInfo.EnableTLS {
-		h.tasks = append(h.tasks, periodicTask{
-			tag: "cert monitor",
-			Periodic: &task.Periodic{
-				Interval: time.Duration(h.config.UpdatePeriodic) * time.Second * 60,
-				Execute:  h.certMonitor,
-			},
+	factory := h.taskFactory
+	if factory == nil {
+		factory = defaultTaskFactory
+	}
+	interval := time.Duration(h.config.UpdatePeriodic) * time.Second
+	tasks := []periodicTask{
+		{tag: tag, task: factory(tag, interval, h.userMonitor)},
+		{tag: "node monitor", task: factory("node monitor", interval, h.nodeMonitor)},
+	}
+	if nodeInfo.EnableTLS {
+		tasks = append(tasks, periodicTask{
+			tag:  "cert monitor",
+			task: factory("cert monitor", interval*60, h.certMonitor),
 		})
 	}
-
-	for _, t := range h.tasks {
-		go t.Start()
+	for i := range tasks {
+		if err := tasks[i].Start(); err != nil {
+			cleanupErrs := []error{err}
+			for j := i; j >= 0; j-- {
+				cleanupErrs = append(cleanupErrs, tasks[j].Close())
+			}
+			cleanupErrs = append(cleanupErrs, closeRuntime(srv))
+			return fail(errors.Join(cleanupErrs...))
+		}
 	}
 
-	h.logger.Infof("Hysteria2 node started on %s:%d (hysteria core %s)", h.config.ListenIP, h.nodeInfo.Port, getHysteriaCoreVersion())
+	h.lifecycleMu.Lock()
+	h.clientInfo = clientInfo
+	h.nodeInfo = nodeInfo
+	h.server = srv
+	h.tag = tag
+	h.startAt = startAt
+	h.tasks = tasks
+	h.mu.Lock()
+	h.users = startupUsers
+	h.traffic = startupTraffic
+	h.overLimit = startupOverLimit
+	h.onlineIPs = startupOnlineIPs
+	h.ipLastActive = startupIPLastActive
+	h.rateLimiters = startupRateLimiters
+	h.mu.Unlock()
+	h.state = stateRunning
+	h.runtimeErr = nil
+	h.lifecycleMu.Unlock()
+
+	h.refreshPortHopRules()
+
+	if !h.config.DisableGetRule && h.rules != nil {
+		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
+			h.logger.Printf("Get rule list filed: %s", ruleErr)
+		} else if ruleList != nil && len(*ruleList) > 0 {
+			if ruleErr := h.rules.UpdateRule(tag, *ruleList); ruleErr != nil {
+				h.logger.Print(ruleErr)
+			}
+		}
+	}
+
+	go func() {
+		serveErr := <-serveResult
+		h.lifecycleMu.Lock()
+		if h.state == stateRunning {
+			h.state = stateFailed
+			h.runtimeErr = serveErr
+		}
+		h.lifecycleMu.Unlock()
+		if serveErr != nil {
+			h.logger.Errorf("Hysteria2 Serve error: %v", serveErr)
+		}
+	}()
+
+	h.logger.Infof("Hysteria2 node started on %s:%d (hysteria core %s)", h.config.ListenIP, nodeInfo.Port, getHysteriaCoreVersion())
 	return nil
 }
 
 // Close implements service.Service.Close.
 func (h *Hysteria2Service) Close() error {
-	// Best-effort cleanup of any iptables rules we previously installed for
-	// Hysteria2 port hopping.
+	h.lifecycleMu.Lock()
+	if h.closed {
+		h.lifecycleMu.Unlock()
+		return nil
+	}
+	if h.state == stateStarting {
+		h.lifecycleMu.Unlock()
+		return errors.New("Hysteria2 service cannot close while starting")
+	}
+	h.closed = true
+	h.state = stateStopping
+	tasks := h.tasks
+	srv := h.server
+	h.lifecycleMu.Unlock()
+
 	h.reloadMu.Lock()
 	if len(h.portHopRules) > 0 {
 		deletePortHopIptablesRules(h.portHopRules, h.logger)
@@ -205,20 +304,24 @@ func (h *Hysteria2Service) Close() error {
 	}
 	h.reloadMu.Unlock()
 
-	for _, t := range h.tasks {
-		if t.Periodic != nil {
-			t.Periodic.Close()
-		}
+	var errs []error
+	for i := len(tasks) - 1; i >= 0; i-- {
+		errs = append(errs, tasks[i].Close())
 	}
-	h.tasks = nil
-	if h.server != nil {
+	if srv != nil {
 		closeRuntime := h.closeRuntime
 		if closeRuntime == nil {
 			closeRuntime = defaultCloseRuntime
 		}
-		return closeRuntime(h.server)
+		errs = append(errs, closeRuntime(srv))
 	}
-	return nil
+
+	h.lifecycleMu.Lock()
+	h.tasks = nil
+	h.server = nil
+	h.state = stateStopped
+	h.lifecycleMu.Unlock()
+	return errors.Join(errs...)
 }
 
 // reloadNode replaces the in-memory node information and rebuilds the

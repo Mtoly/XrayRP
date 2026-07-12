@@ -7,7 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/sagernet/sing-box/option"
+	"golang.org/x/time/rate"
 )
 
 type lifecycleEvents struct {
@@ -203,6 +207,347 @@ func TestRuntimeFakeInjectsStartAndCloseErrors(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"start", "stop", "close"}) {
 		t.Fatalf("events = %v, want [start stop close]", got)
+	}
+}
+
+type configurablePanelClient struct {
+	nodeInfo      *api.NodeInfo
+	nodeInfoErr   error
+	users         []api.UserInfo
+	userListErr   error
+	rules         []api.DetectRule
+	nodeRuleErr   error
+	nodeRuleCalls int
+}
+
+func (c *configurablePanelClient) Describe() api.ClientInfo { return api.ClientInfo{NodeID: 7} }
+func (c *configurablePanelClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.nodeInfo, c.nodeInfoErr
+}
+func (c *configurablePanelClient) GetUserList() (*[]api.UserInfo, error) {
+	return &c.users, c.userListErr
+}
+func (c *configurablePanelClient) GetNodeRule() (*[]api.DetectRule, error) {
+	c.nodeRuleCalls++
+	return &c.rules, c.nodeRuleErr
+}
+func (*configurablePanelClient) ReportNodeStatus(*api.NodeStatus) error        { return nil }
+func (*configurablePanelClient) ReportNodeOnlineUsers(*[]api.OnlineUser) error { return nil }
+func (*configurablePanelClient) ReportUserTraffic(*[]api.UserTraffic) error    { return nil }
+func (*configurablePanelClient) ReportIllegal(*[]api.DetectResult) error       { return nil }
+
+type fakePeriodicTask struct {
+	tag      string
+	events   *lifecycleEvents
+	startErr error
+	closeErr error
+}
+
+func (t *fakePeriodicTask) Start() error {
+	t.events.add("task-start:" + t.tag)
+	return t.startErr
+}
+func (t *fakePeriodicTask) Close() error {
+	t.events.add("task-close:" + t.tag)
+	return t.closeErr
+}
+
+func newStartTestService(events *lifecycleEvents, runtime *fakeRuntimeInstance) *AnyTLSService {
+	client := &configurablePanelClient{
+		nodeInfo: &api.NodeInfo{NodeType: "AnyTLS", NodeID: 7, Port: 443, AnyTLSConfig: &api.AnyTLSConfig{}},
+	}
+	service := New(client, &controller.Config{
+		ListenIP:       "127.0.0.1",
+		UpdatePeriodic: 60,
+		DisableGetRule: true,
+		CertConfig:     &mylego.CertConfig{},
+	})
+	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+		events.add("build")
+		return runtime, "test-inbound", nil
+	}
+	service.taskFactory = func(tag string, _ time.Duration, _ func() error) lifecycleTask {
+		return &fakePeriodicTask{tag: tag, events: events}
+	}
+	return service
+}
+
+func TestStartBuildsRuntimeWithIncomingTag(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.inboundTag = "stale-inbound"
+	service.tag = "stale-tag"
+	service.runtimeFactory = func(service *AnyTLSService) (runtimeInstance, string, error) {
+		events.add("build")
+		if service.tag != "AnyTLS_127.0.0.1_443_7" {
+			t.Fatalf("runtime build tag = %q, want incoming tag", service.tag)
+		}
+		if service.inboundTag != "AnyTLS_127.0.0.1_443_7" {
+			t.Fatalf("runtime build inbound tag = %q, want incoming tag", service.inboundTag)
+		}
+		return &fakeRuntimeInstance{events: events}, service.inboundTag, nil
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if service.inboundTag != "AnyTLS_127.0.0.1_443_7" {
+		t.Fatalf("published inbound tag = %q, want incoming tag", service.inboundTag)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestStartBuildFailureDoesNotPublishRuntime(t *testing.T) {
+	wantErr := errors.New("build failed")
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+		events.add("build")
+		return nil, "", wantErr
+	}
+
+	err := service.Start()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want %v", err, wantErr)
+	}
+	if service.box != nil || service.nodeInfo != nil || service.tasks != nil || service.tag != "" || !service.startAt.IsZero() {
+		t.Fatalf("failed Start published state: box=%v nodeInfo=%v tasks=%v tag=%q startAt=%v", service.box, service.nodeInfo, service.tasks, service.tag, service.startAt)
+	}
+	if service.state != stateFailed || !errors.Is(service.runtimeErr, wantErr) {
+		t.Fatalf("state/error = %v/%v, want failed/%v", service.state, service.runtimeErr, wantErr)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build"}) {
+		t.Fatalf("events = %v, want [build]", got)
+	}
+}
+
+func TestStartUserListFailureDoesNotBuildRuntime(t *testing.T) {
+	wantErr := errors.New("user list failed")
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.apiClient.(*configurablePanelClient).userListErr = wantErr
+
+	err := service.Start()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Start() error = %v, want %v", err, wantErr)
+	}
+	if got := events.snapshot(); len(got) != 0 {
+		t.Fatalf("events = %v, want no runtime or task work", got)
+	}
+	if service.nodeInfo != nil || service.box != nil || service.tasks != nil || service.tag != "" || !service.startAt.IsZero() {
+		t.Fatalf("panel failure published state: nodeInfo=%v box=%v tasks=%v tag=%q startAt=%v", service.nodeInfo, service.box, service.tasks, service.tag, service.startAt)
+	}
+}
+
+func TestStartRuntimeFailureCleansRuntimeAndSkipsTasks(t *testing.T) {
+	startErr := errors.New("start failed")
+	closeErr := errors.New("close failed")
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeInstance{events: events, startErr: startErr, closeErr: closeErr}
+	service := newStartTestService(events, runtime)
+
+	err := service.Start()
+	if !errors.Is(err, startErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Start() error = %v, want joined start and close errors", err)
+	}
+	if service.box != nil || service.nodeInfo != nil || service.tasks != nil {
+		t.Fatalf("failed Start published runtime state: box=%v nodeInfo=%v tasks=%v", service.box, service.nodeInfo, service.tasks)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "start", "stop", "close"}) {
+		t.Fatalf("events = %v, want [build start stop close]", got)
+	}
+}
+
+func TestStartTaskFailureCleansStartedTasksInReverseThenRuntime(t *testing.T) {
+	taskErr := errors.New("task start failed")
+	taskCloseErr := errors.New("task close failed")
+	closeErr := errors.New("runtime close failed")
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeInstance{events: events, closeErr: closeErr}
+	service := newStartTestService(events, runtime)
+	created := 0
+	service.taskFactory = func(tag string, _ time.Duration, _ func() error) lifecycleTask {
+		created++
+		return &fakePeriodicTask{
+			tag:      tag,
+			events:   events,
+			startErr: map[bool]error{true: taskErr}[created == 2],
+			closeErr: map[bool]error{true: taskCloseErr}[created == 1],
+		}
+	}
+
+	err := service.Start()
+	if !errors.Is(err, taskErr) || !errors.Is(err, taskCloseErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("Start() error = %v, want joined task start, task close, and runtime close errors", err)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{
+		"build", "start", "ready", "task-start:AnyTLS_127.0.0.1_443_7", "task-start:node monitor",
+		"task-close:node monitor", "task-close:AnyTLS_127.0.0.1_443_7", "stop", "close",
+	}) {
+		t.Fatalf("events = %v, want reverse task cleanup then runtime cleanup", got)
+	}
+	if service.tasks != nil || service.box != nil || service.nodeInfo != nil {
+		t.Fatalf("failed Start published state: tasks=%v box=%v nodeInfo=%v", service.tasks, service.box, service.nodeInfo)
+	}
+}
+
+func TestStartFailureRestoresUserStateAndDefersRules(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.config.DisableGetRule = false
+	client := service.apiClient.(*configurablePanelClient)
+	client.users = []api.UserInfo{{UUID: "old-user", SpeedLimit: 20}, {UUID: "new-user", SpeedLimit: 10}}
+	client.rules = []api.DetectRule{{ID: 1}}
+	oldLimiter := rate.NewLimiter(10, 10)
+	service.users["old-user"] = userRecord{UID: 1}
+	service.authUsers = []option.AnyTLSUser{{Name: "old-user", Password: "old-user"}}
+	service.rateLimiters = map[string]*rate.Limiter{"old-user": oldLimiter}
+	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+		return nil, "", errors.New("build failed")
+	}
+
+	if err := service.Start(); err == nil {
+		t.Fatal("Start() error = nil, want build failure")
+	}
+	if _, ok := service.users["old-user"]; !ok || len(service.users) != 1 {
+		t.Fatalf("users after failed Start = %v, want original users", service.users)
+	}
+	if len(service.authUsers) != 1 || service.authUsers[0].Name != "old-user" {
+		t.Fatalf("authUsers after failed Start = %v, want original users", service.authUsers)
+	}
+	if limiter, ok := service.rateLimiters["old-user"]; !ok || len(service.rateLimiters) != 1 || limiter != oldLimiter {
+		t.Fatalf("rateLimiters after failed Start = %v, want original map", service.rateLimiters)
+	}
+	if got := oldLimiter.Limit(); got != 10 {
+		t.Fatalf("original limiter mutated during failed Start: limit=%v, want 10", got)
+	}
+	if client.nodeRuleCalls != 0 {
+		t.Fatalf("GetNodeRule calls = %d, want deferred until successful startup", client.nodeRuleCalls)
+	}
+}
+
+func TestCloseWhileStartingIsRejectedWithoutClosingService(t *testing.T) {
+	events := &lifecycleEvents{}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	runtime := &fakeRuntimeInstance{events: events, startBlock: release, started: entered}
+	service := newStartTestService(events, runtime)
+	done := make(chan error, 1)
+	go func() { done <- service.Start() }()
+	<-entered
+	if err := service.Close(); err == nil {
+		t.Fatal("Close() error = nil, want starting-state rejection")
+	}
+	if service.closed || service.state != stateStarting {
+		t.Fatalf("Close() changed starting lifecycle: closed=%v state=%v", service.closed, service.state)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+}
+
+func TestCloseAfterFailedStartTransitionsToStopped(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.apiClient.(*configurablePanelClient).userListErr = errors.New("users failed")
+	if err := service.Start(); err == nil {
+		t.Fatal("Start() error = nil, want failure")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if service.state != stateStopped || !service.closed {
+		t.Fatalf("state/closed after Close = %v/%v, want stopped/true", service.state, service.closed)
+	}
+}
+
+func TestStartPublishesUserStateOnSuccess(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.apiClient.(*configurablePanelClient).users = []api.UserInfo{{UUID: "new-user", SpeedLimit: 10}}
+	service.users["old-user"] = userRecord{UID: 1}
+	service.authUsers = []option.AnyTLSUser{{Name: "old-user", Password: "old-user"}}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if _, ok := service.users["new-user"]; !ok || len(service.users) != 1 {
+		t.Fatalf("users after successful Start = %v, want new users", service.users)
+	}
+	if len(service.authUsers) != 1 || service.authUsers[0].Name != "new-user" {
+		t.Fatalf("authUsers after successful Start = %v, want new auth users", service.authUsers)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestStartPublishesOnlyAfterRuntimeAndTasksAreReady(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.taskFactory = func(tag string, _ time.Duration, _ func() error) lifecycleTask {
+		return &fakePeriodicTask{tag: tag, events: events}
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if service.state != stateRunning || service.runtimeErr != nil || service.box == nil || service.nodeInfo == nil || len(service.tasks) != 2 || service.tag == "" || service.startAt.IsZero() {
+		t.Fatalf("successful Start did not publish running state: state=%v err=%v box=%v nodeInfo=%v tasks=%d tag=%q startAt=%v", service.state, service.runtimeErr, service.box, service.nodeInfo, len(service.tasks), service.tag, service.startAt)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "start", "ready", "task-start:AnyTLS_127.0.0.1_443_7", "task-start:node monitor"}) {
+		t.Fatalf("events = %v, want synchronous runtime readiness before tasks", got)
+	}
+}
+
+func TestStartTwiceWhileStartingIsRejected(t *testing.T) {
+	events := &lifecycleEvents{}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	runtime := &fakeRuntimeInstance{events: events, startBlock: release, started: entered}
+	service := newStartTestService(events, runtime)
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- service.Start() }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first Start() did not enter runtime start")
+	}
+	if err := service.Start(); err == nil {
+		t.Fatal("concurrent Start() error = nil, want starting-state rejection")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+}
+
+func TestStartTwiceAndStartAfterCloseAreRejected(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	if err := service.Start(); err != nil {
+		t.Fatalf("first Start() error = %v", err)
+	}
+	if err := service.Start(); err == nil {
+		t.Fatal("second Start() error = nil, want rejection")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if service.state != stateStopped {
+		t.Fatalf("state after Close = %v, want stopped", service.state)
+	}
+	if err := service.Start(); err == nil {
+		t.Fatal("Start() after Close error = nil, want rejection")
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{
+		"build", "start", "ready", "task-start:AnyTLS_127.0.0.1_443_7", "task-start:node monitor",
+		"task-close:node monitor", "task-close:AnyTLS_127.0.0.1_443_7", "stop", "close",
+	}) {
+		t.Fatalf("events = %v, unexpected restart work", got)
 	}
 }
 

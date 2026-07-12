@@ -26,6 +26,42 @@ type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error
 type closeRuntimeFunc func(runtimeServer) error
 
+type lifecycleState uint8
+
+const (
+	stateStopped lifecycleState = iota
+	stateStarting
+	stateRunning
+	stateReloading
+	stateStopping
+	stateFailed
+)
+
+type lifecycleTask interface {
+	Start() error
+	Close() error
+}
+
+type taskFactory func(tag string, interval time.Duration, execute func() error) lifecycleTask
+type serveHandshakeFunc func(start func(), started <-chan struct{}, result <-chan error) error
+
+func defaultTaskFactory(tag string, interval time.Duration, execute func() error) lifecycleTask {
+	return &task.Periodic{Interval: interval, Execute: execute}
+}
+
+// defaultServeHandshake only establishes that the Serve goroutine reached the
+// call point. A Serve error not already buffered is recorded by the watcher.
+func defaultServeHandshake(start func(), started <-chan struct{}, result <-chan error) error {
+	start()
+	<-started
+	select {
+	case err := <-result:
+		return err
+	default:
+		return nil
+	}
+}
+
 type Hysteria2Service struct {
 	apiClient PanelClient
 	config    *controller.Config
@@ -38,6 +74,13 @@ type Hysteria2Service struct {
 	runtimeServerFactory runtimeServerFactory
 	serveRuntime         serveRuntimeFunc
 	closeRuntime         closeRuntimeFunc
+	taskFactory          taskFactory
+	serveHandshake       serveHandshakeFunc
+
+	lifecycleMu sync.Mutex
+	state       lifecycleState
+	runtimeErr  error
+	closed      bool
 
 	tag     string
 	startAt time.Time
@@ -89,6 +132,20 @@ type portHopRule struct {
 }
 
 type periodicTask struct {
-	tag string
-	*task.Periodic
+	tag  string
+	task lifecycleTask
+}
+
+func (t periodicTask) Start() error {
+	if t.task == nil {
+		return nil
+	}
+	return t.task.Start()
+}
+
+func (t periodicTask) Close() error {
+	if t.task == nil {
+		return nil
+	}
+	return t.task.Close()
 }
