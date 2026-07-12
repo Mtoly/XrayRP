@@ -1002,10 +1002,10 @@ func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {
 
 func (c *Controller) buildNodeTag() string {
 	state := c.runtimeStateSnapshot()
-	if state.nodeInfo == nil {
+	if !state.nodeInfoSet {
 		return ""
 	}
-	return c.buildNodeTagFrom(state.nodeInfo)
+	return c.buildNodeTagFrom(&state.nodeInfo)
 }
 
 func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error {

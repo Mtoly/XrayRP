@@ -317,8 +317,7 @@ func (a nodeRuntimeStateApplyModule) applyRuleSnapshot(tag string, rules []api.D
 	if tag == "" {
 		return nil
 	}
-	currentRules := c.getAppliedRuleList()
-	currentRuleTag := c.getAppliedRuleTag()
+	currentRuleTag, currentRules := c.getAppliedRuleState()
 	if detectRuleListsEqual(currentRules, rules) {
 		if tag == currentRuleTag || (len(currentRules) == 0 && len(rules) == 0) {
 			return nil
