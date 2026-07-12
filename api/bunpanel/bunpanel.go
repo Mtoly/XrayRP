@@ -3,7 +3,6 @@ package bunpanel
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -36,12 +35,12 @@ type APIClient struct {
 	eTags            map[string]string
 }
 
-// ReportIllegal implements api.API.
+// ReportIllegal accepts illegal-access reports for this adapter.
 func (*APIClient) ReportIllegal(detectResultList *[]api.DetectResult) (err error) {
 	return nil
 }
 
-// ReportNodeStatus implements api.API.
+// ReportNodeStatus accepts node status reports for this adapter.
 func (*APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return nil
 }
@@ -51,7 +50,7 @@ func (*APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 	return nil, nil
 }
 
-// GetNodeRule implements api.API.
+// GetNodeRule returns the configured local detection rules.
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 	ruleList := c.LocalRuleList
 	return &ruleList, nil
@@ -172,9 +171,13 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		SetHeader("If-None-Match", c.eTags["node"]).
 		ForceContentType("application/json").
 		Get(path)
+	if err != nil || res == nil {
+		_, err = c.parseResponse(res, path, err)
+		return nil, err
+	}
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.NodeNotModified)
+		return nil, api.ErrNodeNotModified
 	}
 
 	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["node"] {
@@ -209,9 +212,13 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
+	if err != nil || res == nil {
+		_, err = c.parseResponse(res, path, err)
+		return nil, err
+	}
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
-		return nil, errors.New(api.UserNotModified)
+		return nil, api.ErrUserNotModified
 	}
 
 	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["users"] {

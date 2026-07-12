@@ -103,7 +103,7 @@ func waitForControllerPeriodicBootstrap() {
 	// No-op retained for legacy callers; tests now avoid bootstrap timing assumptions.
 }
 
-func newLifecycleTestController(apiClient api.API, enableWS bool) *Controller {
+func newLifecycleTestController(apiClient PanelClient, enableWS bool) *Controller {
 	return &Controller{
 		config: &Config{
 			ListenIP:       "127.0.0.1",

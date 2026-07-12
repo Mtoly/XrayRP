@@ -10,22 +10,8 @@ import (
 
 type stubAdapter struct{}
 
-var _ api.API = stubAdapter{}
-
-func (stubAdapter) GetNodeInfo() (*api.NodeInfo, error)               { return nil, nil }
-func (stubAdapter) GetXrayRCertConfig() (*api.XrayRCertConfig, error) { return nil, nil }
-func (stubAdapter) GetUserList() (*[]api.UserInfo, error)             { return nil, nil }
-func (stubAdapter) GetAliveList() (map[int][]string, error)           { return nil, nil }
-func (stubAdapter) ReportNodeStatus(*api.NodeStatus) error            { return nil }
-func (stubAdapter) ReportNodeOnlineUsers(*[]api.OnlineUser) error     { return nil }
-func (stubAdapter) ReportUserTraffic(*[]api.UserTraffic) error        { return nil }
-func (stubAdapter) Describe() api.ClientInfo                          { return api.ClientInfo{} }
-func (stubAdapter) GetNodeRule() (*[]api.DetectRule, error)           { return nil, nil }
-func (stubAdapter) ReportIllegal(*[]api.DetectResult) error           { return nil }
-func (stubAdapter) Debug()                                            {}
-
 func TestWSCapNewV2boardOptIn(t *testing.T) {
-	var client api.API = newV2board.New(&api.Config{
+	var client any = newV2board.New(&api.Config{
 		APIHost:   "https://panel.example.com",
 		Key:       "secret-token",
 		NodeID:    7,
@@ -60,7 +46,7 @@ func TestWSCapNewV2boardOptIn(t *testing.T) {
 }
 
 func TestWSCapNewV2boardUsesPanelFacingVlessNodeType(t *testing.T) {
-	var client api.API = newV2board.New(&api.Config{
+	var client any = newV2board.New(&api.Config{
 		APIHost:     "https://panel.example.com",
 		Key:         "secret-token",
 		NodeID:      7,
@@ -83,7 +69,7 @@ func TestWSCapNewV2boardUsesPanelFacingVlessNodeType(t *testing.T) {
 }
 
 func TestWSCapOtherAdaptersRemainUnaffected(t *testing.T) {
-	var client api.API = bunpanel.New(&api.Config{
+	var client any = bunpanel.New(&api.Config{
 		APIHost:  "https://panel.example.com",
 		Key:      "secret-token",
 		NodeID:   1,
@@ -95,18 +81,18 @@ func TestWSCapOtherAdaptersRemainUnaffected(t *testing.T) {
 	}
 }
 
-func TestWSCapBaseAPIContractRemainsOptional(t *testing.T) {
-	var client api.API = stubAdapter{}
+func TestWSCapBaseClientRemainsOptional(t *testing.T) {
+	var client any = stubAdapter{}
 
 	if _, ok := client.(api.WSCapable); ok {
-		t.Fatal("expected base api.API implementations to remain valid without ws capability")
+		t.Fatal("expected base client implementations to remain valid without ws capability")
 	}
 }
 
-func TestBaseConfigCapabilityBaseAPIContractRemainsOptional(t *testing.T) {
-	var client api.API = stubAdapter{}
+func TestBaseConfigCapabilityRemainsOptional(t *testing.T) {
+	var client any = stubAdapter{}
 
 	if _, ok := client.(api.BaseConfigProvider); ok {
-		t.Fatal("expected base api.API implementations to remain valid without base config capability")
+		t.Fatal("expected base client implementations to remain valid without base config capability")
 	}
 }

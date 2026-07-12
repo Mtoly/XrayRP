@@ -41,16 +41,82 @@ type Panel struct {
 	serverMutex  sync.RWMutex
 	serviceMutex sync.RWMutex
 	panelConfig  *Config
+	lifecycle    panelLifecycleOps
+	state        panelLifecycleState
 	Server       *core.Instance
 	Service      []service.Service
 	Running      bool
 	logger       *log.Entry
 }
 
+type panelLifecycleState uint8
+
+const (
+	panelStateStopped panelLifecycleState = iota
+	panelStateStarting
+	panelStateRunning
+	panelStateStopping
+)
+
+type panelLifecycleOps struct {
+	loadCore           func(*Panel, *Config) (*core.Instance, error)
+	startCore          func(*core.Instance) error
+	closeCore          func(*core.Instance) error
+	buildRuntimePlan   func(*Config) (runtimeConfigPlan, error)
+	buildStaticModules func(*Panel, *core.Instance, runtimeConfigPlan) ([]service.Service, error)
+	buildMachineModule func(*Panel, *core.Instance, runtimeConfigPlan) (service.Service, error)
+}
+
+func (p *Panel) lifecycleOps() panelLifecycleOps {
+	ops := p.lifecycle
+	defaults := defaultPanelLifecycleOps()
+	if ops.loadCore == nil {
+		ops.loadCore = defaults.loadCore
+	}
+	if ops.startCore == nil {
+		ops.startCore = defaults.startCore
+	}
+	if ops.closeCore == nil {
+		ops.closeCore = defaults.closeCore
+	}
+	if ops.buildRuntimePlan == nil {
+		ops.buildRuntimePlan = defaults.buildRuntimePlan
+	}
+	if ops.buildStaticModules == nil {
+		ops.buildStaticModules = defaults.buildStaticModules
+	}
+	if ops.buildMachineModule == nil {
+		ops.buildMachineModule = defaults.buildMachineModule
+	}
+	return ops
+}
+
+func defaultPanelLifecycleOps() panelLifecycleOps {
+	return panelLifecycleOps{
+		loadCore: func(p *Panel, config *Config) (*core.Instance, error) {
+			return p.loadCore(config)
+		},
+		startCore: func(server *core.Instance) error {
+			return server.Start()
+		},
+		closeCore: func(server *core.Instance) error {
+			return server.Close()
+		},
+		buildRuntimePlan: buildRuntimeConfigPlan,
+		buildStaticModules: func(p *Panel, server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
+			return p.buildStaticNodeServices(server, plan)
+		},
+		buildMachineModule: func(p *Panel, server *core.Instance, plan runtimeConfigPlan) (service.Service, error) {
+			return p.buildMachineSupervisor(server, plan)
+		},
+	}
+}
+
 func New(panelConfig *Config) *Panel {
 	logger := log.WithFields(log.Fields{"module": "panel"})
 	p := &Panel{
 		panelConfig: panelConfig,
+		lifecycle:   defaultPanelLifecycleOps(),
 		logger:      logger,
 	}
 	return p
@@ -181,53 +247,95 @@ func (p *Panel) Start() error {
 	p.access.Lock()
 	defer p.access.Unlock()
 	p.logger.Info("Starting panel")
-	// Load Core
-	server, err := p.loadCore(p.panelConfig)
+	ops := p.lifecycleOps()
+	if p.state == panelStateRunning {
+		p.Running = true
+		return nil
+	}
+	p.state = panelStateStarting
+	p.Running = false
+
+	server, err := ops.loadCore(p, p.panelConfig)
 	if err != nil {
+		p.state = panelStateStopped
 		return fmt.Errorf("failed to load core: %w", err)
 	}
-	if err := server.Start(); err != nil {
-		return fmt.Errorf("failed to start instance: %w", err)
-	}
-	p.serverMutex.Lock()
-	p.Server = server
-	p.serverMutex.Unlock()
 
-	plan, err := buildRuntimeConfigPlan(p.panelConfig)
+	startedServices := make([]service.Service, 0)
+	rollback := func(primary error) error {
+		errs := []error{primary}
+		for i := len(startedServices) - 1; i >= 0; i-- {
+			if err := startedServices[i].Close(); err != nil {
+				errs = append(errs, fmt.Errorf("failed to roll back service: %w", err))
+				p.logLifecycleError("Failed to roll back service", err)
+			}
+		}
+		if err := ops.closeCore(server); err != nil {
+			errs = append(errs, fmt.Errorf("failed to roll back core: %w", err))
+			p.logLifecycleError("Failed to roll back core", err)
+		}
+		p.clearPublishedState()
+		p.state = panelStateStopped
+		return errors.Join(errs...)
+	}
+	if err := ops.startCore(server); err != nil {
+		return rollback(fmt.Errorf("failed to start instance: %w", err))
+	}
+
+	plan, err := ops.buildRuntimePlan(p.panelConfig)
 	if err != nil {
-		return err
+		return rollback(err)
 	}
 
 	var services []service.Service
 	if plan.mode == runtimeConfigModeMachine {
-		supervisor, err := p.buildMachineSupervisor(server, plan)
+		supervisor, err := ops.buildMachineModule(p, server, plan)
 		if err != nil {
-			return err
+			return rollback(err)
 		}
 		services = []service.Service{supervisor}
 	} else {
-		services, err = p.buildStaticNodeServices(server, plan)
+		services, err = ops.buildStaticModules(p, server, plan)
 		if err != nil {
-			return err
+			return rollback(err)
 		}
 	}
-
-	p.serviceMutex.Lock()
-	p.Service = append(p.Service, services...)
-	p.serviceMutex.Unlock()
 
 	for _, s := range services {
 		if err := s.Start(); err != nil {
-			if common.ShowErrorDetails() {
-				p.logger.Errorf("Failed to start service: %v", err)
-			} else {
-				p.logger.Error("Failed to start service; error details omitted because they may contain credentials")
-			}
-			return fmt.Errorf("failed to start service: %w", err)
+			p.logLifecycleError("Failed to start service", err)
+			return rollback(fmt.Errorf("failed to start service: %w", err))
 		}
+		startedServices = append(startedServices, s)
 	}
+
+	p.serverMutex.Lock()
+	p.serviceMutex.Lock()
+	p.Server = server
+	p.Service = append([]service.Service(nil), services...)
+	p.state = panelStateRunning
 	p.Running = true
+	p.serviceMutex.Unlock()
+	p.serverMutex.Unlock()
 	return nil
+}
+
+func (p *Panel) clearPublishedState() {
+	p.serverMutex.Lock()
+	p.serviceMutex.Lock()
+	p.Server = nil
+	p.Service = nil
+	p.Running = false
+	p.serviceMutex.Unlock()
+	p.serverMutex.Unlock()
+}
+
+func (p *Panel) logLifecycleError(message string, err error) {
+	if common.ShowErrorDetails() {
+		p.logger.Errorf("%s: %v", message, err)
+		return
+	}
+	p.logger.Errorf("%s; error details omitted because they may contain credentials", message)
 }
 
 func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
@@ -237,7 +345,7 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 
 	services := make([]service.Service, 0, len(plan.staticNodes))
 	for _, nodePlan := range plan.staticNodes {
-		var apiClient api.API
+		var apiClient runtimePanelClient
 		switch nodePlan.panelType {
 		case "SSpanel", "SSPanel":
 			apiClient = sspanel.New(nodePlan.apiConfig)
@@ -274,11 +382,22 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 	return services, nil
 }
 
-func (p *Panel) buildNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType string) (service.Service, error) {
+type runtimePanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
+func (p *Panel) buildNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType string) (service.Service, error) {
 	return p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, panelType, "")
 }
 
-func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
+func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
 	nodeType := runtimeNodeServiceType(apiClient, fallbackNodeType)
 	return p.buildRuntimeNodeService(server, apiClient, controllerConfig, panelType, nodeType)
 }
@@ -292,7 +411,11 @@ const (
 	runtimeNodeServiceAnyTLS     runtimeNodeServiceKind = "anytls"
 )
 
-func runtimeNodeServiceType(apiClient api.API, fallbackNodeType string) string {
+type describer interface {
+	Describe() api.ClientInfo
+}
+
+func runtimeNodeServiceType(apiClient describer, fallbackNodeType string) string {
 	nodeType := apiClient.Describe().NodeType
 	if nodeType == "" {
 		return fallbackNodeType
@@ -313,7 +436,7 @@ func runtimeNodeServiceKindForNodeType(nodeType string) runtimeNodeServiceKind {
 	}
 }
 
-func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient api.API, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
+func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
 	switch runtimeNodeServiceKindForNodeType(nodeType) {
 	case runtimeNodeServiceHysteria2:
 		return hysteria2.New(apiClient, controllerConfig), nil
@@ -331,15 +454,23 @@ func (p *Panel) Close() error {
 	p.access.Lock()
 	defer p.access.Unlock()
 
+	if p.state == panelStateStopped {
+		p.clearPublishedState()
+		return nil
+	}
+	p.state = panelStateStopping
+	p.Running = false
+
 	p.serviceMutex.RLock()
 	services := make([]service.Service, len(p.Service))
 	copy(services, p.Service)
 	p.serviceMutex.RUnlock()
+	ops := p.lifecycleOps()
 
 	var errs []error
 	for _, s := range services {
 		if err := s.Close(); err != nil {
-			p.logger.Errorf("Failed to close service: %v", err)
+			p.logLifecycleError("Failed to close service", err)
 			errs = append(errs, err)
 		}
 	}
@@ -349,14 +480,20 @@ func (p *Panel) Close() error {
 	p.serviceMutex.Unlock()
 
 	p.serverMutex.Lock()
-	if p.Server != nil {
-		if err := p.Server.Close(); err != nil {
+	server := p.Server
+	p.Server = nil
+	p.serverMutex.Unlock()
+	if server != nil {
+		if err := ops.closeCore(server); err != nil {
+			p.logLifecycleError("Failed to close core", err)
 			errs = append(errs, err)
 		}
 	}
-	p.serverMutex.Unlock()
 
+	p.serverMutex.Lock()
+	p.state = panelStateStopped
 	p.Running = false
+	p.serverMutex.Unlock()
 	return errors.Join(errs...)
 }
 

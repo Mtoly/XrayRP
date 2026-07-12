@@ -248,7 +248,7 @@ func TestControllerStartPeriodicTasksFallsBackToLocalUpdatePeriodic(t *testing.T
 }
 
 type baseConfigAPI struct {
-	api.API
+	PanelClient
 	api.BaseConfig
 }
 

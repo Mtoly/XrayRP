@@ -1,6 +1,7 @@
 package tuic
 
 import (
+	"errors"
 	"net"
 	"reflect"
 	"time"
@@ -314,7 +315,7 @@ func (s *TuicService) userMonitor() error {
 	usersChanged := true
 	newUserInfo, err := s.apiClient.GetUserList()
 	if err != nil {
-		if err.Error() == api.UserNotModified {
+		if errors.Is(err, api.ErrUserNotModified) {
 			usersChanged = false
 		} else {
 			s.logger.Print(err)
@@ -328,7 +329,7 @@ func (s *TuicService) userMonitor() error {
 	// Check Rule
 	if !s.config.DisableGetRule && s.rules != nil {
 		if ruleList, err := s.apiClient.GetNodeRule(); err != nil {
-			if err.Error() != api.RuleNotModified {
+			if !errors.Is(err, api.ErrRuleNotModified) {
 				s.logger.Printf("Get rule list filed: %s", err)
 			}
 		} else if len(*ruleList) > 0 {
@@ -378,7 +379,7 @@ func (s *TuicService) nodeMonitor() error {
 
 	nodeInfo, err := s.apiClient.GetNodeInfo()
 	if err != nil {
-		if err.Error() == api.NodeNotModified {
+		if errors.Is(err, api.ErrNodeNotModified) {
 			return nil
 		}
 		s.logger.Print(err)

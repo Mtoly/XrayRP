@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sync"
@@ -17,6 +18,75 @@ import (
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
+
+func TestFetchSyncApplySnapshotUsesCurrentStateForWrappedNotModifiedErrors(t *testing.T) {
+	currentNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	currentUsers := []api.UserInfo{{UID: 1, Email: "current@example.com"}}
+	currentRules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("current.example")}}
+
+	tests := []struct {
+		name      string
+		configure func(*fakeSyncApplyAPI)
+		action    syncAction
+		assert    func(*testing.T, syncApplySnapshot)
+	}{
+		{
+			name: "node",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.nodeErr = fmt.Errorf("fetch node: %w", api.ErrNodeNotModified)
+				client.ruleList = &currentRules
+			},
+			action: newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.NodeInfo == currentNode || !reflect.DeepEqual(snapshot.NodeInfo, currentNode) {
+					t.Fatalf("expected an owned copy of current node state, got %#v", snapshot.NodeInfo)
+				}
+			},
+		},
+		{
+			name: "user",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.userErr = fmt.Errorf("fetch users: %w", api.ErrUserNotModified)
+			},
+			action: newSyncAction(syncActionTypeSyncUsers, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.UserList == &currentUsers || snapshot.UserList == nil || !reflect.DeepEqual(*snapshot.UserList, currentUsers) {
+					t.Fatalf("expected an owned copy of current user state, got %#v", snapshot.UserList)
+				}
+			},
+		},
+		{
+			name: "rule",
+			configure: func(client *fakeSyncApplyAPI) {
+				client.nodeInfo = currentNode
+				client.ruleErr = fmt.Errorf("fetch rules: %w", api.ErrRuleNotModified)
+			},
+			action: newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourcePolling, syncActionMetadata{}),
+			assert: func(t *testing.T, snapshot syncApplySnapshot) {
+				if snapshot.RuleList == nil || !reflect.DeepEqual(*snapshot.RuleList, currentRules) {
+					t.Fatalf("expected current rule state, got %#v", snapshot.RuleList)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeSyncApplyAPI{}
+			test.configure(client)
+			controller, _ := newTestSyncApplyController(client)
+			controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+			controller.setUserList(&currentUsers)
+			controller.setAppliedRuleList(currentRules)
+
+			snapshot, err := newNodeRuntimeStateApplyModule(controller).fetchSyncApplySnapshot(test.action)
+			if err != nil {
+				t.Fatalf("fetchSyncApplySnapshot returned wrapped not-modified error: %v", err)
+			}
+			test.assert(t, snapshot)
+		})
+	}
+}
 
 type fakeSyncApplyAPI struct {
 	nodeInfo   *api.NodeInfo
@@ -133,7 +203,7 @@ func (r *syncApplyRecorder) recordUpdateInboundLimiter(tag string, users *[]api.
 	r.updatedLimiterPayloads = append(r.updatedLimiterPayloads, cloneRecordedUsers(users))
 }
 
-func newTestSyncApplyController(apiClient api.API) (*Controller, *syncApplyRecorder) {
+func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyRecorder) {
 	logger := log.NewEntry(log.New())
 	recorder := &syncApplyRecorder{}
 	controller := &Controller{
@@ -581,6 +651,19 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	}
 }
 
+func TestSyncApply_MissingCertCapabilityIsNoOp(t *testing.T) {
+	controller, _ := newTestSyncApplyController(panelClientWithoutDebug{})
+	original := &mylego.CertConfig{CertMode: "file", CertFile: "/existing/cert.crt", KeyFile: "/existing/cert.key"}
+	controller.config.CertConfig = original
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction returned error without cert capability: %v", err)
+	}
+	if controller.config.CertConfig != original {
+		t.Fatalf("expected missing cert capability to preserve existing config, got %#v", controller.config.CertConfig)
+	}
+}
+
 func TestSyncApply_ClearFetchedCertConfig(t *testing.T) {
 	fakeAPI := &fakeSyncApplyAPI{}
 	controller, _ := newTestSyncApplyController(fakeAPI)
@@ -852,7 +935,7 @@ func TestSyncApply_UserLimitOnlyUpdateFailureRestoresLimiterAndDoesNotCommitUser
 		t.Fatalf("expected no runtime add payloads, got %#v", recorder.addedUserPayloads)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
-	if appliedUsers != &currentUsers || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
+	if appliedUsers == &currentUsers || appliedUsers == nil || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
 		t.Fatalf("expected committed user state to retain old limits, got %#v", appliedUsers)
 	}
 }
@@ -901,7 +984,7 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 		t.Fatalf("expected runtime update to remove old user then roll back partially added user, got %#v", recorder.removedUsers)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
-	if appliedUsers != &currentUsers || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
+	if appliedUsers == &currentUsers || appliedUsers == nil || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
 		t.Fatalf("expected committed user state to retain old UUID and limits, got %#v", appliedUsers)
 	}
 }
@@ -942,7 +1025,7 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 		t.Fatalf("expected runtime update to attempt old user removal, got %#v", recorder.removedUsers)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
-	if appliedUsers != &currentUsers || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
+	if appliedUsers == &currentUsers || appliedUsers == nil || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
 		t.Fatalf("expected committed user state to retain old UUID and limits, got %#v", appliedUsers)
 	}
 }
@@ -1053,14 +1136,14 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	}
 
 	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
-	if appliedNode != currentNode {
-		t.Fatalf("expected controller node state to remain on old node, got %#v", appliedNode)
+	if appliedNode == currentNode || !reflect.DeepEqual(appliedNode, currentNode) {
+		t.Fatalf("expected controller node state to remain on an owned copy of the old node, got %#v", appliedNode)
 	}
 	if appliedTag != currentTag {
 		t.Fatalf("expected controller tag to remain %q, got %q", currentTag, appliedTag)
 	}
-	if appliedUsers != &restUsers {
-		t.Fatalf("expected controller user state to remain unchanged, got %#v", appliedUsers)
+	if appliedUsers == &restUsers || appliedUsers == nil || !reflect.DeepEqual(*appliedUsers, restUsers) {
+		t.Fatalf("expected controller user state to remain an owned copy of the prior values, got %#v", appliedUsers)
 	}
 	if got := controller.getAppliedRuleTag(); got != currentTag {
 		t.Fatalf("expected rule state to remain bound to old tag %q, got %q", currentTag, got)
@@ -1130,14 +1213,14 @@ func TestSyncApply_SameTagRebuildAddFailureRestoresOldRuntimeState(t *testing.T)
 	}
 
 	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
-	if appliedNode != currentNode {
-		t.Fatalf("expected controller node state to remain on old node after same-tag failure, got %#v", appliedNode)
+	if appliedNode == currentNode || !reflect.DeepEqual(appliedNode, currentNode) {
+		t.Fatalf("expected controller node state to remain on an owned copy after same-tag failure, got %#v", appliedNode)
 	}
 	if appliedTag != currentTag {
 		t.Fatalf("expected controller tag to remain %q after same-tag failure, got %q", currentTag, appliedTag)
 	}
-	if appliedUsers != &restUsers {
-		t.Fatalf("expected controller user state to remain unchanged after same-tag failure, got %#v", appliedUsers)
+	if appliedUsers == &restUsers || appliedUsers == nil || !reflect.DeepEqual(*appliedUsers, restUsers) {
+		t.Fatalf("expected controller user state to remain an owned copy after same-tag failure, got %#v", appliedUsers)
 	}
 	if got := controller.getAppliedRuleTag(); got != currentTag {
 		t.Fatalf("expected rule state to remain bound to old tag %q after same-tag failure, got %q", currentTag, got)

@@ -2,14 +2,24 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"regexp"
 
 	"github.com/xtls/xray-core/infra/conf"
 )
 
+var (
+	ErrUserNotModified = errors.New("users not modified")
+	ErrNodeNotModified = errors.New("node not modified")
+	ErrRuleNotModified = errors.New("rules not modified")
+)
+
 const (
+	// Deprecated: use ErrUserNotModified with errors.Is.
 	UserNotModified = "users not modified"
+	// Deprecated: use ErrNodeNotModified with errors.Is.
 	NodeNotModified = "node not modified"
+	// Deprecated: use ErrRuleNotModified with errors.Is.
 	RuleNotModified = "rules not modified"
 )
 

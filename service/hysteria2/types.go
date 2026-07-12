@@ -17,7 +17,7 @@ import (
 const onlineIPTTL = 2 * time.Minute
 
 type Hysteria2Service struct {
-	apiClient api.API
+	apiClient PanelClient
 	config    *controller.Config
 
 	clientInfo api.ClientInfo

@@ -257,7 +257,7 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 
 	res, err := req.Get(path)
 	if useETag && res != nil && res.StatusCode() == 304 {
-		return nil, fmt.Errorf(api.NodeNotModified)
+		return nil, api.ErrNodeNotModified
 	}
 
 	if useETag && res != nil {

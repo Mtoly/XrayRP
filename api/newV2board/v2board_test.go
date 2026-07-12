@@ -15,7 +15,7 @@ func requireIntegration(t *testing.T) {
 	}
 }
 
-func CreateClient() api.API {
+func CreateClient() *newV2board.APIClient {
 	apiConfig := &api.Config{
 		APIHost:  "http://localhost:9897",
 		Key:      "qwertyuiopasdfghjkl",

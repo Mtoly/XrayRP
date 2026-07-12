@@ -15,7 +15,7 @@ func requireV2RaySocksIntegration(t *testing.T) {
 	}
 }
 
-func CreateClient() api.API {
+func CreateClient() *v2raysocks.APIClient {
 	apiConfig := &api.Config{
 		APIHost:  "https://127.0.0.1/",
 		Key:      "123456789",

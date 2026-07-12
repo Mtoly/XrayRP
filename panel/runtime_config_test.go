@@ -121,27 +121,7 @@ type runtimeNodeServiceTestAPI struct {
 	clientInfo api.ClientInfo
 }
 
-func (a *runtimeNodeServiceTestAPI) GetNodeInfo() (*api.NodeInfo, error) { return &api.NodeInfo{}, nil }
-func (a *runtimeNodeServiceTestAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	return &api.XrayRCertConfig{}, nil
-}
-func (a *runtimeNodeServiceTestAPI) GetUserList() (*[]api.UserInfo, error) {
-	users := []api.UserInfo{}
-	return &users, nil
-}
-func (a *runtimeNodeServiceTestAPI) GetAliveList() (map[int][]string, error) { return nil, nil }
-func (a *runtimeNodeServiceTestAPI) ReportNodeStatus(*api.NodeStatus) error  { return nil }
-func (a *runtimeNodeServiceTestAPI) ReportNodeOnlineUsers(*[]api.OnlineUser) error {
-	return nil
-}
-func (a *runtimeNodeServiceTestAPI) ReportUserTraffic(*[]api.UserTraffic) error { return nil }
-func (a *runtimeNodeServiceTestAPI) Describe() api.ClientInfo                   { return a.clientInfo }
-func (a *runtimeNodeServiceTestAPI) GetNodeRule() (*[]api.DetectRule, error) {
-	rules := []api.DetectRule{}
-	return &rules, nil
-}
-func (a *runtimeNodeServiceTestAPI) ReportIllegal(*[]api.DetectResult) error { return nil }
-func (a *runtimeNodeServiceTestAPI) Debug()                                  {}
+func (a *runtimeNodeServiceTestAPI) Describe() api.ClientInfo { return a.clientInfo }
 
 func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	config := validMachineModeConfig()

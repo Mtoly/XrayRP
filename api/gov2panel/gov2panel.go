@@ -3,6 +3,7 @@ package gov2panel
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -211,7 +212,7 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return
 }
 
-// GetAliveList implements api.API
+// GetAliveList returns no panel-managed alive list for this adapter.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 	return nil, nil
 }
@@ -335,10 +336,16 @@ func (c *APIClient) sendRequest(headerM map[string]string, method string, url st
 	}
 	defer gResponse.Close()
 
-	reslutJson = gjson.New(gResponse.ReadAllString())
-	if reslutJson == nil {
-		err = fmt.Errorf("http response is not valid JSON")
+	if gResponse.StatusCode >= 400 {
+		err = fmt.Errorf("request %s failed: status %d", url, gResponse.StatusCode)
+		return
 	}
+	body := gResponse.ReadAll()
+	if !json.Valid(body) {
+		err = fmt.Errorf("http response is not valid JSON")
+		return
+	}
+	reslutJson = gjson.New(body)
 	if reslutJson.Get("code").Int() != 0 {
 		err = errors.New(reslutJson.Get("message").String())
 		return

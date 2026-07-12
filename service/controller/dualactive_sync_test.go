@@ -129,8 +129,8 @@ func TestDualActive_WSTriggerThenPollingConverges(t *testing.T) {
 	waitForCoordinatorIdle(t, coordinator)
 
 	stateNode, stateTag, stateUsers := controller.getStateSnapshot()
-	if stateNode != initialNode {
-		t.Fatalf("expected ws user sync to keep node state unchanged, got %#v", stateNode)
+	if stateNode == initialNode || !reflect.DeepEqual(stateNode, initialNode) {
+		t.Fatalf("expected ws user sync to keep node state values unchanged in an owned snapshot, got %#v", stateNode)
 	}
 	if stateTag != controller.buildNodeTagFrom(initialNode) {
 		t.Fatalf("expected ws user sync to keep node tag unchanged, got %q", stateTag)

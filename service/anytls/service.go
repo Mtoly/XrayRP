@@ -15,9 +15,20 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
+type PanelClient interface {
+	Describe() api.ClientInfo
+	GetNodeInfo() (*api.NodeInfo, error)
+	GetUserList() (*[]api.UserInfo, error)
+	GetNodeRule() (*[]api.DetectRule, error)
+	ReportNodeStatus(*api.NodeStatus) error
+	ReportNodeOnlineUsers(*[]api.OnlineUser) error
+	ReportUserTraffic(*[]api.UserTraffic) error
+	ReportIllegal(*[]api.DetectResult) error
+}
+
 var _ service.Service = (*AnyTLSService)(nil)
 
-func New(apiClient api.API, cfg *controller.Config) *AnyTLSService {
+func New(apiClient PanelClient, cfg *controller.Config) *AnyTLSService {
 	clientInfo := apiClient.Describe()
 	logger := log.NewEntry(log.StandardLogger()).WithFields(log.Fields{
 		"Host": clientInfo.APIHost,

@@ -115,7 +115,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchNode {
 		nodeInfo, err := c.apiClient.GetNodeInfo()
 		if err != nil {
-			if err.Error() == api.NodeNotModified {
+			if errors.Is(err, api.ErrNodeNotModified) {
 				snapshot.NodeInfo = currentNodeInfo
 			} else {
 				return snapshot, err
@@ -132,7 +132,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchUsers {
 		userList, err := c.apiClient.GetUserList()
 		if err != nil {
-			if err.Error() == api.UserNotModified {
+			if errors.Is(err, api.ErrUserNotModified) {
 				snapshot.UserList = currentUserList
 			} else {
 				return snapshot, err
@@ -145,7 +145,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	if fetchRules && !c.config.DisableGetRule {
 		ruleList, err := c.apiClient.GetNodeRule()
 		if err != nil {
-			if err.Error() == api.RuleNotModified {
+			if errors.Is(err, api.ErrRuleNotModified) {
 				rules := c.getAppliedRuleList()
 				snapshot.RuleList = &rules
 			} else {
@@ -157,7 +157,11 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchCert {
-		certConfig, err := c.apiClient.GetXrayRCertConfig()
+		provider, ok := c.apiClient.(certConfigProvider)
+		if !ok {
+			return snapshot, nil
+		}
+		certConfig, err := provider.GetXrayRCertConfig()
 		if err != nil {
 			if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
 				return snapshot, err
@@ -313,8 +317,7 @@ func (a nodeRuntimeStateApplyModule) applyRuleSnapshot(tag string, rules []api.D
 	if tag == "" {
 		return nil
 	}
-	currentRules := c.getAppliedRuleList()
-	currentRuleTag := c.getAppliedRuleTag()
+	currentRuleTag, currentRules := c.getAppliedRuleState()
 	if detectRuleListsEqual(currentRules, rules) {
 		if tag == currentRuleTag || (len(currentRules) == 0 && len(rules) == 0) {
 			return nil
