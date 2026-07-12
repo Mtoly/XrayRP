@@ -127,7 +127,7 @@ func (c *Controller) closePeriodicTasks() error {
 		}
 		if err := tasks[i].Periodic.Close(); err != nil {
 			if c.logger != nil {
-				c.logger.Panicf("%s periodic task close failed: %s", tasks[i].tag, err)
+				c.logger.Errorf("%s periodic task close failed: %s", tasks[i].tag, err)
 			}
 			errs = append(errs, err)
 		}

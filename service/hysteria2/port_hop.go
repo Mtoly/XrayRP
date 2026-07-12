@@ -7,6 +7,11 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
+var (
+	applyPortHopRules  = applyPortHopIptablesRules
+	deletePortHopRules = deletePortHopIptablesRules
+)
+
 // refreshPortHopRules is a small helper that acquires reloadMu and delegates to
 // updatePortHopRulesLocked so that callers which are not already holding the
 // lock (for example Start/Close) can safely refresh iptables rules.
@@ -23,7 +28,7 @@ func (h *Hysteria2Service) refreshPortHopRules() {
 func (h *Hysteria2Service) updatePortHopRulesLocked() {
 	// First remove previously installed rules, if any.
 	if len(h.portHopRules) > 0 {
-		deletePortHopIptablesRules(h.portHopRules, h.logger)
+		deletePortHopRules(h.portHopRules, h.logger)
 		h.portHopRules = nil
 	}
 
@@ -33,7 +38,7 @@ func (h *Hysteria2Service) updatePortHopRulesLocked() {
 		return
 	}
 
-	applyPortHopIptablesRules(rules, h.logger)
+	applyPortHopRules(rules, h.logger)
 	h.portHopRules = rules
 }
 

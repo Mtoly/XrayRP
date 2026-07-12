@@ -197,11 +197,15 @@ func (s *AnyTLSService) Start() (err error) {
 
 	for i := range tasks {
 		if err := tasks[i].Start(); err != nil {
-			cleanupErrs := []error{err}
+			var cleanupErrs []error
+			cleanupErrs = append(cleanupErrs, err)
 			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Close())
+				cleanupErrs = append(cleanupErrs, tasks[j].Stop())
 			}
 			cleanupErrs = append(cleanupErrs, closeRuntime(boxInstance))
+			for j := i; j >= 0; j-- {
+				cleanupErrs = append(cleanupErrs, tasks[j].Wait())
+			}
 			return fail(errors.Join(cleanupErrs...))
 		}
 	}
@@ -258,7 +262,7 @@ func (s *AnyTLSService) Close() error {
 
 	var errs []error
 	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Close())
+		errs = append(errs, tasks[i].Stop())
 	}
 	if boxInstance != nil {
 		closeRuntime := s.closeRuntime
@@ -266,6 +270,9 @@ func (s *AnyTLSService) Close() error {
 			closeRuntime = defaultCloseRuntime
 		}
 		errs = append(errs, closeRuntime(boxInstance))
+	}
+	for i := len(tasks) - 1; i >= 0; i-- {
+		errs = append(errs, tasks[i].Wait())
 	}
 
 	s.lifecycleMu.Lock()

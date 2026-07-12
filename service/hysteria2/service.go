@@ -191,9 +191,11 @@ func (h *Hysteria2Service) Start() (err error) {
 		serveRuntime = defaultServeRuntime
 	}
 	serveResult := make(chan error, 1)
+	serveCallDone := make(chan struct{})
 	serveStarted := make(chan struct{})
 	startServe := func() {
 		go func() {
+			defer close(serveCallDone)
 			close(serveStarted)
 			serveResult <- serveRuntime(srv)
 		}()
@@ -203,7 +205,9 @@ func (h *Hysteria2Service) Start() (err error) {
 		handshake = defaultServeHandshake
 	}
 	if err := handshake(startServe, serveStarted, serveResult); err != nil {
-		return fail(errors.Join(err, closeRuntime(srv)))
+		cleanupErr := closeRuntime(srv)
+		<-serveCallDone
+		return fail(errors.Join(err, cleanupErr))
 	}
 
 	factory := h.taskFactory
@@ -223,11 +227,16 @@ func (h *Hysteria2Service) Start() (err error) {
 	}
 	for i := range tasks {
 		if err := tasks[i].Start(); err != nil {
-			cleanupErrs := []error{err}
+			var cleanupErrs []error
+			cleanupErrs = append(cleanupErrs, err)
 			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Close())
+				cleanupErrs = append(cleanupErrs, tasks[j].Stop())
 			}
 			cleanupErrs = append(cleanupErrs, closeRuntime(srv))
+			<-serveCallDone
+			for j := i; j >= 0; j-- {
+				cleanupErrs = append(cleanupErrs, tasks[j].Wait())
+			}
 			return fail(errors.Join(cleanupErrs...))
 		}
 	}
@@ -247,11 +256,19 @@ func (h *Hysteria2Service) Start() (err error) {
 	h.ipLastActive = startupIPLastActive
 	h.rateLimiters = startupRateLimiters
 	h.mu.Unlock()
-	h.state = stateRunning
-	h.runtimeErr = nil
 	h.lifecycleMu.Unlock()
 
-	h.refreshPortHopRules()
+	h.reloadMu.Lock()
+	h.updatePortHopRulesLocked()
+	h.reloadMu.Unlock()
+
+	h.lifecycleMu.Lock()
+	h.state = stateRunning
+	h.runtimeErr = nil
+	h.serveDone = serveCallDone
+	watcherDone := make(chan struct{})
+	h.watcherDone = watcherDone
+	h.lifecycleMu.Unlock()
 
 	if !h.config.DisableGetRule && h.rules != nil {
 		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
@@ -264,14 +281,16 @@ func (h *Hysteria2Service) Start() (err error) {
 	}
 
 	go func() {
+		defer close(watcherDone)
 		serveErr := <-serveResult
 		h.lifecycleMu.Lock()
-		if h.state == stateRunning {
+		running := h.state == stateRunning
+		if running {
 			h.state = stateFailed
 			h.runtimeErr = serveErr
 		}
 		h.lifecycleMu.Unlock()
-		if serveErr != nil {
+		if running && serveErr != nil && h.logger != nil {
 			h.logger.Errorf("Hysteria2 Serve error: %v", serveErr)
 		}
 	}()
@@ -295,18 +314,13 @@ func (h *Hysteria2Service) Close() error {
 	h.state = stateStopping
 	tasks := h.tasks
 	srv := h.server
+	serveDone := h.serveDone
+	watcherDone := h.watcherDone
 	h.lifecycleMu.Unlock()
-
-	h.reloadMu.Lock()
-	if len(h.portHopRules) > 0 {
-		deletePortHopIptablesRules(h.portHopRules, h.logger)
-		h.portHopRules = nil
-	}
-	h.reloadMu.Unlock()
 
 	var errs []error
 	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Close())
+		errs = append(errs, tasks[i].Stop())
 	}
 	if srv != nil {
 		closeRuntime := h.closeRuntime
@@ -315,10 +329,29 @@ func (h *Hysteria2Service) Close() error {
 		}
 		errs = append(errs, closeRuntime(srv))
 	}
+	for i := len(tasks) - 1; i >= 0; i-- {
+		errs = append(errs, tasks[i].Wait())
+	}
+	if srv != nil && serveDone != nil {
+		<-serveDone
+		if watcherDone != nil {
+			<-watcherDone
+		}
+	}
+
+	h.reloadMu.Lock()
+	if len(h.portHopRules) > 0 {
+		deletePortHopRules(h.portHopRules, h.logger)
+		h.portHopRules = nil
+	}
+	h.reloadMu.Unlock()
 
 	h.lifecycleMu.Lock()
 	h.tasks = nil
 	h.server = nil
+	h.serveDone = nil
+	h.watcherDone = nil
+	h.runtimeErr = nil
 	h.state = stateStopped
 	h.lifecycleMu.Unlock()
 	return errors.Join(errs...)

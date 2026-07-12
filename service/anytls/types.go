@@ -1,15 +1,16 @@
 package anytls
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
 	log "github.com/sirupsen/logrus"
-	"github.com/xtls/xray-core/common/task"
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
+	xcommon "github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
@@ -42,7 +43,7 @@ type lifecycleTask interface {
 type taskFactory func(tag string, interval time.Duration, execute func() error) lifecycleTask
 
 func defaultTaskFactory(tag string, interval time.Duration, execute func() error) lifecycleTask {
-	return &task.Periodic{Interval: interval, Execute: execute}
+	return &xcommon.ManagedPeriodic{Interval: interval, Execute: execute}
 }
 
 type AnyTLSService struct {
@@ -108,9 +109,26 @@ func (t periodicTask) Start() error {
 	return t.task.Start()
 }
 
-func (t periodicTask) Close() error {
+func (t periodicTask) Stop() error {
 	if t.task == nil {
 		return nil
 	}
+	if managed, ok := t.task.(interface{ Stop() error }); ok {
+		return managed.Stop()
+	}
 	return t.task.Close()
+}
+
+func (t periodicTask) Wait() error {
+	if t.task == nil {
+		return nil
+	}
+	if managed, ok := t.task.(interface{ Wait() error }); ok {
+		return managed.Wait()
+	}
+	return nil
+}
+
+func (t periodicTask) Close() error {
+	return errors.Join(t.Stop(), t.Wait())
 }
