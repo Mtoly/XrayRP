@@ -24,7 +24,7 @@ func TestBuildServerConfigKeepsVulnerableSniffHookDisabled(t *testing.T) {
 
 	h := &Hysteria2Service{
 		nodeInfo: &api.NodeInfo{
-			Port: 1,
+			Port: 0,
 			Hysteria2Config: &api.Hysteria2Config{
 				Obfs: "none",
 			},

@@ -1281,7 +1281,7 @@ func TestMaterializeMachineStatusSnapshotWithNilCollector(t *testing.T) {
 }
 
 func TestSupervisorReportsMachineStatus(t *testing.T) {
-	reporter := &fakeMachineStatusReporter{}
+	reporter := &channelMachineStatusReporter{statuses: make(chan api.MachineStatus, 1)}
 	collectorCalls := make(chan struct{}, 1)
 	status := api.MachineStatus{CPU: 12.3, MemTotal: 1000, MemUsed: 500, DiskTotal: 2000, DiskUsed: 1000, NetInSpeed: -1, NetOutSpeed: -1}
 	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
@@ -1307,11 +1307,9 @@ func TestSupervisorReportsMachineStatus(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected machine status collector to be called")
 	}
-	if len(reporter.statuses) != 1 {
-		t.Fatalf("expected one machine status report, got %d", len(reporter.statuses))
-	}
-	if reporter.statuses[0] != status {
-		t.Fatalf("unexpected machine status: %#v", reporter.statuses[0])
+	reportedStatus := receiveMachineStatus(t, reporter.statuses)
+	if reportedStatus != status {
+		t.Fatalf("unexpected machine status: %#v", reportedStatus)
 	}
 }
 
@@ -1372,12 +1370,15 @@ func TestSupervisorContinuesStatusLoopAfterReporterError(t *testing.T) {
 	if err := supervisor.Start(); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	defer supervisor.Close()
+	t.Cleanup(func() { _ = supervisor.Close() })
 
 	first := receiveMachineStatus(t, reporter.statuses)
 	second := receiveMachineStatus(t, reporter.statuses)
 	if first.CPU != 1 || second.CPU != 2 {
 		t.Fatalf("expected status loop to continue after reporter errors, got first=%#v second=%#v", first, second)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
 	}
 	if len(collectorCalls) < 2 {
 		t.Fatalf("expected at least two collector calls, got %d", len(collectorCalls))
