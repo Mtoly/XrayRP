@@ -16,6 +16,16 @@ import (
 
 const onlineIPTTL = 2 * time.Minute
 
+type runtimeServer interface {
+	Serve() error
+	Close() error
+}
+
+type serverConfigFactory func(*Hysteria2Service) (*server.Config, error)
+type runtimeServerFactory func(*server.Config) (runtimeServer, error)
+type serveRuntimeFunc func(runtimeServer) error
+type closeRuntimeFunc func(runtimeServer) error
+
 type Hysteria2Service struct {
 	apiClient PanelClient
 	config    *controller.Config
@@ -23,7 +33,11 @@ type Hysteria2Service struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	server server.Server
+	server               runtimeServer
+	serverConfigFactory  serverConfigFactory
+	runtimeServerFactory runtimeServerFactory
+	serveRuntime         serveRuntimeFunc
+	closeRuntime         closeRuntimeFunc
 
 	tag     string
 	startAt time.Time

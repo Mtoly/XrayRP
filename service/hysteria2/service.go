@@ -29,6 +29,22 @@ type PanelClient interface {
 
 var _ service.Service = (*Hysteria2Service)(nil)
 
+func defaultServerConfigFactory(h *Hysteria2Service) (*server.Config, error) {
+	return h.buildServerConfig()
+}
+
+func defaultRuntimeServerFactory(cfg *server.Config) (runtimeServer, error) {
+	return server.NewServer(cfg)
+}
+
+func defaultServeRuntime(runtime runtimeServer) error {
+	return runtime.Serve()
+}
+
+func defaultCloseRuntime(runtime runtimeServer) error {
+	return runtime.Close()
+}
+
 // New creates a new Hysteria2 service bound to a SSPanel node.
 func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 	clientInfo := apiClient.Describe()
@@ -37,17 +53,38 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		"ID":   clientInfo.NodeID,
 	})
 	return &Hysteria2Service{
-		apiClient:    apiClient,
-		config:       cfg,
-		logger:       logger,
-		rules:        rule.New(),
-		users:        make(map[string]userRecord),
-		traffic:      make(map[string]*userTraffic),
-		overLimit:    make(map[string]bool),
-		onlineIPs:    make(map[string]map[string]struct{}),
-		ipLastActive: make(map[string]map[string]time.Time),
-		blockedIDs:   make(map[string]bool),
+		apiClient:            apiClient,
+		config:               cfg,
+		serverConfigFactory:  defaultServerConfigFactory,
+		runtimeServerFactory: defaultRuntimeServerFactory,
+		serveRuntime:         defaultServeRuntime,
+		closeRuntime:         defaultCloseRuntime,
+		logger:               logger,
+		rules:                rule.New(),
+		users:                make(map[string]userRecord),
+		traffic:              make(map[string]*userTraffic),
+		overLimit:            make(map[string]bool),
+		onlineIPs:            make(map[string]map[string]struct{}),
+		ipLastActive:         make(map[string]map[string]time.Time),
+		blockedIDs:           make(map[string]bool),
 	}
+}
+
+func (h *Hysteria2Service) buildRuntimeServer() (runtimeServer, error) {
+	configFactory := h.serverConfigFactory
+	if configFactory == nil {
+		configFactory = defaultServerConfigFactory
+	}
+	cfg, err := configFactory(h)
+	if err != nil {
+		return nil, err
+	}
+
+	runtimeFactory := h.runtimeServerFactory
+	if runtimeFactory == nil {
+		runtimeFactory = defaultRuntimeServerFactory
+	}
+	return runtimeFactory(cfg)
 }
 
 // Start implements service.Service.Start.
@@ -98,21 +135,21 @@ func (h *Hysteria2Service) Start() error {
 	}
 
 	// Build Hysteria2 server.
-	cfg, err := h.buildServerConfig()
-	if err != nil {
-		return err
-	}
-	srv, err := server.NewServer(cfg)
+	srv, err := h.buildRuntimeServer()
 	if err != nil {
 		return err
 	}
 	h.server = srv
 
-	go func() {
-		if err := h.server.Serve(); err != nil {
+	serveRuntime := h.serveRuntime
+	if serveRuntime == nil {
+		serveRuntime = defaultServeRuntime
+	}
+	go func(runtime runtimeServer) {
+		if err := serveRuntime(runtime); err != nil {
 			h.logger.Errorf("Hysteria2 Serve error: %v", err)
 		}
-	}()
+	}(srv)
 
 	// Apply Hysteria2 port hopping iptables rules for the initial node
 	// configuration, if the panel enabled port hopping for this node.
@@ -175,7 +212,11 @@ func (h *Hysteria2Service) Close() error {
 	}
 	h.tasks = nil
 	if h.server != nil {
-		return h.server.Close()
+		closeRuntime := h.closeRuntime
+		if closeRuntime == nil {
+			closeRuntime = defaultCloseRuntime
+		}
+		return closeRuntime(h.server)
 	}
 	return nil
 }
@@ -244,27 +285,31 @@ func (h *Hysteria2Service) reloadNode(nodeInfo *api.NodeInfo) error {
 	}
 
 	if h.server != nil {
-		if err := h.server.Close(); err != nil {
+		closeRuntime := h.closeRuntime
+		if closeRuntime == nil {
+			closeRuntime = defaultCloseRuntime
+		}
+		if err := closeRuntime(h.server); err != nil {
 			h.logger.Printf("Hysteria2 reload: failed to close old server: %v", err)
 		}
 		h.server = nil
 	}
 
-	cfg, err := h.buildServerConfig()
-	if err != nil {
-		return err
-	}
-	srv, err := server.NewServer(cfg)
+	srv, err := h.buildRuntimeServer()
 	if err != nil {
 		return err
 	}
 	h.server = srv
 
-	go func() {
-		if err := h.server.Serve(); err != nil {
+	serveRuntime := h.serveRuntime
+	if serveRuntime == nil {
+		serveRuntime = defaultServeRuntime
+	}
+	go func(runtime runtimeServer) {
+		if err := serveRuntime(runtime); err != nil {
 			h.logger.Errorf("Hysteria2 Serve error after reload: %v", err)
 		}
-	}()
+	}(srv)
 
 	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, h.nodeInfo.Port)
 	return nil

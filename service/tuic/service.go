@@ -28,6 +28,18 @@ type PanelClient interface {
 
 var _ service.Service = (*TuicService)(nil)
 
+func defaultRuntimeFactory(s *TuicService) (runtimeInstance, string, error) {
+	return s.buildSingBox()
+}
+
+func defaultStartRuntime(runtime runtimeInstance) error {
+	return runtime.Start()
+}
+
+func defaultCloseRuntime(runtime runtimeInstance) error {
+	return runtime.Close()
+}
+
 func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
 	clientInfo := apiClient.Describe()
 	logger := log.NewEntry(log.StandardLogger()).WithFields(log.Fields{
@@ -35,15 +47,26 @@ func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
 		"ID":   clientInfo.NodeID,
 	})
 	return &TuicService{
-		apiClient:    apiClient,
-		config:       cfg,
-		logger:       logger,
-		rules:        rule.New(),
-		users:        make(map[string]userRecord),
-		traffic:      make(map[string]*userTraffic),
-		onlineIPs:    make(map[string]map[string]struct{}),
-		ipLastActive: make(map[string]map[string]time.Time),
+		apiClient:      apiClient,
+		config:         cfg,
+		runtimeFactory: defaultRuntimeFactory,
+		startRuntime:   defaultStartRuntime,
+		closeRuntime:   defaultCloseRuntime,
+		logger:         logger,
+		rules:          rule.New(),
+		users:          make(map[string]userRecord),
+		traffic:        make(map[string]*userTraffic),
+		onlineIPs:      make(map[string]map[string]struct{}),
+		ipLastActive:   make(map[string]map[string]time.Time),
 	}
+}
+
+func (s *TuicService) buildRuntime() (runtimeInstance, string, error) {
+	factory := s.runtimeFactory
+	if factory == nil {
+		factory = defaultRuntimeFactory
+	}
+	return factory(s)
 }
 
 func (s *TuicService) Start() error {
@@ -96,17 +119,21 @@ func (s *TuicService) Start() error {
 		}
 	}
 
-	boxInstance, _, err := s.buildSingBox()
+	boxInstance, _, err := s.buildRuntime()
 	if err != nil {
 		return err
 	}
 	s.box = boxInstance
 
-	go func() {
-		if err := s.box.Start(); err != nil {
+	startRuntime := s.startRuntime
+	if startRuntime == nil {
+		startRuntime = defaultStartRuntime
+	}
+	go func(runtime runtimeInstance) {
+		if err := startRuntime(runtime); err != nil {
 			s.logger.Errorf("TUIC sing-box start error: %v", err)
 		}
-	}()
+	}(boxInstance)
 
 	interval := time.Duration(s.config.UpdatePeriodic) * time.Second
 	s.tasks = []periodicTask{
@@ -152,7 +179,11 @@ func (s *TuicService) Close() error {
 	}
 	s.tasks = nil
 	if s.box != nil {
-		return s.box.Close()
+		closeRuntime := s.closeRuntime
+		if closeRuntime == nil {
+			closeRuntime = defaultCloseRuntime
+		}
+		return closeRuntime(s.box)
 	}
 	return nil
 }
@@ -216,24 +247,32 @@ func (s *TuicService) reloadNode(nodeInfo *api.NodeInfo) error {
 	}
 
 	if s.box != nil {
-		if err := s.box.Close(); err != nil {
+		closeRuntime := s.closeRuntime
+		if closeRuntime == nil {
+			closeRuntime = defaultCloseRuntime
+		}
+		if err := closeRuntime(s.box); err != nil {
 			s.logger.Printf("TUIC reload: failed to close old box: %v", err)
 		}
 		s.box = nil
 	}
 
-	boxInstance, inboundTag, err := s.buildSingBox()
+	boxInstance, inboundTag, err := s.buildRuntime()
 	if err != nil {
 		return err
 	}
 	s.box = boxInstance
 	s.inboundTag = inboundTag
 
-	go func() {
-		if err := s.box.Start(); err != nil {
+	startRuntime := s.startRuntime
+	if startRuntime == nil {
+		startRuntime = defaultStartRuntime
+	}
+	go func(runtime runtimeInstance) {
+		if err := startRuntime(runtime); err != nil {
 			s.logger.Errorf("TUIC box start error after reload: %v", err)
 		}
-	}()
+	}(boxInstance)
 
 	s.logger.Infof("TUIC node reloaded on %s:%d", s.config.ListenIP, s.nodeInfo.Port)
 	return nil

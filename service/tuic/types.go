@@ -4,7 +4,6 @@ import (
 	"sync"
 	"time"
 
-	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/option"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/task"
@@ -15,6 +14,15 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
+type runtimeInstance interface {
+	Start() error
+	Close() error
+}
+
+type runtimeFactory func(*TuicService) (runtimeInstance, string, error)
+type startRuntimeFunc func(runtimeInstance) error
+type closeRuntimeFunc func(runtimeInstance) error
+
 type TuicService struct {
 	apiClient PanelClient
 	config    *controller.Config
@@ -22,8 +30,11 @@ type TuicService struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	box        *box.Box
-	inboundTag string
+	box            runtimeInstance
+	runtimeFactory runtimeFactory
+	startRuntime   startRuntimeFunc
+	closeRuntime   closeRuntimeFunc
+	inboundTag     string
 
 	tag     string
 	startAt time.Time
