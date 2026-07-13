@@ -45,7 +45,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run focused race tests
-        run: go test -race ./service/controller ./service/machine ./common/limiter
+        run: go test -race ./service/controller ./service/machine ./common/limiter ./service/anytls ./service/tuic ./service/hysteria2
 
   coverage:
     name: Coverage
