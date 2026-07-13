@@ -11,6 +11,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	xcommon "github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
@@ -23,9 +24,27 @@ type runtimeServer interface {
 }
 
 type serverConfigFactory func(*Hysteria2Service) (*server.Config, error)
+type serverBuildSpec struct {
+	nodeInfo   *api.NodeInfo
+	certConfig *mylego.CertConfig
+}
+type reloadServerConfigFactory func(*Hysteria2Service, serverBuildSpec) (*server.Config, error)
 type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error
 type closeRuntimeFunc func(runtimeServer) error
+type renewCertificateFunc func(*mylego.CertConfig) (certPath, keyPath string, renewed bool, err error)
+
+type portHopRulesFunc func([]portHopRule, *log.Entry) error
+
+type runtimeServeOutcome struct {
+	done chan struct{}
+	err  error
+}
+
+type reloadRuntime struct {
+	runtime runtimeServer
+	serve   *runtimeServeOutcome
+}
 
 type lifecycleState uint8
 
@@ -70,15 +89,17 @@ type Hysteria2Service struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	server               runtimeServer
-	serverConfigFactory  serverConfigFactory
-	runtimeServerFactory runtimeServerFactory
-	serveRuntime         serveRuntimeFunc
-	closeRuntime         closeRuntimeFunc
-	taskFactory          taskFactory
-	serveHandshake       serveHandshakeFunc
-	serveDone            <-chan struct{}
-	watcherDone          <-chan struct{}
+	server                    runtimeServer
+	serverConfigFactory       serverConfigFactory
+	reloadServerConfigFactory reloadServerConfigFactory
+	runtimeServerFactory      runtimeServerFactory
+	serveRuntime              serveRuntimeFunc
+	closeRuntime              closeRuntimeFunc
+	renewCertificate          renewCertificateFunc
+	taskFactory               taskFactory
+	serveHandshake            serveHandshakeFunc
+	serveDone                 <-chan struct{}
+	watcherDone               <-chan struct{}
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState
@@ -117,6 +138,7 @@ type userRecord struct {
 	Email       string
 	DeviceLimit int
 	SpeedLimit  uint64
+	LimiterKey  string
 }
 
 type userTraffic struct {

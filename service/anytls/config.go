@@ -14,6 +14,14 @@ import (
 )
 
 func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
+	return s.buildSingBoxFor(runtimeBuildSpec{
+		nodeInfo:   s.nodeInfo,
+		inboundTag: s.inboundTag,
+		certConfig: s.config.CertConfig,
+	})
+}
+
+func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -22,12 +30,15 @@ func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid ListenIP %s: %w", listenIP, err)
 	}
-	port := s.nodeInfo.Port
+	port := spec.nodeInfo.Port
 	if port == 0 {
 		return nil, "", fmt.Errorf("invalid port 0")
 	}
+	if port > 65535 {
+		return nil, "", fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
+	}
 
-	certFile, keyFile, err := getOrIssueCert(s.config.CertConfig)
+	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
 	if err != nil {
 		return nil, "", err
 	}
@@ -54,8 +65,8 @@ func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
 	}
 
 	padding := []string{}
-	if s.nodeInfo.AnyTLSConfig != nil && len(s.nodeInfo.AnyTLSConfig.PaddingScheme) > 0 {
-		padding = s.nodeInfo.AnyTLSConfig.PaddingScheme
+	if spec.nodeInfo.AnyTLSConfig != nil && len(spec.nodeInfo.AnyTLSConfig.PaddingScheme) > 0 {
+		padding = spec.nodeInfo.AnyTLSConfig.PaddingScheme
 	}
 
 	s.mu.RLock()
@@ -75,7 +86,7 @@ func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
 	opts.Inbounds = []option.Inbound{
 		{
 			Type:    "anytls",
-			Tag:     s.inboundTag,
+			Tag:     spec.inboundTag,
 			Options: inOpts,
 		},
 	}
@@ -95,7 +106,7 @@ func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
 	tracker := &anyTLSTracker{svc: s}
 	boxInstance.Router().AppendTracker(tracker)
 
-	return boxInstance, s.inboundTag, nil
+	return boxInstance, spec.inboundTag, nil
 }
 
 func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
@@ -136,27 +147,32 @@ func (s *AnyTLSService) certMonitor() error {
 		return nil
 	}
 
-	if !s.nodeInfo.EnableTLS {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	s.lifecycleMu.Lock()
+	nodeInfo := s.nodeInfo
+	s.lifecycleMu.Unlock()
+	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
 	}
 
 	switch s.config.CertConfig.CertMode {
 	case "dns", "http", "tls":
-		lego, err := mylego.New(s.config.CertConfig)
-		if err != nil {
-			s.logger.Print(err)
-			return nil
+		renew := s.renewCertificate
+		if renew == nil {
+			renew = defaultRenewCertificate
 		}
-		certPath, keyPath, ok, err := lego.RenewCert()
+		certPath, keyPath, ok, err := renew(s.config.CertConfig)
 		if err != nil {
-			s.logger.Print(err)
-			return nil
+			if s.logger != nil {
+				s.logger.Print(err)
+			}
+			return err
 		}
 		if ok {
 			s.logger.Infof("AnyTLS certificate renewed for %s, reloading node (cert=%s, key=%s)", s.config.CertConfig.CertDomain, certPath, keyPath)
-			if err := s.reloadNode(s.nodeInfo); err != nil {
-				s.logger.Printf("AnyTLS certificate reload failed: %v", err)
-			}
+			return s.reloadNodeLocked(nodeInfo)
 		}
 	}
 

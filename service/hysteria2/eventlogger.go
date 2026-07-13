@@ -58,7 +58,7 @@ func (l *hyEventLogger) auditRequest(addr net.Addr, id, reqAddr string) {
 	}
 
 	userKey := fmt.Sprintf("%d", user.UID)
-	if l.svc.rules.Detect(l.svc.tag, reqAddr, userKey, host) {
+	if l.svc.rules.Detect(l.svc.appliedTag(), reqAddr, userKey, host) {
 		// Mark this connection ID as blocked. The TrafficLogger will see this
 		// flag and return false on the next traffic callback, which instructs
 		// the Hysteria2 core to disconnect the client immediately.
@@ -149,7 +149,7 @@ func (l *hyEventLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
 	)
 
 	if l != nil && l.svc != nil {
-		nodeTag = l.svc.tag
+		nodeTag = l.svc.appliedTag()
 
 		l.svc.mu.RLock()
 		user, ok = l.svc.users[id]
@@ -221,7 +221,7 @@ func (l *hyEventLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, r
 	)
 
 	if l != nil && l.svc != nil {
-		nodeTag = l.svc.tag
+		nodeTag = l.svc.appliedTag()
 
 		l.svc.mu.RLock()
 		user, ok = l.svc.users[id]

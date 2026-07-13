@@ -11,6 +11,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
@@ -33,6 +34,10 @@ func defaultServerConfigFactory(h *Hysteria2Service) (*server.Config, error) {
 	return h.buildServerConfig()
 }
 
+func defaultReloadServerConfigFactory(h *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+	return h.buildServerConfigFor(spec)
+}
+
 func defaultRuntimeServerFactory(cfg *server.Config) (runtimeServer, error) {
 	return server.NewServer(cfg)
 }
@@ -45,6 +50,14 @@ func defaultCloseRuntime(runtime runtimeServer) error {
 	return runtime.Close()
 }
 
+func defaultRenewCertificate(certConfig *mylego.CertConfig) (string, string, bool, error) {
+	lego, err := mylego.New(certConfig)
+	if err != nil {
+		return "", "", false, err
+	}
+	return lego.RenewCert()
+}
+
 // New creates a new Hysteria2 service bound to a SSPanel node.
 func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 	clientInfo := apiClient.Describe()
@@ -53,22 +66,24 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		"ID":   clientInfo.NodeID,
 	})
 	return &Hysteria2Service{
-		apiClient:            apiClient,
-		config:               cfg,
-		serverConfigFactory:  defaultServerConfigFactory,
-		runtimeServerFactory: defaultRuntimeServerFactory,
-		serveRuntime:         defaultServeRuntime,
-		closeRuntime:         defaultCloseRuntime,
-		taskFactory:          defaultTaskFactory,
-		serveHandshake:       defaultServeHandshake,
-		logger:               logger,
-		rules:                rule.New(),
-		users:                make(map[string]userRecord),
-		traffic:              make(map[string]*userTraffic),
-		overLimit:            make(map[string]bool),
-		onlineIPs:            make(map[string]map[string]struct{}),
-		ipLastActive:         make(map[string]map[string]time.Time),
-		blockedIDs:           make(map[string]bool),
+		apiClient:                 apiClient,
+		config:                    cfg,
+		serverConfigFactory:       defaultServerConfigFactory,
+		reloadServerConfigFactory: defaultReloadServerConfigFactory,
+		runtimeServerFactory:      defaultRuntimeServerFactory,
+		serveRuntime:              defaultServeRuntime,
+		closeRuntime:              defaultCloseRuntime,
+		renewCertificate:          defaultRenewCertificate,
+		taskFactory:               defaultTaskFactory,
+		serveHandshake:            defaultServeHandshake,
+		logger:                    logger,
+		rules:                     rule.New(),
+		users:                     make(map[string]userRecord),
+		traffic:                   make(map[string]*userTraffic),
+		overLimit:                 make(map[string]bool),
+		onlineIPs:                 make(map[string]map[string]struct{}),
+		ipLastActive:              make(map[string]map[string]time.Time),
+		blockedIDs:                make(map[string]bool),
 	}
 }
 
@@ -87,6 +102,54 @@ func (h *Hysteria2Service) buildRuntimeServer() (runtimeServer, error) {
 		runtimeFactory = defaultRuntimeServerFactory
 	}
 	return runtimeFactory(cfg)
+}
+
+func (h *Hysteria2Service) buildReloadRuntimeServer(spec serverBuildSpec) (runtimeServer, error) {
+	if h.reloadServerConfigFactory == nil {
+		return nil, errors.New("Hysteria2 reload server config factory is nil")
+	}
+	cfg, err := h.reloadServerConfigFactory(h, spec)
+	if err != nil {
+		return nil, err
+	}
+	runtimeFactory := h.runtimeServerFactory
+	if runtimeFactory == nil {
+		runtimeFactory = defaultRuntimeServerFactory
+	}
+	return runtimeFactory(cfg)
+}
+
+func (h *Hysteria2Service) appliedStateSnapshot() (*api.NodeInfo, string, time.Time) {
+	h.lifecycleMu.Lock()
+	defer h.lifecycleMu.Unlock()
+	return h.nodeInfo, h.tag, h.startAt
+}
+
+func (h *Hysteria2Service) appliedTag() string {
+	_, tag, _ := h.appliedStateSnapshot()
+	return tag
+}
+
+func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRuntime, error) {
+	runtime, err := h.buildReloadRuntimeServer(spec)
+	if err != nil {
+		return reloadRuntime{}, err
+	}
+	serveRuntime := h.serveRuntime
+	if serveRuntime == nil {
+		serveRuntime = defaultServeRuntime
+	}
+	serve, err := h.startReloadRuntime(runtime, serveRuntime)
+	if err != nil {
+		closeRuntime := h.closeRuntime
+		if closeRuntime == nil {
+			closeRuntime = defaultCloseRuntime
+		}
+		cleanupErr := closeRuntime(runtime)
+		h.waitRuntime(serve.done, nil)
+		return reloadRuntime{}, errors.Join(err, cleanupErr)
+	}
+	return reloadRuntime{runtime: runtime, serve: serve}, nil
 }
 
 func (h *Hysteria2Service) Start() (err error) {
@@ -190,23 +253,10 @@ func (h *Hysteria2Service) Start() (err error) {
 	if serveRuntime == nil {
 		serveRuntime = defaultServeRuntime
 	}
-	serveResult := make(chan error, 1)
-	serveCallDone := make(chan struct{})
-	serveStarted := make(chan struct{})
-	startServe := func() {
-		go func() {
-			defer close(serveCallDone)
-			close(serveStarted)
-			serveResult <- serveRuntime(srv)
-		}()
-	}
-	handshake := h.serveHandshake
-	if handshake == nil {
-		handshake = defaultServeHandshake
-	}
-	if err := handshake(startServe, serveStarted, serveResult); err != nil {
+	serve, err := h.startReloadRuntime(srv, serveRuntime)
+	if err != nil {
 		cleanupErr := closeRuntime(srv)
-		<-serveCallDone
+		h.waitRuntime(serve.done, nil)
 		return fail(errors.Join(err, cleanupErr))
 	}
 
@@ -233,7 +283,7 @@ func (h *Hysteria2Service) Start() (err error) {
 				cleanupErrs = append(cleanupErrs, tasks[j].Stop())
 			}
 			cleanupErrs = append(cleanupErrs, closeRuntime(srv))
-			<-serveCallDone
+			h.waitRuntime(serve.done, nil)
 			for j := i; j >= 0; j-- {
 				cleanupErrs = append(cleanupErrs, tasks[j].Wait())
 			}
@@ -241,6 +291,24 @@ func (h *Hysteria2Service) Start() (err error) {
 		}
 	}
 
+	h.reloadMu.Lock()
+	_, ruleErr := h.replacePortHopRulesLocked(buildPortHopRulesFromNode(nodeInfo))
+	h.reloadMu.Unlock()
+	if ruleErr != nil {
+		var cleanupErrs []error
+		cleanupErrs = append(cleanupErrs, ruleErr)
+		for i := len(tasks) - 1; i >= 0; i-- {
+			cleanupErrs = append(cleanupErrs, tasks[i].Stop())
+		}
+		cleanupErrs = append(cleanupErrs, closeRuntime(srv))
+		h.waitRuntime(serve.done, nil)
+		for i := len(tasks) - 1; i >= 0; i-- {
+			cleanupErrs = append(cleanupErrs, tasks[i].Wait())
+		}
+		return fail(errors.Join(cleanupErrs...))
+	}
+
+	watcherDone := make(chan struct{})
 	h.lifecycleMu.Lock()
 	h.clientInfo = clientInfo
 	h.nodeInfo = nodeInfo
@@ -256,19 +324,12 @@ func (h *Hysteria2Service) Start() (err error) {
 	h.ipLastActive = startupIPLastActive
 	h.rateLimiters = startupRateLimiters
 	h.mu.Unlock()
-	h.lifecycleMu.Unlock()
-
-	h.reloadMu.Lock()
-	h.updatePortHopRulesLocked()
-	h.reloadMu.Unlock()
-
-	h.lifecycleMu.Lock()
 	h.state = stateRunning
 	h.runtimeErr = nil
-	h.serveDone = serveCallDone
-	watcherDone := make(chan struct{})
+	h.serveDone = serve.done
 	h.watcherDone = watcherDone
 	h.lifecycleMu.Unlock()
+	go h.watchRuntime(srv, serve, watcherDone)
 
 	if !h.config.DisableGetRule && h.rules != nil {
 		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
@@ -280,21 +341,6 @@ func (h *Hysteria2Service) Start() (err error) {
 		}
 	}
 
-	go func() {
-		defer close(watcherDone)
-		serveErr := <-serveResult
-		h.lifecycleMu.Lock()
-		running := h.state == stateRunning
-		if running {
-			h.state = stateFailed
-			h.runtimeErr = serveErr
-		}
-		h.lifecycleMu.Unlock()
-		if running && serveErr != nil && h.logger != nil {
-			h.logger.Errorf("Hysteria2 Serve error: %v", serveErr)
-		}
-	}()
-
 	h.logger.Infof("Hysteria2 node started on %s:%d (hysteria core %s)", h.config.ListenIP, nodeInfo.Port, getHysteriaCoreVersion())
 	return nil
 }
@@ -303,12 +349,16 @@ func (h *Hysteria2Service) Start() (err error) {
 func (h *Hysteria2Service) Close() error {
 	h.lifecycleMu.Lock()
 	if h.closed {
+		state := h.state
 		h.lifecycleMu.Unlock()
+		if state == stateStopped {
+			return h.cleanupPortHopRules()
+		}
 		return nil
 	}
-	if h.state == stateStarting {
+	if h.state == stateStarting || h.state == stateReloading {
 		h.lifecycleMu.Unlock()
-		return errors.New("Hysteria2 service cannot close while starting")
+		return errors.New("Hysteria2 service cannot close while starting or reloading")
 	}
 	h.closed = true
 	h.state = stateStopping
@@ -339,12 +389,7 @@ func (h *Hysteria2Service) Close() error {
 		}
 	}
 
-	h.reloadMu.Lock()
-	if len(h.portHopRules) > 0 {
-		deletePortHopRules(h.portHopRules, h.logger)
-		h.portHopRules = nil
-	}
-	h.reloadMu.Unlock()
+	errs = append(errs, h.cleanupPortHopRules())
 
 	h.lifecycleMu.Lock()
 	h.tasks = nil
@@ -357,19 +402,26 @@ func (h *Hysteria2Service) Close() error {
 	return errors.Join(errs...)
 }
 
-// reloadNode replaces the in-memory node information and rebuilds the
-// underlying Hysteria2 server so that changes from the panel (port, TLS,
-// SNI, bandwidth, etc.) or renewed certificates take effect without
-// restarting the whole XrayR process.
+// reloadNode replaces the active Hysteria2 server while preserving the last
+// successfully applied node runtime state when replacement fails.
 func (h *Hysteria2Service) reloadNode(nodeInfo *api.NodeInfo) error {
+	if nodeInfo == nil {
+		return nil
+	}
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+	return h.reloadNodeLocked(nodeInfo)
+}
+
+func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	if nodeInfo == nil {
 		return nil
 	}
 	if nodeInfo.NodeType != "Hysteria2" {
 		return fmt.Errorf("Hysteria2Service reloadNode: unexpected node type %s", nodeInfo.NodeType)
 	}
-	if nodeInfo.Port == 0 {
-		return errors.New("server port must > 0")
+	if nodeInfo.Port == 0 || nodeInfo.Port > 65535 {
+		return fmt.Errorf("server port must be between 1 and 65535")
 	}
 	if nodeInfo.Hysteria2Config == nil {
 		return errors.New("Hysteria2Config is nil in node info")
@@ -378,77 +430,237 @@ func (h *Hysteria2Service) reloadNode(nodeInfo *api.NodeInfo) error {
 		return errors.New("CertConfig is required for Hysteria2")
 	}
 
-	h.reloadMu.Lock()
-	defer h.reloadMu.Unlock()
+	candidateNode := *nodeInfo
+	candidateRules := buildPortHopRulesFromNode(&candidateNode)
 
-	oldInfo := h.nodeInfo
-	h.nodeInfo = nodeInfo
+	h.lifecycleMu.Lock()
+	if h.closed || h.state != stateRunning || h.server == nil || h.nodeInfo == nil {
+		state := h.state
+		h.lifecycleMu.Unlock()
+		return fmt.Errorf("Hysteria2 service cannot reload from state %d", state)
+	}
+	h.state = stateReloading
+	oldRuntime := h.server
+	oldNodeInfo := h.nodeInfo
+	oldTag := h.tag
+	oldCertConfig := cloneCertConfig(h.config.CertConfig)
+	oldRules := append([]portHopRule(nil), h.portHopRules...)
+	oldServeDone := h.serveDone
+	oldWatcherDone := h.watcherDone
+	h.lifecycleMu.Unlock()
 
-	// Update port hopping iptables rules according to the latest node
-	// configuration before we rebuild the underlying Hysteria2 server.
-	h.updatePortHopRulesLocked()
-
-	// Keep CertDomain in sync with the panel SNI when it was originally
-	// derived from SNI/Host. If the user configured a custom CertDomain,
-	// we respect it and do not override.
-	if h.config.CertConfig != nil && h.nodeInfo.EnableTLS && !h.nodeInfo.EnableREALITY {
-		sni := h.nodeInfo.SNI
-		if sni == "" {
-			sni = h.nodeInfo.Host
-		}
-		if sni != "" {
-			cert := h.config.CertConfig
-			var oldSNI, oldHost string
-			if oldInfo != nil {
-				oldSNI = oldInfo.SNI
-				oldHost = oldInfo.Host
-			}
-			switch cert.CertMode {
-			case "file":
-				if cert.CertFile == "" && cert.KeyFile == "" {
-					cert.CertDomain = sni
-					cert.CertFile = "/etc/XrayR/cert/" + sni + ".cert"
-					cert.KeyFile = "/etc/XrayR/cert/" + sni + ".key"
-				} else if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
-					cert.CertDomain = sni
-				}
-			case "dns", "http", "tls":
-				if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
-					cert.CertDomain = sni
-				}
-			}
-		}
+	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
+	candidateSpec := serverBuildSpec{
+		nodeInfo:   &candidateNode,
+		certConfig: candidateCertConfig,
 	}
 
-	if h.server != nil {
-		closeRuntime := h.closeRuntime
-		if closeRuntime == nil {
-			closeRuntime = defaultCloseRuntime
-		}
-		if err := closeRuntime(h.server); err != nil {
-			h.logger.Printf("Hysteria2 reload: failed to close old server: %v", err)
-		}
-		h.server = nil
+	closeRuntime := h.closeRuntime
+	if closeRuntime == nil {
+		closeRuntime = defaultCloseRuntime
 	}
 
-	srv, err := h.buildRuntimeServer()
+	sameEndpoint := candidateNode.Port == oldNodeInfo.Port
+	var (
+		candidate   reloadRuntime
+		oldCloseErr error
+		err         error
+	)
+	if sameEndpoint {
+		oldCloseErr = closeRuntime(oldRuntime)
+		h.waitRuntime(oldServeDone, oldWatcherDone)
+		candidate, err = h.startReloadCandidate(candidateSpec)
+	} else {
+		candidate, err = h.startReloadCandidate(candidateSpec)
+		if err == nil {
+			oldCloseErr = closeRuntime(oldRuntime)
+			h.waitRuntime(oldServeDone, oldWatcherDone)
+		}
+	}
 	if err != nil {
-		return err
-	}
-	h.server = srv
-
-	serveRuntime := h.serveRuntime
-	if serveRuntime == nil {
-		serveRuntime = defaultServeRuntime
-	}
-	go func(runtime runtimeServer) {
-		if err := serveRuntime(runtime); err != nil {
-			h.logger.Errorf("Hysteria2 Serve error after reload: %v", err)
+		if !sameEndpoint {
+			h.finishExistingReload(stateRunning, nil)
+			return err
 		}
-	}(srv)
+		reloadErr := errors.Join(oldCloseErr, err)
+		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
+			nodeInfo:   oldNodeInfo,
+			certConfig: oldCertConfig,
+		})
+		if restoreErr != nil {
+			joined := errors.Join(reloadErr, restoreErr)
+			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, oldRules, nil, stateFailed, joined)
+			return joined
+		}
+		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, stateRunning, nil)
+		return reloadErr
+	}
 
-	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, h.nodeInfo.Port)
-	return nil
+	if !sameEndpoint {
+		// Old close errors are surfaced, but the ready candidate remains the
+		// last-known-good runtime because the old endpoint is already released.
+	}
+	rulesRestored, ruleErr := h.replacePortHopRulesLocked(candidateRules)
+	if ruleErr != nil {
+		cleanupErr := closeRuntime(candidate.runtime)
+		h.waitRuntime(candidate.serve.done, nil)
+		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
+			nodeInfo:   oldNodeInfo,
+			certConfig: oldCertConfig,
+		})
+		if restoreErr != nil {
+			joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, restoreErr)
+			restoredRules := oldRules
+			if !rulesRestored {
+				restoredRules = nil
+			}
+			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, restoredRules, nil, stateFailed, joined)
+			return joined
+		}
+		joined := errors.Join(oldCloseErr, ruleErr, cleanupErr)
+		if !rulesRestored {
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, nil, restored.serve, stateFailed, joined)
+			return joined
+		}
+		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, stateRunning, nil)
+		return joined
+	}
+	h.finishReload(candidate.runtime, &candidateNode, oldTag, candidateCertConfig, candidateRules, candidate.serve, stateRunning, nil)
+	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, candidateNode.Port)
+	return oldCloseErr
+}
+
+func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {
+	serveResult := make(chan error, 1)
+	serve := &runtimeServeOutcome{done: make(chan struct{})}
+	serveStarted := make(chan struct{})
+	startServe := func() {
+		go func() {
+			close(serveStarted)
+			serve.err = serveRuntime(runtime)
+			serveResult <- serve.err
+			close(serve.done)
+		}()
+	}
+	handshake := h.serveHandshake
+	if handshake == nil {
+		handshake = defaultServeHandshake
+	}
+	if err := handshake(startServe, serveStarted, serveResult); err != nil {
+		return serve, err
+	}
+	return serve, nil
+}
+
+func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeServeOutcome, watcherDone chan struct{}) {
+	defer close(watcherDone)
+	<-serve.done
+	h.lifecycleMu.Lock()
+	recordFailure := (h.state == stateRunning || h.state == stateFailed) && h.server == runtime
+	if recordFailure {
+		h.state = stateFailed
+		if serve.err != nil {
+			h.runtimeErr = errors.Join(h.runtimeErr, serve.err)
+		}
+	}
+	h.lifecycleMu.Unlock()
+	if recordFailure && serve.err != nil && h.logger != nil {
+		h.logger.Errorf("Hysteria2 Serve error: %v", serve.err)
+	}
+}
+
+func (h *Hysteria2Service) waitRuntime(serveDone, watcherDone <-chan struct{}) {
+	if serveDone != nil {
+		<-serveDone
+	}
+	if watcherDone != nil {
+		<-watcherDone
+	}
+}
+
+func (h *Hysteria2Service) finishExistingReload(state lifecycleState, runtimeErr error) {
+	h.lifecycleMu.Lock()
+	h.state = state
+	h.runtimeErr = runtimeErr
+	h.lifecycleMu.Unlock()
+}
+
+func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.NodeInfo, _ string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, state lifecycleState, runtimeErr error) {
+	var watcherDone chan struct{}
+	if runtime != nil && serve != nil {
+		watcherDone = make(chan struct{})
+	}
+	h.lifecycleMu.Lock()
+	h.mu.Lock()
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+	h.applyNodeRateLimitLocked(nodeLimit)
+	h.mu.Unlock()
+	h.server = runtime
+	h.nodeInfo = nodeInfo
+	*h.config.CertConfig = *cloneCertConfig(certConfig)
+	h.portHopRules = append([]portHopRule(nil), rules...)
+	if serve != nil {
+		h.serveDone = serve.done
+	} else {
+		h.serveDone = nil
+	}
+	h.watcherDone = watcherDone
+	h.state = state
+	h.runtimeErr = runtimeErr
+	h.lifecycleMu.Unlock()
+	if watcherDone != nil {
+		go h.watchRuntime(runtime, serve, watcherDone)
+	}
+}
+
+func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
+	if certConfig == nil {
+		return nil
+	}
+	cloned := *certConfig
+	if certConfig.DNSEnv != nil {
+		cloned.DNSEnv = make(map[string]string, len(certConfig.DNSEnv))
+		for key, value := range certConfig.DNSEnv {
+			cloned.DNSEnv[key] = value
+		}
+	}
+	return &cloned
+}
+
+func deriveReloadCertConfig(current *mylego.CertConfig, oldInfo, candidate *api.NodeInfo) *mylego.CertConfig {
+	cert := cloneCertConfig(current)
+	if cert == nil || candidate == nil || !candidate.EnableTLS || candidate.EnableREALITY {
+		return cert
+	}
+	sni := candidate.SNI
+	if sni == "" {
+		sni = candidate.Host
+	}
+	if sni == "" {
+		return cert
+	}
+	var oldSNI, oldHost string
+	if oldInfo != nil {
+		oldSNI, oldHost = oldInfo.SNI, oldInfo.Host
+	}
+	switch cert.CertMode {
+	case "file":
+		if cert.CertFile == "" && cert.KeyFile == "" {
+			cert.CertDomain = sni
+			cert.CertFile = "/etc/XrayR/cert/" + sni + ".cert"
+			cert.KeyFile = "/etc/XrayR/cert/" + sni + ".key"
+		} else if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
+			cert.CertDomain = sni
+		}
+	case "dns", "http", "tls":
+		if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
+			cert.CertDomain = sni
+		}
+	}
+	return cert
 }
 
 func getHysteriaCoreVersion() string {

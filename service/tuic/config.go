@@ -15,6 +15,14 @@ import (
 )
 
 func (s *TuicService) buildSingBox() (*box.Box, string, error) {
+	return s.buildSingBoxFor(runtimeBuildSpec{
+		nodeInfo:   s.nodeInfo,
+		inboundTag: s.inboundTag,
+		certConfig: s.config.CertConfig,
+	})
+}
+
+func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -23,7 +31,7 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid ListenIP %s: %w", listenIP, err)
 	}
-	port := s.nodeInfo.Port
+	port := spec.nodeInfo.Port
 	if port == 0 {
 		return nil, "", fmt.Errorf("invalid port 0")
 	}
@@ -31,7 +39,7 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 		return nil, "", fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
 	}
 
-	certFile, keyFile, err := getOrIssueCert(s.config.CertConfig)
+	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
 	if err != nil {
 		return nil, "", err
 	}
@@ -59,8 +67,8 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 
 	// Set ALPN for TUIC. QUIC requires ALPN negotiation (RFC 9001).
 	// Default to "h3" which matches Xboard's default TUIC client ALPN.
-	if len(s.nodeInfo.TuicConfig.ALPN) > 0 {
-		tlsOpt.ALPN = s.nodeInfo.TuicConfig.ALPN
+	if len(spec.nodeInfo.TuicConfig.ALPN) > 0 {
+		tlsOpt.ALPN = spec.nodeInfo.TuicConfig.ALPN
 	} else {
 		tlsOpt.ALPN = badoption.Listable[string]{"h3"}
 	}
@@ -78,18 +86,18 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 	s.logger.Infof("Building TUIC inbound with %d users", len(users))
 
 	// Parse congestion control (only if configured, no hardcoded default)
-	congestionControl := s.nodeInfo.TuicConfig.CongestionControl
+	congestionControl := spec.nodeInfo.TuicConfig.CongestionControl
 
 	// Parse heartbeat duration
-	heartbeat := time.Duration(s.nodeInfo.TuicConfig.Heartbeat) * time.Second
+	heartbeat := time.Duration(spec.nodeInfo.TuicConfig.Heartbeat) * time.Second
 	if heartbeat == 0 {
 		heartbeat = 10 * time.Second
 	}
 
 	// Auth timeout — use panel value if provided, otherwise default to 10 seconds
 	authTimeout := 10 * time.Second
-	if s.nodeInfo.TuicConfig.AuthTimeout > 0 {
-		authTimeout = time.Duration(s.nodeInfo.TuicConfig.AuthTimeout) * time.Second
+	if spec.nodeInfo.TuicConfig.AuthTimeout > 0 {
+		authTimeout = time.Duration(spec.nodeInfo.TuicConfig.AuthTimeout) * time.Second
 	}
 
 	inOpts := &option.TUICInboundOptions{
@@ -97,7 +105,7 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 		Users:             users,
 		CongestionControl: congestionControl,
 		AuthTimeout:       badoption.Duration(authTimeout),
-		ZeroRTTHandshake:  s.nodeInfo.TuicConfig.ZeroRTTHandshake,
+		ZeroRTTHandshake:  spec.nodeInfo.TuicConfig.ZeroRTTHandshake,
 		Heartbeat:         badoption.Duration(heartbeat),
 		InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
 			TLS: tlsOpt,
@@ -107,7 +115,7 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 	opts.Inbounds = []option.Inbound{
 		{
 			Type:    "tuic",
-			Tag:     s.inboundTag,
+			Tag:     spec.inboundTag,
 			Options: inOpts,
 		},
 	}
@@ -127,7 +135,7 @@ func (s *TuicService) buildSingBox() (*box.Box, string, error) {
 	tracker := &tuicTracker{svc: s}
 	boxInstance.Router().AppendTracker(tracker)
 
-	return boxInstance, s.inboundTag, nil
+	return boxInstance, spec.inboundTag, nil
 }
 
 func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
@@ -168,27 +176,32 @@ func (s *TuicService) certMonitor() error {
 		return nil
 	}
 
-	if !s.nodeInfo.EnableTLS {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	s.lifecycleMu.Lock()
+	nodeInfo := s.nodeInfo
+	s.lifecycleMu.Unlock()
+	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
 	}
 
 	switch s.config.CertConfig.CertMode {
 	case "dns", "http", "tls":
-		lego, err := mylego.New(s.config.CertConfig)
-		if err != nil {
-			s.logger.Print(err)
-			return nil
+		renew := s.renewCertificate
+		if renew == nil {
+			renew = defaultRenewCertificate
 		}
-		certPath, keyPath, ok, err := lego.RenewCert()
+		certPath, keyPath, ok, err := renew(s.config.CertConfig)
 		if err != nil {
-			s.logger.Print(err)
-			return nil
+			if s.logger != nil {
+				s.logger.Print(err)
+			}
+			return err
 		}
 		if ok {
 			s.logger.Infof("TUIC certificate renewed for %s, reloading node (cert=%s, key=%s)", s.config.CertConfig.CertDomain, certPath, keyPath)
-			if err := s.reloadNode(s.nodeInfo); err != nil {
-				s.logger.Printf("TUIC certificate reload failed: %v", err)
-			}
+			return s.reloadNodeLocked(nodeInfo)
 		}
 	}
 

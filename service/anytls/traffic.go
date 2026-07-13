@@ -19,6 +19,12 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 		return
 	}
 
+	nodeInfo, _, _ := s.appliedStateSnapshot()
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -26,18 +32,18 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 	authUsers := make([]option.AnyTLSUser, 0, len(*userInfo)*2)
 	newRateLimiters := make(map[string]*rate.Limiter)
 
-	var nodeLimit uint64
-	if s.nodeInfo != nil {
-		nodeLimit = s.nodeInfo.SpeedLimit
-	}
-
 	for _, u := range *userInfo {
 		keys := []string{u.UUID, u.Passwd}
+		limiterKey := u.UUID
+		if limiterKey == "" {
+			limiterKey = u.Passwd
+		}
 		rec := userRecord{
 			UID:         u.UID,
 			Email:       u.Email,
 			DeviceLimit: u.DeviceLimit,
 			SpeedLimit:  u.SpeedLimit,
+			LimiterKey:  limiterKey,
 		}
 
 		limit := determineRate(nodeLimit, u.SpeedLimit)
@@ -278,7 +284,8 @@ func (s *AnyTLSService) restoreTraffic(snapshot map[string]userTraffic) {
 }
 
 func (s *AnyTLSService) userMonitor() error {
-	if time.Since(s.startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	_, tag, startAt := s.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -312,7 +319,7 @@ func (s *AnyTLSService) userMonitor() error {
 				s.logger.Printf("Get rule list filed: %s", err)
 			}
 		} else if len(*ruleList) > 0 {
-			if err := s.rules.UpdateRule(s.tag, *ruleList); err != nil {
+			if err := s.rules.UpdateRule(tag, *ruleList); err != nil {
 				s.logger.Print(err)
 			}
 		}
@@ -334,7 +341,7 @@ func (s *AnyTLSService) userMonitor() error {
 
 	// Report Illegal user
 	if s.rules != nil {
-		if detectResult, err := s.rules.GetDetectResult(s.tag); err != nil {
+		if detectResult, err := s.rules.GetDetectResult(tag); err != nil {
 			s.logger.Print(err)
 		} else if len(*detectResult) > 0 {
 			if err = s.apiClient.ReportIllegal(detectResult); err != nil {
@@ -352,7 +359,8 @@ func (s *AnyTLSService) userMonitor() error {
 // (port, TLS/SNI, AnyTLS-specific options, etc.) and hot-reloads the sing-box
 // instance when a change is detected.
 func (s *AnyTLSService) nodeMonitor() error {
-	if time.Since(s.startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	currentNode, _, startAt := s.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -379,7 +387,7 @@ func (s *AnyTLSService) nodeMonitor() error {
 	// Same as TUIC/Hysteria2: protect against noisy panel-side metadata updates
 	// that change the ETag without altering the actual AnyTLS node configuration
 	// by skipping reload when the effective NodeInfo is unchanged.
-	if s.nodeInfo != nil && reflect.DeepEqual(s.nodeInfo, nodeInfo) {
+	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
 		return nil
 	}
 
@@ -406,4 +414,42 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 		return nodeLimit
 	}
 	return nodeLimit
+}
+
+func (s *AnyTLSService) applyNodeRateLimitLocked(nodeLimit uint64) {
+	sharedByKey := make(map[string]*rate.Limiter)
+	for key, user := range s.users {
+		limiterKey := user.LimiterKey
+		if limiterKey == "" {
+			limiterKey = key
+		}
+		if s.rateLimiters[key] != nil {
+			sharedByKey[limiterKey] = s.rateLimiters[key]
+		}
+	}
+
+	updated := make(map[string]*rate.Limiter)
+	for key, user := range s.users {
+		limit := determineRate(nodeLimit, user.SpeedLimit)
+		if limit == 0 {
+			continue
+		}
+		limiterKey := user.LimiterKey
+		if limiterKey == "" {
+			limiterKey = key
+		}
+		limiter := s.rateLimiters[key]
+		if limiter == nil {
+			limiter = sharedByKey[limiterKey]
+		}
+		if limiter == nil {
+			limiter = rate.NewLimiter(rate.Limit(limit), int(limit))
+		} else {
+			limiter.SetLimit(rate.Limit(limit))
+			limiter.SetBurst(int(limit))
+		}
+		updated[key] = limiter
+		sharedByKey[limiterKey] = limiter
+	}
+	s.rateLimiters = updated
 }

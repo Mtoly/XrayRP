@@ -160,7 +160,7 @@ func (t *anyTLSTracker) RoutedConnection(_ context.Context, conn net.Conn, m ada
 	}
 
 	// Access log: only expose UID, not email.
-	nodeTag := t.svc.tag
+	nodeTag := t.svc.appliedTag()
 	if ok {
 		t.svc.logger.Infof("from %s accepted tcp:%s [%s] uid: %d",
 			remote, dest, nodeTag, userRec.UID)
@@ -178,7 +178,7 @@ func (t *anyTLSTracker) RoutedConnection(_ context.Context, conn net.Conn, m ada
 		if h, _, err := net.SplitHostPort(srcIP); err == nil {
 			srcIP = h
 		}
-		if t.svc.rules.Detect(t.svc.tag, dest, userKey, srcIP) {
+		if t.svc.rules.Detect(nodeTag, dest, userKey, srcIP) {
 			t.svc.logger.WithFields(fields).Warn("AnyTLS audit rule hit, closing connection")
 			blocked = true
 		}
@@ -241,7 +241,7 @@ func (t *anyTLSTracker) RoutedPacketConnection(_ context.Context, conn N.PacketC
 		fields["uid"] = userRec.UID
 	}
 
-	nodeTag := t.svc.tag
+	nodeTag := t.svc.appliedTag()
 	if ok {
 		t.svc.logger.Infof("from %s accepted udp:%s [%s] uid: %d",
 			remote, dest, nodeTag, userRec.UID)
@@ -256,7 +256,7 @@ func (t *anyTLSTracker) RoutedPacketConnection(_ context.Context, conn N.PacketC
 	if ok && dest != "" && t.svc.rules != nil {
 		userKey := fmt.Sprintf("%d", userRec.UID)
 		srcIP := host
-		if t.svc.rules.Detect(t.svc.tag, dest, userKey, srcIP) {
+		if t.svc.rules.Detect(nodeTag, dest, userKey, srcIP) {
 			t.svc.logger.WithFields(fields).Warn("AnyTLS audit rule hit on UDP, closing connection")
 			blocked = true
 		}

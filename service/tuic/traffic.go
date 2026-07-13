@@ -19,17 +19,18 @@ func (s *TuicService) syncUsers(userInfo *[]api.UserInfo) {
 		return
 	}
 
+	nodeInfo, _, _ := s.appliedStateSnapshot()
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	newUsers := make(map[string]userRecord, len(*userInfo))
 	authUsers := make([]option.TUICUser, 0, len(*userInfo))
 	newRateLimiters := make(map[string]*rate.Limiter)
-
-	var nodeLimit uint64
-	if s.nodeInfo != nil {
-		nodeLimit = s.nodeInfo.SpeedLimit
-	}
 
 	for _, u := range *userInfo {
 		// TUIC uses UUID as the primary authentication key
@@ -299,7 +300,8 @@ func (s *TuicService) restoreTraffic(snapshot map[string]userTraffic) {
 }
 
 func (s *TuicService) userMonitor() error {
-	if time.Since(s.startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	_, tag, startAt := s.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -333,7 +335,7 @@ func (s *TuicService) userMonitor() error {
 				s.logger.Printf("Get rule list filed: %s", err)
 			}
 		} else if len(*ruleList) > 0 {
-			if err := s.rules.UpdateRule(s.tag, *ruleList); err != nil {
+			if err := s.rules.UpdateRule(tag, *ruleList); err != nil {
 				s.logger.Print(err)
 			}
 		}
@@ -355,7 +357,7 @@ func (s *TuicService) userMonitor() error {
 
 	// Report Illegal user
 	if s.rules != nil {
-		if detectResult, err := s.rules.GetDetectResult(s.tag); err != nil {
+		if detectResult, err := s.rules.GetDetectResult(tag); err != nil {
 			s.logger.Print(err)
 		} else if len(*detectResult) > 0 {
 			if err = s.apiClient.ReportIllegal(detectResult); err != nil {
@@ -373,7 +375,8 @@ func (s *TuicService) userMonitor() error {
 // (port, TLS/SNI, TUIC-specific options, etc.) and hot-reloads the sing-box
 // instance when a change is detected.
 func (s *TuicService) nodeMonitor() error {
-	if time.Since(s.startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	currentNode, _, startAt := s.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -401,7 +404,7 @@ func (s *TuicService) nodeMonitor() error {
 	// actual TUIC configuration, which may cause the ETag to change on every
 	// poll. Guard against unnecessary hot-reloads by comparing the new NodeInfo
 	// with the current in-memory value, similar to controller.nodeInfoMonitor.
-	if s.nodeInfo != nil && reflect.DeepEqual(s.nodeInfo, nodeInfo) {
+	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
 		return nil
 	}
 
@@ -428,4 +431,23 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 		return nodeLimit
 	}
 	return nodeLimit
+}
+
+func (s *TuicService) applyNodeRateLimitLocked(nodeLimit uint64) {
+	updated := make(map[string]*rate.Limiter)
+	for key, user := range s.users {
+		limit := determineRate(nodeLimit, user.SpeedLimit)
+		if limit == 0 {
+			continue
+		}
+		limiter := s.rateLimiters[key]
+		if limiter == nil {
+			limiter = rate.NewLimiter(rate.Limit(limit), int(limit))
+		} else {
+			limiter.SetLimit(rate.Limit(limit))
+			limiter.SetBurst(int(limit))
+		}
+		updated[key] = limiter
+	}
+	s.rateLimiters = updated
 }

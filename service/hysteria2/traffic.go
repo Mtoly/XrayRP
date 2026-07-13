@@ -113,26 +113,32 @@ func (h *Hysteria2Service) syncUsers(userInfo *[]api.UserInfo) {
 		return
 	}
 
+	nodeInfo, _, _ := h.appliedStateSnapshot()
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	newUsers := make(map[string]userRecord, len(*userInfo))
 	newRateLimiters := make(map[string]*rate.Limiter)
 
-	var nodeLimit uint64
-	if h.nodeInfo != nil {
-		nodeLimit = h.nodeInfo.SpeedLimit
-	}
-
 	for _, u := range *userInfo {
 		// Primary auth key is UUID; fallback to Passwd for panels that
 		// use the password field for Hysteria2 authentication.
 		keys := []string{u.UUID, u.Passwd}
+		limiterKey := u.UUID
+		if limiterKey == "" {
+			limiterKey = u.Passwd
+		}
 		rec := userRecord{
 			UID:         u.UID,
 			Email:       u.Email,
 			DeviceLimit: u.DeviceLimit,
 			SpeedLimit:  u.SpeedLimit,
+			LimiterKey:  limiterKey,
 		}
 
 		limit := determineRate(nodeLimit, u.SpeedLimit)
@@ -204,6 +210,44 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 		return nodeLimit
 	}
 	return nodeLimit
+}
+
+func (h *Hysteria2Service) applyNodeRateLimitLocked(nodeLimit uint64) {
+	sharedByKey := make(map[string]*rate.Limiter)
+	for key, user := range h.users {
+		limiterKey := user.LimiterKey
+		if limiterKey == "" {
+			limiterKey = key
+		}
+		if h.rateLimiters[key] != nil {
+			sharedByKey[limiterKey] = h.rateLimiters[key]
+		}
+	}
+
+	updated := make(map[string]*rate.Limiter)
+	for key, user := range h.users {
+		limit := determineRate(nodeLimit, user.SpeedLimit)
+		if limit == 0 {
+			continue
+		}
+		limiterKey := user.LimiterKey
+		if limiterKey == "" {
+			limiterKey = key
+		}
+		limiter := h.rateLimiters[key]
+		if limiter == nil {
+			limiter = sharedByKey[limiterKey]
+		}
+		if limiter == nil {
+			limiter = rate.NewLimiter(rate.Limit(limit), int(limit))
+		} else {
+			limiter.SetLimit(rate.Limit(limit))
+			limiter.SetBurst(int(limit))
+		}
+		updated[key] = limiter
+		sharedByKey[limiterKey] = limiter
+	}
+	h.rateLimiters = updated
 }
 
 // collectUsage builds traffic and online user reports and resets the
@@ -290,7 +334,8 @@ func (h *Hysteria2Service) restoreTraffic(snapshot map[string]userTraffic) {
 // - report user traffic and online users.
 func (h *Hysteria2Service) userMonitor() error {
 	// delay to start
-	if time.Since(h.startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
+	_, tag, startAt := h.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -330,7 +375,7 @@ func (h *Hysteria2Service) userMonitor() error {
 				h.logger.Printf("Get rule list filed: %s", err)
 			}
 		} else if len(*ruleList) > 0 {
-			if err := h.rules.UpdateRule(h.tag, *ruleList); err != nil {
+			if err := h.rules.UpdateRule(tag, *ruleList); err != nil {
 				h.logger.Print(err)
 			}
 		}
@@ -357,7 +402,7 @@ func (h *Hysteria2Service) userMonitor() error {
 
 	// Report Illegal user
 	if h.rules != nil {
-		if detectResult, err := h.rules.GetDetectResult(h.tag); err != nil {
+		if detectResult, err := h.rules.GetDetectResult(tag); err != nil {
 			h.logger.Print(err)
 		} else if len(*detectResult) > 0 {
 			if err = h.apiClient.ReportIllegal(detectResult); err != nil {
@@ -377,7 +422,8 @@ func (h *Hysteria2Service) userMonitor() error {
 // XrayR process when you edit the node on the panel.
 func (h *Hysteria2Service) nodeMonitor() error {
 	// delay to start, keep in sync with userMonitor behaviour
-	if time.Since(h.startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
+	currentNode, _, startAt := h.appliedStateSnapshot()
+	if time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -406,7 +452,7 @@ func (h *Hysteria2Service) nodeMonitor() error {
 	// to change and GetNodeInfo to return 200 each time, leading to unnecessary
 	// server restarts. Avoid that by comparing the new NodeInfo with the current
 	// one and only reloading when there is a real config change.
-	if h.nodeInfo != nil && reflect.DeepEqual(h.nodeInfo, nodeInfo) {
+	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
 		return nil
 	}
 

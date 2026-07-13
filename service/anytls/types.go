@@ -11,6 +11,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	xcommon "github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
@@ -21,8 +22,15 @@ type runtimeInstance interface {
 }
 
 type runtimeFactory func(*AnyTLSService) (runtimeInstance, string, error)
+type runtimeBuildSpec struct {
+	nodeInfo   *api.NodeInfo
+	inboundTag string
+	certConfig *mylego.CertConfig
+}
+type reloadRuntimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error
 type closeRuntimeFunc func(runtimeInstance) error
+type renewCertificateFunc func(*mylego.CertConfig) (certPath, keyPath string, renewed bool, err error)
 
 type lifecycleState uint8
 
@@ -53,12 +61,14 @@ type AnyTLSService struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	box            runtimeInstance
-	runtimeFactory runtimeFactory
-	startRuntime   startRuntimeFunc
-	closeRuntime   closeRuntimeFunc
-	taskFactory    taskFactory
-	inboundTag     string
+	box                  runtimeInstance
+	runtimeFactory       runtimeFactory
+	reloadRuntimeFactory reloadRuntimeFactory
+	startRuntime         startRuntimeFunc
+	closeRuntime         closeRuntimeFunc
+	renewCertificate     renewCertificateFunc
+	taskFactory          taskFactory
+	inboundTag           string
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState
@@ -90,6 +100,7 @@ type userRecord struct {
 	Email       string
 	DeviceLimit int
 	SpeedLimit  uint64
+	LimiterKey  string
 }
 
 type userTraffic struct {

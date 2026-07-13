@@ -15,7 +15,14 @@ import (
 // buildServerConfig constructs the Hysteria2 server configuration based on
 // the current node information and controller configuration.
 func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
-	hy := h.nodeInfo.Hysteria2Config
+	return h.buildServerConfigFor(serverBuildSpec{
+		nodeInfo:   h.nodeInfo,
+		certConfig: h.config.CertConfig,
+	})
+}
+
+func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.Config, error) {
+	hy := spec.nodeInfo.Hysteria2Config
 	if hy == nil {
 		return nil, fmt.Errorf("Hysteria2Config is nil")
 	}
@@ -24,7 +31,7 @@ func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
-	addr := fmt.Sprintf("%s:%d", listenIP, h.nodeInfo.Port)
+	addr := fmt.Sprintf("%s:%d", listenIP, spec.nodeInfo.Port)
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -61,7 +68,7 @@ func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
 		return nil, fmt.Errorf("unsupported hysteria2 obfs: %s", hy.Obfs)
 	}
 
-	certFile, keyFile, err := getOrIssueCert(h.config.CertConfig)
+	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
 	if err != nil {
 		packetConn.Close()
 		return nil, err
@@ -140,30 +147,32 @@ func (h *Hysteria2Service) certMonitor() error {
 		return nil
 	}
 
-	if !h.nodeInfo.EnableTLS {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	h.lifecycleMu.Lock()
+	nodeInfo := h.nodeInfo
+	h.lifecycleMu.Unlock()
+	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
 	}
 
 	switch h.config.CertConfig.CertMode {
 	case "dns", "http", "tls":
-		lego, err := mylego.New(h.config.CertConfig)
-		if err != nil {
-			h.logger.Print(err)
-			return nil
+		renew := h.renewCertificate
+		if renew == nil {
+			renew = defaultRenewCertificate
 		}
-		certPath, keyPath, ok, err := lego.RenewCert()
+		certPath, keyPath, ok, err := renew(h.config.CertConfig)
 		if err != nil {
-			h.logger.Print(err)
-			return nil
+			if h.logger != nil {
+				h.logger.Print(err)
+			}
+			return err
 		}
-		// ok == true means the certificate was actually renewed on disk.
-		// Rebuild the Hysteria2 server so the new cert is loaded without
-		// requiring a full XrayR restart.
 		if ok {
 			h.logger.Infof("Hysteria2 certificate renewed for %s, reloading server (cert=%s, key=%s)", h.config.CertConfig.CertDomain, certPath, keyPath)
-			if err := h.reloadNode(h.nodeInfo); err != nil {
-				h.logger.Printf("Hysteria2 certificate reload failed: %v", err)
-			}
+			return h.reloadNodeLocked(nodeInfo)
 		}
 	}
 

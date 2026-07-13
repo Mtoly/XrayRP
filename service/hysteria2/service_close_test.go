@@ -101,9 +101,10 @@ func TestStartOwnsPortHopRuleInstallationBeforePublishingRunning(t *testing.T) {
 
 	applyEntered := make(chan struct{})
 	releaseApply := make(chan struct{})
-	applyPortHopRules = func([]portHopRule, *log.Entry) {
+	applyPortHopRules = func([]portHopRule, *log.Entry) error {
 		close(applyEntered)
 		<-releaseApply
+		return nil
 	}
 
 	events := &lifecycleEvents{}
@@ -140,6 +141,75 @@ func TestStartOwnsPortHopRuleInstallationBeforePublishingRunning(t *testing.T) {
 	}
 	if err := service.Close(); err != nil {
 		t.Fatalf("Close() after Start error = %v", err)
+	}
+}
+
+func TestStartRecordsInstalledPortHopRulesForCloseOwnership(t *testing.T) {
+	originalApply, originalDelete := applyPortHopRules, deletePortHopRules
+	t.Cleanup(func() {
+		applyPortHopRules = originalApply
+		deletePortHopRules = originalDelete
+	})
+	applyPortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	deleted := make(chan []portHopRule, 1)
+	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+		deleted <- append([]portHopRule(nil), rules...)
+		return nil
+	}
+
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{events: events, serveBlock: make(chan struct{}), serving: make(chan struct{})}
+	service := newStartTestService(events, runtime)
+	nodeInfo := service.apiClient.(*configurablePanelClient).nodeInfo
+	nodeInfo.Hysteria2Config.PortHopEnabled = true
+	nodeInfo.Hysteria2Config.PortHopPorts = "9444-9445"
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	wantRules := buildPortHopRulesFromNode(nodeInfo)
+	if !reflect.DeepEqual(service.portHopRules, wantRules) {
+		t.Fatalf("installed port-hop ownership = %v, want %v", service.portHopRules, wantRules)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if got := <-deleted; !reflect.DeepEqual(got, wantRules) {
+		t.Fatalf("Close() deleted rules = %v, want %v", got, wantRules)
+	}
+}
+
+func TestStartPortHopFailureCleansRuntimeAndDoesNotPublishOwnership(t *testing.T) {
+	applyErr := errors.New("port-hop apply failed")
+	originalApply, originalDelete := applyPortHopRules, deletePortHopRules
+	t.Cleanup(func() {
+		applyPortHopRules = originalApply
+		deletePortHopRules = originalDelete
+	})
+	applyPortHopRules = func([]portHopRule, *log.Entry) error { return applyErr }
+	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{events: events, serveBlock: make(chan struct{}), serving: make(chan struct{})}
+	service := newStartTestService(events, runtime)
+	nodeInfo := service.apiClient.(*configurablePanelClient).nodeInfo
+	nodeInfo.Hysteria2Config.PortHopEnabled = true
+	nodeInfo.Hysteria2Config.PortHopPorts = "9444-9445"
+
+	err := service.Start()
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("Start() error = %v, want %v", err, applyErr)
+	}
+	if service.state != stateFailed || service.server != nil || service.nodeInfo != nil || len(service.portHopRules) != 0 {
+		t.Fatalf("failed port-hop Start published state: state=%v server=%v node=%v rules=%v", service.state, service.server, service.nodeInfo, service.portHopRules)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{
+		"build-config", "build-server", "serve",
+		"task-start:Hysteria2_127.0.0.1_9443_9", "task-start:node monitor",
+		"task-close:node monitor", "task-close:Hysteria2_127.0.0.1_9443_9",
+		"stop", "close",
+	}) {
+		t.Fatalf("cleanup events = %v", got)
 	}
 }
 

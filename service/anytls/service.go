@@ -10,6 +10,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
@@ -32,12 +33,24 @@ func defaultRuntimeFactory(s *AnyTLSService) (runtimeInstance, string, error) {
 	return s.buildSingBox()
 }
 
+func defaultReloadRuntimeFactory(s *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+	return s.buildSingBoxFor(spec)
+}
+
 func defaultStartRuntime(runtime runtimeInstance) error {
 	return runtime.Start()
 }
 
 func defaultCloseRuntime(runtime runtimeInstance) error {
 	return runtime.Close()
+}
+
+func defaultRenewCertificate(certConfig *mylego.CertConfig) (string, string, bool, error) {
+	lego, err := mylego.New(certConfig)
+	if err != nil {
+		return "", "", false, err
+	}
+	return lego.RenewCert()
 }
 
 func New(apiClient PanelClient, cfg *controller.Config) *AnyTLSService {
@@ -47,18 +60,20 @@ func New(apiClient PanelClient, cfg *controller.Config) *AnyTLSService {
 		"ID":   clientInfo.NodeID,
 	})
 	return &AnyTLSService{
-		apiClient:      apiClient,
-		config:         cfg,
-		runtimeFactory: defaultRuntimeFactory,
-		startRuntime:   defaultStartRuntime,
-		closeRuntime:   defaultCloseRuntime,
-		taskFactory:    defaultTaskFactory,
-		logger:         logger,
-		rules:          rule.New(),
-		users:          make(map[string]userRecord),
-		traffic:        make(map[string]*userTraffic),
-		onlineIPs:      make(map[string]map[string]struct{}),
-		ipLastActive:   make(map[string]map[string]time.Time),
+		apiClient:            apiClient,
+		config:               cfg,
+		runtimeFactory:       defaultRuntimeFactory,
+		reloadRuntimeFactory: defaultReloadRuntimeFactory,
+		startRuntime:         defaultStartRuntime,
+		closeRuntime:         defaultCloseRuntime,
+		renewCertificate:     defaultRenewCertificate,
+		taskFactory:          defaultTaskFactory,
+		logger:               logger,
+		rules:                rule.New(),
+		users:                make(map[string]userRecord),
+		traffic:              make(map[string]*userTraffic),
+		onlineIPs:            make(map[string]map[string]struct{}),
+		ipLastActive:         make(map[string]map[string]time.Time),
 	}
 }
 
@@ -68,6 +83,24 @@ func (s *AnyTLSService) buildRuntime() (runtimeInstance, string, error) {
 		factory = defaultRuntimeFactory
 	}
 	return factory(s)
+}
+
+func (s *AnyTLSService) buildReloadRuntime(spec runtimeBuildSpec) (runtimeInstance, string, error) {
+	if s.reloadRuntimeFactory == nil {
+		return nil, "", errors.New("AnyTLS reload runtime factory is nil")
+	}
+	return s.reloadRuntimeFactory(s, spec)
+}
+
+func (s *AnyTLSService) appliedStateSnapshot() (*api.NodeInfo, string, time.Time) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.nodeInfo, s.tag, s.startAt
+}
+
+func (s *AnyTLSService) appliedTag() string {
+	_, tag, _ := s.appliedStateSnapshot()
+	return tag
 }
 
 func (s *AnyTLSService) Start() (err error) {
@@ -250,9 +283,9 @@ func (s *AnyTLSService) Close() error {
 		s.lifecycleMu.Unlock()
 		return nil
 	}
-	if s.state == stateStarting {
+	if s.state == stateStarting || s.state == stateReloading {
 		s.lifecycleMu.Unlock()
-		return errors.New("AnyTLS service cannot close while starting")
+		return errors.New("AnyTLS service cannot close while starting or reloading")
 	}
 	s.closed = true
 	s.state = stateStopping
@@ -283,94 +316,159 @@ func (s *AnyTLSService) Close() error {
 	return errors.Join(errs...)
 }
 
-// reloadNode replaces in-memory node information and rebuilds the underlying
-// sing-box AnyTLS instance so that changes from the panel (port, TLS/SNI,
-// padding options, etc.) and renewed certificates take effect without
-// restarting the whole XrayR process.
+// reloadNode replaces the active sing-box instance while preserving the last
+// successfully applied node runtime state when replacement fails.
 func (s *AnyTLSService) reloadNode(nodeInfo *api.NodeInfo) error {
+	if nodeInfo == nil {
+		return nil
+	}
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	return s.reloadNodeLocked(nodeInfo)
+}
+
+func (s *AnyTLSService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	if nodeInfo == nil {
 		return nil
 	}
 	if nodeInfo.NodeType != "AnyTLS" {
 		return fmt.Errorf("AnyTLSService reloadNode: unexpected node type %s", nodeInfo.NodeType)
 	}
-	if nodeInfo.Port == 0 {
-		return errors.New("server port must > 0")
+	if nodeInfo.Port == 0 || nodeInfo.Port > 65535 {
+		return errors.New("server port must be between 1 and 65535")
 	}
 	if s.config == nil || s.config.CertConfig == nil {
 		return errors.New("CertConfig is required for AnyTLS")
 	}
-	if nodeInfo.AnyTLSConfig == nil {
-		nodeInfo.AnyTLSConfig = &api.AnyTLSConfig{}
+
+	candidateNode := *nodeInfo
+	if candidateNode.AnyTLSConfig == nil {
+		candidateNode.AnyTLSConfig = &api.AnyTLSConfig{}
 	}
-
-	s.reloadMu.Lock()
-	defer s.reloadMu.Unlock()
-
-	oldInfo := s.nodeInfo
-	s.nodeInfo = nodeInfo
-
-	// Keep CertDomain in sync with the panel SNI when originally derived from
-	// SNI/Host.
-	if s.config.CertConfig != nil && s.nodeInfo.EnableTLS && !s.nodeInfo.EnableREALITY {
-		sni := s.nodeInfo.SNI
-		if sni == "" {
-			sni = s.nodeInfo.Host
-		}
-		if sni != "" {
-			cert := s.config.CertConfig
-			var oldSNI, oldHost string
-			if oldInfo != nil {
-				oldSNI = oldInfo.SNI
-				oldHost = oldInfo.Host
-			}
-			switch cert.CertMode {
-			case "file":
-				if cert.CertFile == "" && cert.KeyFile == "" {
-					cert.CertDomain = sni
-					cert.CertFile = "/etc/XrayR/cert/" + sni + ".cert"
-					cert.KeyFile = "/etc/XrayR/cert/" + sni + ".key"
-				} else if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
-					cert.CertDomain = sni
-				}
-			case "dns", "http", "tls":
-				if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
-					cert.CertDomain = sni
-				}
-			}
-		}
+	s.lifecycleMu.Lock()
+	if s.closed || s.state != stateRunning || s.box == nil || s.nodeInfo == nil {
+		state := s.state
+		s.lifecycleMu.Unlock()
+		return fmt.Errorf("AnyTLS service cannot reload from state %d", state)
 	}
+	s.state = stateReloading
+	oldRuntime := s.box
+	oldNodeInfo := s.nodeInfo
+	oldTag := s.tag
+	oldInboundTag := s.inboundTag
+	oldCertConfig := cloneCertConfig(s.config.CertConfig)
+	s.lifecycleMu.Unlock()
 
-	if s.box != nil {
-		closeRuntime := s.closeRuntime
-		if closeRuntime == nil {
-			closeRuntime = defaultCloseRuntime
-		}
-		if err := closeRuntime(s.box); err != nil {
-			s.logger.Printf("AnyTLS reload: failed to close old box: %v", err)
-		}
-		s.box = nil
-	}
-
-	boxInstance, inboundTag, err := s.buildRuntime()
+	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
+	candidateRuntime, _, err := s.buildReloadRuntime(runtimeBuildSpec{
+		nodeInfo:   &candidateNode,
+		inboundTag: oldInboundTag,
+		certConfig: candidateCertConfig,
+	})
 	if err != nil {
+		s.finishReload(oldRuntime, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateRunning, nil)
 		return err
 	}
-	s.box = boxInstance
-	s.inboundTag = inboundTag
 
+	closeRuntime := s.closeRuntime
+	if closeRuntime == nil {
+		closeRuntime = defaultCloseRuntime
+	}
 	startRuntime := s.startRuntime
 	if startRuntime == nil {
 		startRuntime = defaultStartRuntime
 	}
-	go func(runtime runtimeInstance) {
-		if err := startRuntime(runtime); err != nil {
-			s.logger.Errorf("AnyTLS box start error after reload: %v", err)
-		}
-	}(boxInstance)
 
-	s.logger.Infof("AnyTLS node reloaded on %s:%d", s.config.ListenIP, s.nodeInfo.Port)
-	return nil
+	oldCloseErr := closeRuntime(oldRuntime)
+	if err := startRuntime(candidateRuntime); err != nil {
+		reloadErr := errors.Join(oldCloseErr, err, closeRuntime(candidateRuntime))
+		restoredRuntime, _, restoreErr := s.buildReloadRuntime(runtimeBuildSpec{
+			nodeInfo:   oldNodeInfo,
+			inboundTag: oldInboundTag,
+			certConfig: oldCertConfig,
+		})
+		if restoreErr == nil {
+			restoreErr = startRuntime(restoredRuntime)
+			if restoreErr != nil {
+				restoreErr = errors.Join(restoreErr, closeRuntime(restoredRuntime))
+			}
+		}
+		if restoreErr != nil {
+			joined := errors.Join(reloadErr, restoreErr)
+			s.finishReload(nil, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateFailed, joined)
+			return joined
+		}
+		s.finishReload(restoredRuntime, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateRunning, nil)
+		return reloadErr
+	}
+
+	s.finishReload(candidateRuntime, &candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
+	s.logger.Infof("AnyTLS node reloaded on %s:%d", s.config.ListenIP, candidateNode.Port)
+	return oldCloseErr
+}
+
+func (s *AnyTLSService) finishReload(runtime runtimeInstance, nodeInfo *api.NodeInfo, _, _ string, certConfig *mylego.CertConfig, state lifecycleState, runtimeErr error) {
+	s.lifecycleMu.Lock()
+	s.mu.Lock()
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+	s.applyNodeRateLimitLocked(nodeLimit)
+	s.mu.Unlock()
+	s.box = runtime
+	s.nodeInfo = nodeInfo
+	*s.config.CertConfig = *cloneCertConfig(certConfig)
+	s.state = state
+	s.runtimeErr = runtimeErr
+	s.lifecycleMu.Unlock()
+}
+
+func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
+	if certConfig == nil {
+		return nil
+	}
+	cloned := *certConfig
+	if certConfig.DNSEnv != nil {
+		cloned.DNSEnv = make(map[string]string, len(certConfig.DNSEnv))
+		for key, value := range certConfig.DNSEnv {
+			cloned.DNSEnv[key] = value
+		}
+	}
+	return &cloned
+}
+
+func deriveReloadCertConfig(current *mylego.CertConfig, oldInfo, candidate *api.NodeInfo) *mylego.CertConfig {
+	cert := cloneCertConfig(current)
+	if cert == nil || candidate == nil || !candidate.EnableTLS || candidate.EnableREALITY {
+		return cert
+	}
+	sni := candidate.SNI
+	if sni == "" {
+		sni = candidate.Host
+	}
+	if sni == "" {
+		return cert
+	}
+	var oldSNI, oldHost string
+	if oldInfo != nil {
+		oldSNI, oldHost = oldInfo.SNI, oldInfo.Host
+	}
+	switch cert.CertMode {
+	case "file":
+		if cert.CertFile == "" && cert.KeyFile == "" {
+			cert.CertDomain = sni
+			cert.CertFile = "/etc/XrayR/cert/" + sni + ".cert"
+			cert.KeyFile = "/etc/XrayR/cert/" + sni + ".key"
+		} else if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
+			cert.CertDomain = sni
+		}
+	case "dns", "http", "tls":
+		if cert.CertDomain == "" || cert.CertDomain == oldSNI || cert.CertDomain == oldHost {
+			cert.CertDomain = sni
+		}
+	}
+	return cert
 }
 
 func getSingBoxVersion() string {

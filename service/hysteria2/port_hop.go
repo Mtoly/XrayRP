@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
@@ -8,38 +9,77 @@ import (
 )
 
 var (
-	applyPortHopRules  = applyPortHopIptablesRules
-	deletePortHopRules = deletePortHopIptablesRules
+	applyPortHopRules     portHopRulesFunc = applyPortHopIptablesRules
+	deletePortHopRules    portHopRulesFunc = deletePortHopIptablesRules
+	errPortHopUnsupported                  = errors.New("port-hop rules are unsupported on this platform")
 )
 
-// refreshPortHopRules is a small helper that acquires reloadMu and delegates to
-// updatePortHopRulesLocked so that callers which are not already holding the
-// lock (for example Start/Close) can safely refresh iptables rules.
-func (h *Hysteria2Service) refreshPortHopRules() {
-	h.reloadMu.Lock()
-	defer h.reloadMu.Unlock()
-
-	h.updatePortHopRulesLocked()
+type portHopMutationError struct {
+	err      error
+	restored bool
 }
 
-// updatePortHopRulesLocked recomputes and applies the iptables rules used for
-// Hysteria2 port hopping based on the current h.nodeInfo. It must be called
-// with reloadMu held.
-func (h *Hysteria2Service) updatePortHopRulesLocked() {
-	// First remove previously installed rules, if any.
-	if len(h.portHopRules) > 0 {
-		deletePortHopRules(h.portHopRules, h.logger)
+func (e *portHopMutationError) Error() string { return e.err.Error() }
+func (e *portHopMutationError) Unwrap() error { return e.err }
+
+func portHopMutationRestored(err error) bool {
+	var mutationErr *portHopMutationError
+	if errors.As(err, &mutationErr) {
+		return mutationErr.restored
+	}
+	// Injected adapters must leave the pre-call state intact when returning a
+	// plain error. Production Linux mutations report rollback state explicitly.
+	return true
+}
+
+// replacePortHopRulesLocked replaces installed port-hop rules only after a
+// replacement runtime is ready. The caller must hold reloadMu.
+func (h *Hysteria2Service) replacePortHopRulesLocked(rules []portHopRule) (bool, error) {
+	oldRules := append([]portHopRule(nil), h.portHopRules...)
+	if len(oldRules) > 0 {
+		if err := deletePortHopRules(oldRules, h.logger); err != nil {
+			restored := portHopMutationRestored(err)
+			if restored {
+				h.portHopRules = oldRules
+			} else {
+				h.portHopRules = nil
+			}
+			return restored, err
+		}
+	}
+	if len(rules) > 0 {
+		if err := applyPortHopRules(rules, h.logger); err != nil {
+			if errors.Is(err, errPortHopUnsupported) {
+				h.portHopRules = nil
+				return true, nil
+			}
+			var restoreErr error
+			if len(oldRules) > 0 {
+				restoreErr = applyPortHopRules(oldRules, h.logger)
+			}
+			if portHopMutationRestored(err) && restoreErr == nil {
+				h.portHopRules = oldRules
+				return true, err
+			}
+			h.portHopRules = nil
+			return false, errors.Join(err, restoreErr)
+		}
+	}
+	h.portHopRules = append([]portHopRule(nil), rules...)
+	return true, nil
+}
+
+func (h *Hysteria2Service) cleanupPortHopRules() error {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+	if len(h.portHopRules) == 0 {
+		return nil
+	}
+	err := deletePortHopRules(h.portHopRules, h.logger)
+	if err == nil || !portHopMutationRestored(err) {
 		h.portHopRules = nil
 	}
-
-	// Then compute the desired rules from the latest node info.
-	rules := buildPortHopRulesFromNode(h.nodeInfo)
-	if len(rules) == 0 {
-		return
-	}
-
-	applyPortHopRules(rules, h.logger)
-	h.portHopRules = rules
+	return err
 }
 
 // buildPortHopRulesFromNode turns the Hysteria2 port hopping configuration in
