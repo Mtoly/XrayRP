@@ -480,8 +480,8 @@ func TestStartPublishesOnlyAfterRuntimeAndTasksAreReady(t *testing.T) {
 	if err := service.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if service.state != stateRunning || service.runtimeErr != nil || service.box == nil || service.nodeInfo == nil || len(service.tasks) != 2 || service.tag == "" || service.startAt.IsZero() {
-		t.Fatalf("successful Start did not publish running state: state=%v err=%v box=%v nodeInfo=%v tasks=%d tag=%q startAt=%v", service.state, service.runtimeErr, service.box, service.nodeInfo, len(service.tasks), service.tag, service.startAt)
+	if service.state != stateRunning || service.runtimeErr != nil || service.box == nil || service.nodeInfo == nil || service.tasks == nil || service.tag == "" || service.startAt.IsZero() {
+		t.Fatalf("successful Start did not publish running state: state=%v err=%v box=%v nodeInfo=%v tasks=%v tag=%q startAt=%v", service.state, service.runtimeErr, service.box, service.nodeInfo, service.tasks, service.tag, service.startAt)
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "start", "ready", "task-start:Tuic_127.0.0.1_8443_8", "task-start:node monitor"}) {
 		t.Fatalf("events = %v, want synchronous runtime readiness before tasks", got)

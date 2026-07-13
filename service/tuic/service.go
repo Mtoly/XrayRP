@@ -14,6 +14,7 @@ import (
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 type PanelClient interface {
@@ -218,30 +219,17 @@ func (s *TuicService) Start() (err error) {
 		factory = defaultTaskFactory
 	}
 	interval := time.Duration(s.config.UpdatePeriodic) * time.Second
-	tasks := []periodicTask{
-		{tag: tag, task: factory(tag, interval, s.userMonitor)},
-		{tag: "node monitor", task: factory("node monitor", interval, s.nodeMonitor)},
-	}
+	tasks := specialruntime.NewTasks()
+	tasks.Add(factory(tag, interval, s.userMonitor))
+	tasks.Add(factory("node monitor", interval, s.nodeMonitor))
 	if nodeInfo.EnableTLS {
-		tasks = append(tasks, periodicTask{
-			tag:  "cert monitor",
-			task: factory("cert monitor", interval*60, s.certMonitor),
-		})
+		tasks.Add(factory("cert monitor", interval*60, s.certMonitor))
 	}
 
-	for i := range tasks {
-		if err := tasks[i].Start(); err != nil {
-			var cleanupErrs []error
-			cleanupErrs = append(cleanupErrs, err)
-			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Stop())
-			}
-			cleanupErrs = append(cleanupErrs, closeRuntime(boxInstance))
-			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Wait())
-			}
-			return fail(errors.Join(cleanupErrs...))
-		}
+	if err := tasks.Start(specialruntime.RuntimeShutdown{
+		Stop: func() error { return closeRuntime(boxInstance) },
+	}); err != nil {
+		return fail(err)
 	}
 
 	s.lifecycleMu.Lock()
@@ -294,19 +282,22 @@ func (s *TuicService) Close() error {
 	boxInstance := s.box
 	s.lifecycleMu.Unlock()
 
-	var errs []error
-	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Stop())
-	}
+	var closeErr error
 	if boxInstance != nil {
 		closeRuntime := s.closeRuntime
 		if closeRuntime == nil {
 			closeRuntime = defaultCloseRuntime
 		}
-		errs = append(errs, closeRuntime(boxInstance))
-	}
-	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Wait())
+		shutdown := specialruntime.RuntimeShutdown{
+			Stop: func() error { return closeRuntime(boxInstance) },
+		}
+		if tasks != nil {
+			closeErr = tasks.Close(shutdown)
+		} else {
+			closeErr = shutdown.Stop()
+		}
+	} else if tasks != nil {
+		closeErr = tasks.Close(specialruntime.RuntimeShutdown{})
 	}
 
 	s.lifecycleMu.Lock()
@@ -314,7 +305,7 @@ func (s *TuicService) Close() error {
 	s.box = nil
 	s.state = stateStopped
 	s.lifecycleMu.Unlock()
-	return errors.Join(errs...)
+	return closeErr
 }
 
 // reloadNode replaces the active sing-box instance while preserving the last

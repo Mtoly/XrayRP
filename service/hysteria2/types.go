@@ -1,7 +1,6 @@
 package hysteria2
 
 import (
-	"errors"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 const onlineIPTTL = 2 * time.Minute
@@ -108,7 +108,7 @@ type Hysteria2Service struct {
 
 	tag     string
 	startAt time.Time
-	tasks   []periodicTask
+	tasks   *specialruntime.Tasks
 	logger  *log.Entry
 
 	rules *rule.Manager
@@ -154,40 +154,4 @@ type portHopRule struct {
 	FromPortStart uint16
 	FromPortEnd   uint16
 	ToPort        uint16
-}
-
-type periodicTask struct {
-	tag  string
-	task lifecycleTask
-}
-
-func (t periodicTask) Start() error {
-	if t.task == nil {
-		return nil
-	}
-	return t.task.Start()
-}
-
-func (t periodicTask) Stop() error {
-	if t.task == nil {
-		return nil
-	}
-	if managed, ok := t.task.(interface{ Stop() error }); ok {
-		return managed.Stop()
-	}
-	return t.task.Close()
-}
-
-func (t periodicTask) Wait() error {
-	if t.task == nil {
-		return nil
-	}
-	if managed, ok := t.task.(interface{ Wait() error }); ok {
-		return managed.Wait()
-	}
-	return nil
-}
-
-func (t periodicTask) Close() error {
-	return errors.Join(t.Stop(), t.Wait())
 }

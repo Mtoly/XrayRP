@@ -615,7 +615,7 @@ func TestServeFailureAfterReadinessIsRecorded(t *testing.T) {
 	service.lifecycleMu.Lock()
 	state, runtimeErr := service.state, service.runtimeErr
 	service.lifecycleMu.Unlock()
-	if state != stateRunning || runtimeErr != nil || service.server == nil || service.nodeInfo == nil || len(service.tasks) != 2 || service.tag == "" || service.startAt.IsZero() {
+	if state != stateRunning || runtimeErr != nil || service.server == nil || service.nodeInfo == nil || service.tasks == nil || service.tag == "" || service.startAt.IsZero() {
 		t.Fatalf("state/error after readiness = %v/%v, want running/nil", state, runtimeErr)
 	}
 	close(release)
@@ -637,7 +637,7 @@ func TestStartPublishesOnlyAfterRuntimeAndTasksAreReady(t *testing.T) {
 	state, runtimeErr := service.state, service.runtimeErr
 	service.lifecycleMu.Unlock()
 	if state != stateRunning || runtimeErr != nil {
-		t.Fatalf("successful Start did not publish running state: state=%v err=%v server=%v nodeInfo=%v tasks=%d tag=%q startAt=%v", state, runtimeErr, service.server, service.nodeInfo, len(service.tasks), service.tag, service.startAt)
+		t.Fatalf("successful Start did not publish running state: state=%v err=%v server=%v nodeInfo=%v tasks=%v tag=%q startAt=%v", state, runtimeErr, service.server, service.nodeInfo, service.tasks, service.tag, service.startAt)
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build-config", "build-server", "serve", "task-start:Hysteria2_127.0.0.1_9443_9", "task-start:node monitor"}) {
 		t.Fatalf("events = %v, want Serve started before tasks", got)

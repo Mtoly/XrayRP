@@ -10,6 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	xcommon "github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 type stagedPeriodicTask struct {
@@ -60,6 +61,14 @@ func (t *recordingManagedPeriodic) Wait() error {
 	return t.task.Wait()
 }
 func (t *recordingManagedPeriodic) Close() error { return errors.Join(t.Stop(), t.Wait()) }
+
+func newServiceTasks(tasks ...lifecycleTask) *specialruntime.Tasks {
+	group := specialruntime.NewTasks()
+	for _, task := range tasks {
+		group.Add(task)
+	}
+	return group
+}
 
 func TestCloseBeforeStartAndCloseTwiceAreNoOps(t *testing.T) {
 	events := &lifecycleEvents{}
@@ -243,7 +252,7 @@ func TestCloseWaitsForRunningPeriodicCallback(t *testing.T) {
 		state:        stateRunning,
 		server:       &fakeRuntimeServer{events: events},
 		closeRuntime: defaultCloseRuntime,
-		tasks:        []periodicTask{{tag: "blocking", task: task}},
+		tasks:        newServiceTasks(task),
 	}
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- service.Close() }()
@@ -357,9 +366,9 @@ func TestCloseJoinsTaskAndRuntimeErrors(t *testing.T) {
 		state:        stateRunning,
 		server:       &fakeRuntimeServer{events: events, closeErr: runtimeErr},
 		closeRuntime: defaultCloseRuntime,
-		tasks: []periodicTask{{tag: "failing", task: &stagedPeriodicTask{
+		tasks: newServiceTasks(&stagedPeriodicTask{
 			tag: "failing", events: events, stopErr: stopErr, waitErr: waitErr,
-		}}},
+		}),
 	}
 
 	err := service.Close()

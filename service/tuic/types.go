@@ -1,7 +1,6 @@
 package tuic
 
 import (
-	"errors"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 type runtimeInstance interface {
@@ -77,7 +77,7 @@ type TuicService struct {
 
 	tag     string
 	startAt time.Time
-	tasks   []periodicTask
+	tasks   *specialruntime.Tasks
 	logger  *log.Entry
 
 	rules *rule.Manager
@@ -105,40 +105,4 @@ type userRecord struct {
 type userTraffic struct {
 	Upload   int64
 	Download int64
-}
-
-type periodicTask struct {
-	tag  string
-	task lifecycleTask
-}
-
-func (t periodicTask) Start() error {
-	if t.task == nil {
-		return nil
-	}
-	return t.task.Start()
-}
-
-func (t periodicTask) Stop() error {
-	if t.task == nil {
-		return nil
-	}
-	if managed, ok := t.task.(interface{ Stop() error }); ok {
-		return managed.Stop()
-	}
-	return t.task.Close()
-}
-
-func (t periodicTask) Wait() error {
-	if t.task == nil {
-		return nil
-	}
-	if managed, ok := t.task.(interface{ Wait() error }); ok {
-		return managed.Wait()
-	}
-	return nil
-}
-
-func (t periodicTask) Close() error {
-	return errors.Join(t.Stop(), t.Wait())
 }

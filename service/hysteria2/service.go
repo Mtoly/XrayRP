@@ -15,6 +15,7 @@ import (
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 type PanelClient interface {
@@ -265,47 +266,28 @@ func (h *Hysteria2Service) Start() (err error) {
 		factory = defaultTaskFactory
 	}
 	interval := time.Duration(h.config.UpdatePeriodic) * time.Second
-	tasks := []periodicTask{
-		{tag: tag, task: factory(tag, interval, h.userMonitor)},
-		{tag: "node monitor", task: factory("node monitor", interval, h.nodeMonitor)},
-	}
+	tasks := specialruntime.NewTasks()
+	tasks.Add(factory(tag, interval, h.userMonitor))
+	tasks.Add(factory("node monitor", interval, h.nodeMonitor))
 	if nodeInfo.EnableTLS {
-		tasks = append(tasks, periodicTask{
-			tag:  "cert monitor",
-			task: factory("cert monitor", interval*60, h.certMonitor),
-		})
+		tasks.Add(factory("cert monitor", interval*60, h.certMonitor))
 	}
-	for i := range tasks {
-		if err := tasks[i].Start(); err != nil {
-			var cleanupErrs []error
-			cleanupErrs = append(cleanupErrs, err)
-			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Stop())
-			}
-			cleanupErrs = append(cleanupErrs, closeRuntime(srv))
+	startupShutdown := specialruntime.RuntimeShutdown{
+		Stop: func() error { return closeRuntime(srv) },
+		Join: func() error {
 			h.waitRuntime(serve.done, nil)
-			for j := i; j >= 0; j-- {
-				cleanupErrs = append(cleanupErrs, tasks[j].Wait())
-			}
-			return fail(errors.Join(cleanupErrs...))
-		}
+			return nil
+		},
+	}
+	if err := tasks.Start(startupShutdown); err != nil {
+		return fail(err)
 	}
 
 	h.reloadMu.Lock()
 	_, ruleErr := h.replacePortHopRulesLocked(buildPortHopRulesFromNode(nodeInfo))
 	h.reloadMu.Unlock()
 	if ruleErr != nil {
-		var cleanupErrs []error
-		cleanupErrs = append(cleanupErrs, ruleErr)
-		for i := len(tasks) - 1; i >= 0; i-- {
-			cleanupErrs = append(cleanupErrs, tasks[i].Stop())
-		}
-		cleanupErrs = append(cleanupErrs, closeRuntime(srv))
-		h.waitRuntime(serve.done, nil)
-		for i := len(tasks) - 1; i >= 0; i-- {
-			cleanupErrs = append(cleanupErrs, tasks[i].Wait())
-		}
-		return fail(errors.Join(cleanupErrs...))
+		return fail(errors.Join(ruleErr, tasks.Rollback(startupShutdown)))
 	}
 
 	watcherDone := make(chan struct{})
@@ -368,28 +350,29 @@ func (h *Hysteria2Service) Close() error {
 	watcherDone := h.watcherDone
 	h.lifecycleMu.Unlock()
 
-	var errs []error
-	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Stop())
-	}
+	var shutdownErr error
 	if srv != nil {
 		closeRuntime := h.closeRuntime
 		if closeRuntime == nil {
 			closeRuntime = defaultCloseRuntime
 		}
-		errs = append(errs, closeRuntime(srv))
-	}
-	for i := len(tasks) - 1; i >= 0; i-- {
-		errs = append(errs, tasks[i].Wait())
-	}
-	if srv != nil && serveDone != nil {
-		<-serveDone
-		if watcherDone != nil {
-			<-watcherDone
+		shutdown := specialruntime.RuntimeShutdown{
+			Stop: func() error { return closeRuntime(srv) },
+			Join: func() error {
+				h.waitRuntime(serveDone, watcherDone)
+				return nil
+			},
 		}
+		if tasks != nil {
+			shutdownErr = tasks.Close(shutdown)
+		} else {
+			shutdownErr = errors.Join(shutdown.Stop(), shutdown.Join())
+		}
+	} else if tasks != nil {
+		shutdownErr = tasks.Close(specialruntime.RuntimeShutdown{})
 	}
 
-	errs = append(errs, h.cleanupPortHopRules())
+	cleanupErr := h.cleanupPortHopRules()
 
 	h.lifecycleMu.Lock()
 	h.tasks = nil
@@ -399,7 +382,7 @@ func (h *Hysteria2Service) Close() error {
 	h.runtimeErr = nil
 	h.state = stateStopped
 	h.lifecycleMu.Unlock()
-	return errors.Join(errs...)
+	return errors.Join(shutdownErr, cleanupErr)
 }
 
 // reloadNode replaces the active Hysteria2 server while preserving the last
