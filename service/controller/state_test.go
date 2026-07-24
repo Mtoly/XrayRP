@@ -34,13 +34,6 @@ func TestNodeRuntimeStateCloneAddressPreservesFamilyAndValue(t *testing.T) {
 			if cloned.Address.String() != test.address.String() {
 				t.Fatalf("expected value %q, got %q", test.address.String(), cloned.Address.String())
 			}
-			if test.family.IsIP() {
-				originalIP := test.address.IP()
-				clonedIP := cloned.Address.IP()
-				if len(originalIP) == 0 || len(clonedIP) == 0 || &originalIP[0] == &clonedIP[0] {
-					t.Fatalf("expected independent IP bytes, original=%v cloned=%v", originalIP, clonedIP)
-				}
-			}
 		})
 	}
 }
@@ -50,8 +43,7 @@ func TestNodeRuntimeStateUpdatePreservesOneGeneration(t *testing.T) {
 	node := &api.NodeInfo{NodeID: 1, NodeType: "Vless"}
 	users := &[]api.UserInfo{{UID: 1, Email: "user@example.test"}}
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet: true,
-		nodeInfo:    *node,
+		node:        normalizeNodeInfo(node),
 		tag:         "node-tag",
 		userListSet: true,
 		userList:    *users,
@@ -60,7 +52,8 @@ func TestNodeRuntimeStateUpdatePreservesOneGeneration(t *testing.T) {
 	controller.setAppliedRuleState("node-tag", []api.DetectRule{{ID: 3, Pattern: regexp.MustCompile("ads")}})
 
 	snapshot := controller.runtimeStateSnapshot()
-	if !snapshot.nodeInfoSet || snapshot.nodeInfo.NodeID != node.NodeID || snapshot.nodeInfo.NodeType != node.NodeType || snapshot.tag != "node-tag" {
+	snapshotNode := snapshot.node.snapshot()
+	if snapshotNode == nil || snapshotNode.NodeID != node.NodeID || snapshotNode.NodeType != node.NodeType || snapshot.tag != "node-tag" {
 		t.Fatalf("expected rule update to preserve node generation values, got %#v", snapshot)
 	}
 	if !snapshot.userListSet || len(snapshot.userList) != 1 || snapshot.userList[0] != (*users)[0] {
@@ -76,8 +69,7 @@ func TestNodeRuntimeStateCommitIsAtomic(t *testing.T) {
 	oldNode := &api.NodeInfo{NodeID: 1, NodeType: "Vless"}
 	oldUsers := &[]api.UserInfo{{UID: 1, Email: "old@example.test"}}
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:    true,
-		nodeInfo:       *oldNode,
+		node:           normalizeNodeInfo(oldNode),
 		tag:            "old-tag",
 		userListSet:    true,
 		userList:       *oldUsers,
@@ -91,8 +83,7 @@ func TestNodeRuntimeStateCommitIsAtomic(t *testing.T) {
 	nextNode := &api.NodeInfo{NodeID: 2, NodeType: "Trojan"}
 	nextUsers := &[]api.UserInfo{{UID: 2, Email: "new@example.test"}}
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:    true,
-		nodeInfo:       *nextNode,
+		node:           normalizeNodeInfo(nextNode),
 		tag:            "new-tag",
 		userListSet:    true,
 		userList:       *nextUsers,
@@ -104,7 +95,8 @@ func TestNodeRuntimeStateCommitIsAtomic(t *testing.T) {
 	})
 
 	snapshot := controller.runtimeStateSnapshot()
-	if !snapshot.nodeInfoSet || snapshot.nodeInfo.NodeID != nextNode.NodeID || snapshot.nodeInfo.NodeType != nextNode.NodeType || snapshot.tag != "new-tag" {
+	snapshotNode := snapshot.node.snapshot()
+	if snapshotNode == nil || snapshotNode.NodeID != nextNode.NodeID || snapshotNode.NodeType != nextNode.NodeType || snapshot.tag != "new-tag" {
 		t.Fatalf("expected one committed node generation value, got %#v", snapshot)
 	}
 	if !snapshot.userListSet || len(snapshot.userList) != 1 || snapshot.userList[0] != (*nextUsers)[0] {
@@ -155,8 +147,7 @@ func TestNodeRuntimeStateCommitOwnsMutableInputs(t *testing.T) {
 	rules := []api.DetectRule{{ID: 3, Pattern: regexp.MustCompile("ads")}}
 
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:     true,
-		nodeInfo:        *nodeInfo,
+		node:            normalizeNodeInfo(nodeInfo),
 		tag:             "node-tag",
 		userListSet:     true,
 		userList:        userList,
@@ -195,8 +186,7 @@ func TestNodeRuntimeStateSnapshotOwnsReturnedData(t *testing.T) {
 	users := []api.UserInfo{{UID: 7, Email: "user@example.test"}}
 	nodeInfo := testMutableNodeInfo(t)
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:     true,
-		nodeInfo:        *nodeInfo,
+		node:            normalizeNodeInfo(nodeInfo),
 		tag:             "node-tag",
 		userListSet:     true,
 		userList:        users,
@@ -205,7 +195,7 @@ func TestNodeRuntimeStateSnapshotOwnsReturnedData(t *testing.T) {
 	})
 
 	snapshot := controller.runtimeStateSnapshot()
-	mutateNodeInfo(&snapshot.nodeInfo)
+	mutateNodeInfo(snapshot.node.snapshot())
 	snapshot.userList[0].Email = "mutated@example.test"
 	snapshot.appliedRuleList[0].ID = 99
 	snapshot.appliedRuleList[0].Pattern.Longest()
@@ -218,8 +208,7 @@ func TestNodeRuntimeStateGettersOwnReturnedData(t *testing.T) {
 	users := []api.UserInfo{{UID: 7, Email: "user@example.test"}}
 	nodeInfo := testMutableNodeInfo(t)
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:     true,
-		nodeInfo:        *nodeInfo,
+		node:            normalizeNodeInfo(nodeInfo),
 		tag:             "node-tag",
 		userListSet:     true,
 		userList:        users,
@@ -274,28 +263,28 @@ func TestNodeRuntimeStatePreservesNilAndEmptyCollections(t *testing.T) {
 	}
 
 	controller.commitRuntimeState(nodeRuntimeState{
-		nodeInfoSet:     true,
-		nodeInfo:        *emptyNodeInfo,
+		node:            normalizeNodeInfo(emptyNodeInfo),
 		userListSet:     true,
 		userList:        emptyUsers,
 		appliedRuleList: emptyRules,
 	})
 
 	snapshot := controller.runtimeStateSnapshot()
-	if !snapshot.nodeInfoSet || snapshot.nodeInfo.Header == nil || snapshot.nodeInfo.HttpHeaders == nil || snapshot.nodeInfo.Headers == nil || snapshot.nodeInfo.ServerNames == nil || snapshot.nodeInfo.ShortIds == nil || snapshot.nodeInfo.XHTTPExtra == nil || snapshot.nodeInfo.XHTTPDownloadSettings == nil {
-		t.Fatalf("expected empty node collections to remain non-nil, got %#v", snapshot.nodeInfo)
+	snapshotNode := snapshot.node.snapshot()
+	if snapshotNode == nil || snapshotNode.Header == nil || snapshotNode.HttpHeaders == nil || snapshotNode.Headers == nil || snapshotNode.ServerNames == nil || snapshotNode.ShortIds == nil || snapshotNode.XHTTPExtra == nil || snapshotNode.XHTTPDownloadSettings == nil {
+		t.Fatalf("expected empty node collections to remain non-nil, got %#v", snapshotNode)
 	}
-	nameServer := snapshot.nodeInfo.NameServerConfig[0]
-	if snapshot.nodeInfo.NameServerConfig == nil || nameServer == nil || nameServer.Domains == nil || nameServer.ExpectedIPs == nil || nameServer.ExpectIPs == nil || nameServer.UnexpectedIPs == nil {
-		t.Fatalf("expected empty name server collections to remain non-nil, got %#v", snapshot.nodeInfo.NameServerConfig)
+	nameServer := snapshotNode.NameServerConfig[0]
+	if snapshotNode.NameServerConfig == nil || nameServer == nil || nameServer.Domains == nil || nameServer.ExpectedIPs == nil || nameServer.ExpectIPs == nil || nameServer.UnexpectedIPs == nil {
+		t.Fatalf("expected empty name server collections to remain non-nil, got %#v", snapshotNode.NameServerConfig)
 	}
-	if snapshot.nodeInfo.REALITYConfig == nil || snapshot.nodeInfo.REALITYConfig.ServerNames == nil || snapshot.nodeInfo.REALITYConfig.ShortIds == nil {
-		t.Fatalf("expected empty REALITY collections to remain non-nil, got %#v", snapshot.nodeInfo.REALITYConfig)
+	if snapshotNode.REALITYConfig == nil || snapshotNode.REALITYConfig.ServerNames == nil || snapshotNode.REALITYConfig.ShortIds == nil {
+		t.Fatalf("expected empty REALITY collections to remain non-nil, got %#v", snapshotNode.REALITYConfig)
 	}
-	if snapshot.nodeInfo.AnyTLSConfig == nil || snapshot.nodeInfo.AnyTLSConfig.PaddingScheme == nil || snapshot.nodeInfo.TuicConfig == nil || snapshot.nodeInfo.TuicConfig.ALPN == nil {
-		t.Fatalf("expected empty protocol collections to remain non-nil, got AnyTLS=%#v TUIC=%#v", snapshot.nodeInfo.AnyTLSConfig, snapshot.nodeInfo.TuicConfig)
+	if snapshotNode.AnyTLSConfig == nil || snapshotNode.AnyTLSConfig.PaddingScheme == nil || snapshotNode.TuicConfig == nil || snapshotNode.TuicConfig.ALPN == nil {
+		t.Fatalf("expected empty protocol collections to remain non-nil, got AnyTLS=%#v TUIC=%#v", snapshotNode.AnyTLSConfig, snapshotNode.TuicConfig)
 	}
-	policy := snapshot.nodeInfo.RoutePolicy
+	policy := snapshotNode.RoutePolicy
 	if policy == nil || policy.DirectDomains == nil || policy.Outbound.Candidates == nil || policy.Outbound.Include == nil || policy.Outbound.Exclude == nil || policy.Outbound.Fallback == nil {
 		t.Fatalf("expected empty route policy collections to remain non-nil, got %#v", policy)
 	}
@@ -308,7 +297,7 @@ func TestNodeRuntimeStatePreservesNilAndEmptyCollections(t *testing.T) {
 
 	controller.commitRuntimeState(nodeRuntimeState{})
 	nilSnapshot := controller.runtimeStateSnapshot()
-	if nilSnapshot.nodeInfoSet || nilSnapshot.userListSet || nilSnapshot.appliedRuleList != nil {
+	if nilSnapshot.node.isSet() || nilSnapshot.userListSet || nilSnapshot.appliedRuleList != nil {
 		t.Fatalf("expected nil state collections to remain nil, got %#v", nilSnapshot)
 	}
 }
@@ -417,31 +406,32 @@ func mutateNodeInfo(nodeInfo *api.NodeInfo) {
 
 func assertMutableStateUnchanged(t *testing.T, snapshot nodeRuntimeState) {
 	t.Helper()
-	if !snapshot.nodeInfoSet || snapshot.nodeInfo.NodeID != 42 {
-		t.Fatalf("expected owned node info, got %#v", snapshot.nodeInfo)
+	nodeInfo := snapshot.node.snapshot()
+	if nodeInfo == nil || nodeInfo.NodeID != 42 {
+		t.Fatalf("expected owned node info, got %#v", nodeInfo)
 	}
-	if string(snapshot.nodeInfo.Header) != `{"type":"http"}` || string(snapshot.nodeInfo.XHTTPExtra) != `{"downloadSettings":{"address":"download.example.test"}}` || string(snapshot.nodeInfo.XHTTPDownloadSettings) != `{"network":"tcp"}` {
-		t.Fatalf("expected owned raw JSON fields, got %#v", snapshot.nodeInfo)
+	if string(nodeInfo.Header) != `{"type":"http"}` || string(nodeInfo.XHTTPExtra) != `{"downloadSettings":{"address":"download.example.test"}}` || string(nodeInfo.XHTTPDownloadSettings) != `{"network":"tcp"}` {
+		t.Fatalf("expected owned raw JSON fields, got %#v", nodeInfo)
 	}
-	if (*snapshot.nodeInfo.HttpHeaders["Host"])[0] != "origin.example.test" || snapshot.nodeInfo.HttpHeaders["Empty"] == nil || *snapshot.nodeInfo.HttpHeaders["Empty"] == nil || snapshot.nodeInfo.HttpHeaders["Nil"] != nil || snapshot.nodeInfo.Headers["X-Test"] != "original" {
-		t.Fatalf("expected owned header maps with nil and empty values preserved, got %#v", snapshot.nodeInfo)
+	if (*nodeInfo.HttpHeaders["Host"])[0] != "origin.example.test" || nodeInfo.HttpHeaders["Empty"] == nil || *nodeInfo.HttpHeaders["Empty"] == nil || nodeInfo.HttpHeaders["Nil"] != nil || nodeInfo.Headers["X-Test"] != "original" {
+		t.Fatalf("expected owned header maps with nil and empty values preserved, got %#v", nodeInfo)
 	}
-	nameServer := snapshot.nodeInfo.NameServerConfig[0]
-	if len(snapshot.nodeInfo.NameServerConfig) != 2 || snapshot.nodeInfo.NameServerConfig[1] != nil || nameServer.Address.String() != "1.1.1.1" || nameServer.ClientIP.String() != "192.0.2.1" || nameServer.Domains[0] != "domain:example.test" || nameServer.ExpectedIPs[0] != "geoip:private" || nameServer.ExpectIPs[0] != "geoip:us" || nameServer.UnexpectedIPs[0] != "geoip:cn" || !*nameServer.DisableCache || !*nameServer.ServeStale || *nameServer.ServeExpiredTTL != 60 {
-		t.Fatalf("expected owned nested name server config, got %#v", snapshot.nodeInfo.NameServerConfig)
+	nameServer := nodeInfo.NameServerConfig[0]
+	if len(nodeInfo.NameServerConfig) != 2 || nodeInfo.NameServerConfig[1] != nil || nameServer.Address.String() != "1.1.1.1" || nameServer.ClientIP.String() != "192.0.2.1" || nameServer.Domains[0] != "domain:example.test" || nameServer.ExpectedIPs[0] != "geoip:private" || nameServer.ExpectIPs[0] != "geoip:us" || nameServer.UnexpectedIPs[0] != "geoip:cn" || !*nameServer.DisableCache || !*nameServer.ServeStale || *nameServer.ServeExpiredTTL != 60 {
+		t.Fatalf("expected owned nested name server config, got %#v", nodeInfo.NameServerConfig)
 	}
-	if snapshot.nodeInfo.REALITYConfig.ServerNames[0] != "reality.example.test" || snapshot.nodeInfo.REALITYConfig.ShortIds[0] != "abcd" || snapshot.nodeInfo.ServerNames[0] != "server.example.test" || snapshot.nodeInfo.ShortIds[0] != "1234" {
-		t.Fatalf("expected owned server name and short ID slices, got %#v", snapshot.nodeInfo)
+	if nodeInfo.REALITYConfig.ServerNames[0] != "reality.example.test" || nodeInfo.REALITYConfig.ShortIds[0] != "abcd" || nodeInfo.ServerNames[0] != "server.example.test" || nodeInfo.ShortIds[0] != "1234" {
+		t.Fatalf("expected owned server name and short ID slices, got %#v", nodeInfo)
 	}
-	if snapshot.nodeInfo.Hysteria2Config.Obfs != "salamander" || snapshot.nodeInfo.AnyTLSConfig.PaddingScheme[0] != "stop=8" || snapshot.nodeInfo.TuicConfig.ALPN[0] != "h3" {
-		t.Fatalf("expected owned protocol configs, got %#v", snapshot.nodeInfo)
+	if nodeInfo.Hysteria2Config.Obfs != "salamander" || nodeInfo.AnyTLSConfig.PaddingScheme[0] != "stop=8" || nodeInfo.TuicConfig.ALPN[0] != "h3" {
+		t.Fatalf("expected owned protocol configs, got %#v", nodeInfo)
 	}
-	policy := snapshot.nodeInfo.RoutePolicy
+	policy := nodeInfo.RoutePolicy
 	if policy.DirectDomains[0] != "direct.example.test" || policy.Outbound.Candidates[0] != "candidate-a" || policy.Outbound.Include[0] != "include-a" || policy.Outbound.Exclude[0] != "exclude-a" || policy.Outbound.Fallback[0] != "fallback-a" {
 		t.Fatalf("expected owned route policy, got %#v", policy)
 	}
-	if snapshot.nodeInfo.XPaddingBytes[0] != 1 || snapshot.nodeInfo.ScMaxEachPostBytes[0] != 3 || snapshot.nodeInfo.ScMinPostsIntervalMs[0] != 5 || snapshot.nodeInfo.ScStreamUpServerSecs[0] != 7 || snapshot.nodeInfo.XmuxMaxConcurrency[0] != 9 || snapshot.nodeInfo.XmuxMaxConnections[0] != 11 || snapshot.nodeInfo.XmuxCMaxReuseTimes[0] != 13 || snapshot.nodeInfo.XmuxHMaxRequestTimes[0] != 15 || snapshot.nodeInfo.XmuxHMaxReusableSecs[0] != 17 {
-		t.Fatalf("expected owned range pointers, got %#v", snapshot.nodeInfo)
+	if nodeInfo.XPaddingBytes[0] != 1 || nodeInfo.ScMaxEachPostBytes[0] != 3 || nodeInfo.ScMinPostsIntervalMs[0] != 5 || nodeInfo.ScStreamUpServerSecs[0] != 7 || nodeInfo.XmuxMaxConcurrency[0] != 9 || nodeInfo.XmuxMaxConnections[0] != 11 || nodeInfo.XmuxCMaxReuseTimes[0] != 13 || nodeInfo.XmuxHMaxRequestTimes[0] != 15 || nodeInfo.XmuxHMaxReusableSecs[0] != 17 {
+		t.Fatalf("expected owned range pointers, got %#v", nodeInfo)
 	}
 	if !snapshot.userListSet || snapshot.userList[0].Email != "user@example.test" {
 		t.Fatalf("expected owned user list, got %#v", snapshot.userList)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -774,7 +773,7 @@ func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo
 }
 
 func nodeStateChanged(currentNodeInfo, newNodeInfo *api.NodeInfo) bool {
-	return !reflect.DeepEqual(currentNodeInfo, newNodeInfo)
+	return !normalizeNodeInfo(currentNodeInfo).equal(normalizeNodeInfo(newNodeInfo))
 }
 
 func compareUserList(old, new *[]api.UserInfo) (deleted, added []api.UserInfo) {
@@ -1002,10 +1001,11 @@ func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {
 
 func (c *Controller) buildNodeTag() string {
 	state := c.runtimeStateSnapshot()
-	if !state.nodeInfoSet {
+	nodeInfo := state.node.snapshot()
+	if nodeInfo == nil {
 		return ""
 	}
-	return c.buildNodeTagFrom(&state.nodeInfo)
+	return c.buildNodeTagFrom(nodeInfo)
 }
 
 func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error {

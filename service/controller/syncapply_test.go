@@ -546,7 +546,7 @@ func TestSyncApply_RoutePolicyOnlyChangeRebuildsThroughUnifiedApply(t *testing.T
 	if got := recorder.appliedSnapshots[0].NodeInfo.RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
 		t.Fatalf("expected unified apply snapshot to carry route-only candidate, got %q", got)
 	}
-	if got := controller.runtimeStateSnapshot().nodeInfo.RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
+	if got := controller.runtimeStateSnapshot().node.snapshot().RoutePolicy.Outbound.Candidates[0]; got != "route-only-candidate" {
 		t.Fatalf("expected controller node state to persist updated route policy, got %q", got)
 	}
 }
