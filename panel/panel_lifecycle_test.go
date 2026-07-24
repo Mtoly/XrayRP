@@ -2,8 +2,11 @@ package panel
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/xtls/xray-core/core"
 
@@ -384,41 +387,214 @@ func TestPanelStartAfterCloseCreatesFreshResources(t *testing.T) {
 	}
 }
 
-func TestPanelLifecycleUsesInternalStateWhenPublicRunningIsMutated(t *testing.T) {
+func TestPanelLifecycleIgnoresCompatibilityFieldMutation(t *testing.T) {
 	events := []string{}
-	module := &lifecycleTestService{name: "service", events: &events}
-	p := newLifecycleTestPanel(t, &events, func() ([]service.Service, error) {
-		return []service.Service{module}, nil
-	})
+	realService := &lifecycleTestService{name: "real", events: &events}
+	fakeService := &lifecycleTestService{name: "fake", events: &events}
+	realServer := &core.Instance{}
+	fakeServer := &core.Instance{}
+	var closedServer *core.Instance
+	p := New(&Config{})
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return realServer, nil }
+	p.lifecycle.startCore = func(*core.Instance) error { return nil }
+	p.lifecycle.closeCore = func(server *core.Instance) error {
+		closedServer = server
+		return nil
+	}
+	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
+		return runtimeConfigPlan{mode: runtimeConfigModeStatic}, nil
+	}
+	p.lifecycle.buildStaticModules = func(*Panel, *core.Instance, runtimeConfigPlan) ([]service.Service, error) {
+		return []service.Service{realService}, nil
+	}
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
 	p.Running = false
+	p.Server = fakeServer
+	p.Service = []service.Service{fakeService}
 	if err := p.Start(); err != nil {
 		t.Fatalf("second Start() error = %v", err)
 	}
-	wantEvents := []string{"core:start", "service:start"}
-	if !reflect.DeepEqual(events, wantEvents) {
-		t.Fatalf("public Running mutation duplicated resources: events=%#v", events)
+	if !p.Running || p.Server != realServer || len(p.Service) != 1 || p.Service[0] != realService {
+		t.Errorf("compatibility fields were not restored from private state: Running=%v Server=%p Service=%#v", p.Running, p.Server, p.Service)
 	}
-	if !p.Running {
-		t.Fatal("Running = false after running-state no-op, want compatibility field resynchronized")
+	if wantEvents := []string{"real:start"}; !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("public Running mutation duplicated resources: events=%#v", events)
 	}
 
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
+	if closedServer != realServer || realService.closes != 1 || fakeService.closes != 0 {
+		t.Fatalf("cleanup used compatibility fields: closedServer=%p realCloses=%d fakeCloses=%d", closedServer, realService.closes, fakeService.closes)
+	}
 	p.Running = true
+	p.Server = fakeServer
+	p.Service = []service.Service{fakeService}
 	if err := p.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
-	if p.Running {
-		t.Fatal("Running = true after stopped-state no-op, want compatibility field resynchronized")
+	if p.Running || p.Server != nil || len(p.Service) != 0 {
+		t.Fatalf("stopped-state compatibility fields were not cleared: Running=%v Server=%p Service=%#v", p.Running, p.Server, p.Service)
 	}
-	wantEvents = []string{"core:start", "service:start", "service:close", "core:close"}
+	wantEvents := []string{"real:start", "real:close"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("public Running mutation duplicated cleanup: events=%#v", events)
+	}
+}
+
+func TestPanelPublishedStateIsUnpublishedDuringSlowStartAndClose(t *testing.T) {
+	server := &core.Instance{}
+	module := &blockingLifecycleService{
+		startEntered: make(chan struct{}),
+		startRelease: make(chan struct{}),
+		closeEntered: make(chan struct{}),
+		closeRelease: make(chan struct{}),
+	}
+	defer closeSignal(module.startRelease)
+	defer closeSignal(module.closeRelease)
+
+	p := New(&Config{})
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return server, nil }
+	p.lifecycle.startCore = func(*core.Instance) error { return nil }
+	p.lifecycle.closeCore = func(*core.Instance) error { return nil }
+	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
+		return runtimeConfigPlan{mode: runtimeConfigModeStatic}, nil
+	}
+	p.lifecycle.buildStaticModules = func(*Panel, *core.Instance, runtimeConfigPlan) ([]service.Service, error) {
+		return []service.Service{module}, nil
+	}
+
+	startResult := make(chan error, 1)
+	go func() { startResult <- p.Start() }()
+	waitForLifecycleSignal(t, module.startEntered, "service Start")
+	assertPanelPublishedState(t, p, panelStateStarting, nil, 0)
+	assertLegacyPanelState(t, p, false, nil, 0)
+	closeSignal(module.startRelease)
+	if err := waitForLifecycleResult(t, startResult, "Panel.Start"); err != nil {
+		t.Fatal(err)
+	}
+	assertPanelPublishedState(t, p, panelStateRunning, server, 1)
+	assertLegacyPanelState(t, p, true, server, 1)
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- p.Close() }()
+	waitForLifecycleSignal(t, module.closeEntered, "service Close")
+	assertPanelPublishedState(t, p, panelStateStopping, nil, 0)
+	assertLegacyPanelState(t, p, false, nil, 0)
+	closeSignal(module.closeRelease)
+	if err := waitForLifecycleResult(t, closeResult, "Panel.Close"); err != nil {
+		t.Fatal(err)
+	}
+	assertPanelPublishedState(t, p, panelStateStopped, nil, 0)
+	assertLegacyPanelState(t, p, false, nil, 0)
+}
+
+func TestPanelPublishedServiceSlicesDoNotAliasCompatibilityOrSnapshots(t *testing.T) {
+	events := []string{}
+	first := &lifecycleTestService{name: "first", events: &events}
+	second := &lifecycleTestService{name: "second", events: &events}
+	replacement := &lifecycleTestService{name: "replacement", events: &events}
+	p := newLifecycleTestPanel(t, &events, func() ([]service.Service, error) {
+		return []service.Service{first, second}, nil
+	})
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := p.publishedStateSnapshot()
+	snapshot.services[0] = replacement
+	p.Service[0] = replacement
+	fresh := p.publishedStateSnapshot()
+	if fresh.services[0] != first {
+		t.Fatalf("private services aliased a returned or compatibility slice: %#v", fresh.services)
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if first.closes != 1 || second.closes != 1 || replacement.closes != 0 {
+		t.Fatalf("cleanup used aliased service slice: first=%d second=%d replacement=%d", first.closes, second.closes, replacement.closes)
+	}
+}
+
+func TestPanelPublishedStateSnapshotStaysConsistentUnderRepeatedScheduling(t *testing.T) {
+	p := New(&Config{})
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return &core.Instance{}, nil }
+	p.lifecycle.startCore = func(*core.Instance) error { return nil }
+	p.lifecycle.closeCore = func(*core.Instance) error { return nil }
+	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
+		return runtimeConfigPlan{mode: runtimeConfigModeStatic}, nil
+	}
+	p.lifecycle.buildStaticModules = func(*Panel, *core.Instance, runtimeConfigPlan) ([]service.Service, error) {
+		return []service.Service{noopLifecycleService{}}, nil
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	ready := make(chan struct{})
+	observedRunning := make(chan struct{})
+	observedNonRunningAfterStart := make(chan struct{})
+	snapshotErrors := make(chan error, 1)
+	defer closeSignal(stop)
+	go func() {
+		defer close(done)
+		firstObservation := true
+		seenRunning := false
+		reportedNonRunning := false
+		for {
+			snapshot := p.publishedStateSnapshot()
+			if firstObservation {
+				close(ready)
+				firstObservation = false
+			}
+			if err := validatePanelPublishedState(snapshot); err != nil {
+				select {
+				case snapshotErrors <- err:
+				default:
+				}
+				return
+			}
+			if snapshot.lifecycle == panelStateRunning && !seenRunning {
+				close(observedRunning)
+				seenRunning = true
+			}
+			if seenRunning && snapshot.lifecycle != panelStateRunning && !reportedNonRunning {
+				close(observedNonRunningAfterStart)
+				reportedNonRunning = true
+			}
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}()
+	waitForLifecycleSignal(t, ready, "snapshot observer readiness")
+
+	for i := 0; i < 200; i++ {
+		if err := p.Start(); err != nil {
+			t.Fatalf("Start iteration %d: %v", i, err)
+		}
+		if i == 0 {
+			waitForLifecycleSignal(t, observedRunning, "observer running snapshot")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close iteration %d: %v", i, err)
+		}
+		if i == 0 {
+			waitForLifecycleSignal(t, observedNonRunningAfterStart, "observer non-running snapshot")
+		}
+	}
+	closeSignal(stop)
+	waitForLifecycleSignal(t, done, "snapshot observer")
+	select {
+	case err := <-snapshotErrors:
+		t.Fatal(err)
+	default:
 	}
 }
 
@@ -542,6 +718,7 @@ func newLifecycleTestPanel(t *testing.T, events *[]string, modules func() ([]ser
 
 func assertPanelUnpublished(t *testing.T, p *Panel) {
 	t.Helper()
+	assertPanelPublishedState(t, p, panelStateStopped, nil, 0)
 	if p.Running {
 		t.Error("Running = true, want false")
 	}
@@ -550,5 +727,106 @@ func assertPanelUnpublished(t *testing.T, p *Panel) {
 	}
 	if len(p.Service) != 0 {
 		t.Errorf("Service length = %d, want 0", len(p.Service))
+	}
+}
+
+type blockingLifecycleService struct {
+	startEntered chan struct{}
+	startRelease chan struct{}
+	closeEntered chan struct{}
+	closeRelease chan struct{}
+}
+
+func (s *blockingLifecycleService) Start() error {
+	close(s.startEntered)
+	<-s.startRelease
+	return nil
+}
+
+func (s *blockingLifecycleService) Close() error {
+	close(s.closeEntered)
+	<-s.closeRelease
+	return nil
+}
+
+type noopLifecycleService struct{}
+
+func (noopLifecycleService) Start() error { return nil }
+func (noopLifecycleService) Close() error { return nil }
+
+func assertPanelPublishedState(t *testing.T, p *Panel, wantLifecycle panelLifecycleState, wantServer *core.Instance, wantServices int) {
+	t.Helper()
+	snapshot := p.publishedStateSnapshot()
+	if snapshot.lifecycle != wantLifecycle || snapshot.server != wantServer || len(snapshot.services) != wantServices {
+		t.Fatalf(
+			"published state = {lifecycle:%d server:%p services:%d}, want {%d %p %d}",
+			snapshot.lifecycle,
+			snapshot.server,
+			len(snapshot.services),
+			wantLifecycle,
+			wantServer,
+			wantServices,
+		)
+	}
+}
+
+func assertLegacyPanelState(t *testing.T, p *Panel, wantRunning bool, wantServer *core.Instance, wantServices int) {
+	t.Helper()
+	if p.Running != wantRunning || p.Server != wantServer || len(p.Service) != wantServices {
+		t.Fatalf(
+			"legacy state = {Running:%v Server:%p Service:%d}, want {%v %p %d}",
+			p.Running,
+			p.Server,
+			len(p.Service),
+			wantRunning,
+			wantServer,
+			wantServices,
+		)
+	}
+}
+
+func validatePanelPublishedState(snapshot panelPublishedState) error {
+	if snapshot.lifecycle == panelStateRunning {
+		if snapshot.server == nil {
+			return fmt.Errorf("running snapshot has nil server")
+		}
+		return nil
+	}
+	if snapshot.server != nil || len(snapshot.services) != 0 {
+		return fmt.Errorf(
+			"non-running snapshot has resources: lifecycle=%d server=%p services=%d",
+			snapshot.lifecycle,
+			snapshot.server,
+			len(snapshot.services),
+		)
+	}
+	return nil
+}
+
+func waitForLifecycleSignal(t *testing.T, signal <-chan struct{}, operation string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", operation)
+	}
+}
+
+func waitForLifecycleResult(t *testing.T, result <-chan error, operation string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", operation)
+		return nil
+	}
+}
+
+func closeSignal(signal chan struct{}) {
+	select {
+	case <-signal:
+	default:
+		close(signal)
 	}
 }

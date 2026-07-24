@@ -14,16 +14,17 @@ import (
 
 // Panel Structure
 type Panel struct {
-	access       sync.Mutex
-	serverMutex  sync.RWMutex
-	serviceMutex sync.RWMutex
-	panelConfig  *Config
-	lifecycle    panelLifecycleOps
-	state        panelLifecycleState
-	Server       *core.Instance
-	Service      []service.Service
-	Running      bool
-	logger       *log.Entry
+	access      sync.Mutex
+	publishedMu sync.RWMutex
+	published   panelPublishedState
+	panelConfig *Config
+	lifecycle   panelLifecycleOps
+	// Server, Service, and Running are compatibility projections. Internal
+	// lifecycle code owns resources through published instead.
+	Server  *core.Instance
+	Service []service.Service
+	Running bool
+	logger  *log.Entry
 }
 
 type panelLifecycleState uint8
@@ -34,6 +35,12 @@ const (
 	panelStateRunning
 	panelStateStopping
 )
+
+type panelPublishedState struct {
+	lifecycle panelLifecycleState
+	server    *core.Instance
+	services  []service.Service
+}
 
 type panelLifecycleOps struct {
 	loadCore           func(*Config) (*core.Instance, error)
@@ -104,16 +111,16 @@ func (p *Panel) Start() error {
 	defer p.access.Unlock()
 	p.logger.Info("Starting panel")
 	ops := p.lifecycleOps()
-	if p.state == panelStateRunning {
-		p.Running = true
+	current := p.publishedStateSnapshot()
+	if current.lifecycle == panelStateRunning {
+		p.publishState(current.lifecycle, current.server, current.services)
 		return nil
 	}
-	p.state = panelStateStarting
-	p.Running = false
+	p.publishState(panelStateStarting, nil, nil)
 
 	server, err := ops.loadCore(p.panelConfig)
 	if err != nil {
-		p.state = panelStateStopped
+		p.publishState(panelStateStopped, nil, nil)
 		return fmt.Errorf("failed to load core: %w", err)
 	}
 
@@ -130,8 +137,7 @@ func (p *Panel) Start() error {
 			errs = append(errs, fmt.Errorf("failed to roll back core: %w", err))
 			p.logLifecycleError("Failed to roll back core", err)
 		}
-		p.clearPublishedState()
-		p.state = panelStateStopped
+		p.publishState(panelStateStopped, nil, nil)
 		return errors.Join(errs...)
 	}
 	if err := ops.startCore(server); err != nil {
@@ -165,25 +171,32 @@ func (p *Panel) Start() error {
 		startedServices = append(startedServices, s)
 	}
 
-	p.serverMutex.Lock()
-	p.serviceMutex.Lock()
-	p.Server = server
-	p.Service = append([]service.Service(nil), services...)
-	p.state = panelStateRunning
-	p.Running = true
-	p.serviceMutex.Unlock()
-	p.serverMutex.Unlock()
+	p.publishState(panelStateRunning, server, services)
 	return nil
 }
 
-func (p *Panel) clearPublishedState() {
-	p.serverMutex.Lock()
-	p.serviceMutex.Lock()
-	p.Server = nil
-	p.Service = nil
-	p.Running = false
-	p.serviceMutex.Unlock()
-	p.serverMutex.Unlock()
+func (p *Panel) publishState(lifecycle panelLifecycleState, server *core.Instance, services []service.Service) {
+	next := panelPublishedState{lifecycle: lifecycle}
+	if lifecycle == panelStateRunning {
+		next.server = server
+		next.services = append([]service.Service(nil), services...)
+	}
+
+	p.publishedMu.Lock()
+	p.published = next
+	p.Server = next.server
+	p.Service = append([]service.Service(nil), next.services...)
+	p.Running = lifecycle == panelStateRunning
+	p.publishedMu.Unlock()
+}
+
+func (p *Panel) publishedStateSnapshot() panelPublishedState {
+	p.publishedMu.RLock()
+	defer p.publishedMu.RUnlock()
+
+	snapshot := p.published
+	snapshot.services = append([]service.Service(nil), p.published.services...)
+	return snapshot
 }
 
 func (p *Panel) logLifecycleError(message string, err error) {
@@ -223,17 +236,15 @@ func (p *Panel) Close() error {
 	p.access.Lock()
 	defer p.access.Unlock()
 
-	if p.state == panelStateStopped {
-		p.clearPublishedState()
+	current := p.publishedStateSnapshot()
+	if current.lifecycle == panelStateStopped {
+		p.publishState(panelStateStopped, nil, nil)
 		return nil
 	}
-	p.state = panelStateStopping
-	p.Running = false
+	p.publishState(panelStateStopping, nil, nil)
 
-	p.serviceMutex.RLock()
-	services := make([]service.Service, len(p.Service))
-	copy(services, p.Service)
-	p.serviceMutex.RUnlock()
+	services := current.services
+	server := current.server
 	ops := p.lifecycleOps()
 
 	var errs []error
@@ -244,14 +255,6 @@ func (p *Panel) Close() error {
 		}
 	}
 
-	p.serviceMutex.Lock()
-	p.Service = nil
-	p.serviceMutex.Unlock()
-
-	p.serverMutex.Lock()
-	server := p.Server
-	p.Server = nil
-	p.serverMutex.Unlock()
 	if server != nil {
 		if err := ops.closeCore(server); err != nil {
 			p.logLifecycleError("Failed to close core", err)
@@ -259,9 +262,6 @@ func (p *Panel) Close() error {
 		}
 	}
 
-	p.serverMutex.Lock()
-	p.state = panelStateStopped
-	p.Running = false
-	p.serverMutex.Unlock()
+	p.publishState(panelStateStopped, nil, nil)
 	return errors.Join(errs...)
 }
