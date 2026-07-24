@@ -152,9 +152,9 @@ func TestRuntimeRoutingDecisionFallsBackToPolicyForMatchingInbound(t *testing.T)
 		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
 			"direct": direct,
 		}},
-		routePolicy: &api.PanelRoutePolicy{Outbound: api.OutboundFilterPolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{Outbound: api.OutboundFilterPolicy{
 			Candidates: []string{"missing", "direct"},
-		}},
+		}}),
 	}
 	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: base.tag})
 
@@ -176,14 +176,14 @@ func TestRuntimeRoutingSelectorUsesDirectHandlerFromOutboundManager(t *testing.T
 		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
 			"direct": direct,
 		}},
-		routePolicy: &api.PanelRoutePolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{
 			Outbound: api.OutboundFilterPolicy{
 				Candidates: []string{"test-dead", "direct"},
 				Include:    []string{"hk-"},
 				Exclude:    []string{"dead"},
 				Fallback:   []string{"direct"},
 			},
-		},
+		}),
 	}
 
 	handler, err := selector.selectHandler(context.Background())
@@ -204,11 +204,11 @@ func TestRuntimeRoutingSelectorRejectsOtherManagedNodeTag(t *testing.T) {
 		obm: &fakeOutboundManager{handlers: map[string]outbound.Handler{
 			"VLESS_10.0.0.1_443_2": otherNode,
 		}},
-		routePolicy: &api.PanelRoutePolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{
 			Outbound: api.OutboundFilterPolicy{
 				Candidates: []string{"VLESS_10.0.0.1_443_2"},
 			},
-		},
+		}),
 	}
 
 	_, err := selector.selectHandler(context.Background())
@@ -229,14 +229,14 @@ func TestSelectDispatchHandlerUsesFallbackHandler(t *testing.T) {
 		tag:     "proxy-node",
 		obm:     mgr,
 		logger:  logger.WithField("test", "fallback"),
-		routePolicy: &api.PanelRoutePolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{
 			Outbound: api.OutboundFilterPolicy{
 				Candidates: []string{"test-dead", "direct"},
 				Include:    []string{"hk-"},
 				Exclude:    []string{"dead"},
 				Fallback:   []string{"direct"},
 			},
-		},
+		}),
 	}
 
 	handler, err := wrapper.selectDispatchHandler(context.Background())
@@ -257,12 +257,12 @@ func TestSelectDispatchHandlerFailsWhenNoHandlerAvailable(t *testing.T) {
 		tag:     "proxy-node",
 		obm:     mgr,
 		logger:  logger.WithField("test", "missing-handler"),
-		routePolicy: &api.PanelRoutePolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{
 			Outbound: api.OutboundFilterPolicy{
 				Candidates: []string{"missing-tag"},
 				Include:    []string{"missing"},
 			},
-		},
+		}),
 	}
 
 	_, err := wrapper.selectDispatchHandler(context.Background())
@@ -280,14 +280,14 @@ func TestSelectDispatchHandlerReturnsPolicySelectionError(t *testing.T) {
 		tag:     "proxy-node",
 		obm:     mgr,
 		logger:  logger.WithField("test", "policy-error"),
-		routePolicy: &api.PanelRoutePolicy{
+		routePolicy: newRoutingPolicyValue(&api.PanelRoutePolicy{
 			Outbound: api.OutboundFilterPolicy{
 				Candidates: []string{"test-dead"},
 				Include:    []string{"hk-"},
 				Exclude:    []string{"dead"},
 				Fallback:   []string{"direct"},
 			},
-		},
+		}),
 	}
 
 	_, err := wrapper.selectDispatchHandler(context.Background())

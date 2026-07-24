@@ -55,7 +55,7 @@ type dataPathWrapper struct {
 	pm          policy.Manager
 	sm          stats.Manager
 	limiter     *limiter.Limiter
-	routePolicy *api.PanelRoutePolicy
+	routePolicy routingPolicyValue
 	logger      *log.Entry
 	// ruleMgr provides audit detection
 	ruleMgr interface {
@@ -186,7 +186,7 @@ func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
 	return nil
 }
 
-func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string, routePolicy *api.PanelRoutePolicy) error {
+func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string, routePolicy routingPolicyValue) error {
 	rawHandler, err := core.CreateObject(c.server, config)
 	if err != nil {
 		return err
@@ -203,7 +203,7 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string,
 		ruleMgr:     c.dispatcher.RuleManager,
 		tag:         tag,
 		obm:         c.obm,
-		routePolicy: routePolicy,
+		routePolicy: routePolicy.clone(),
 		logger:      c.logger.WithField("outbound_tag", tag),
 	}
 	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)

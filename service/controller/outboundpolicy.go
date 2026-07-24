@@ -7,15 +7,13 @@ import (
 
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/outbound"
-
-	"github.com/Mtoly/XrayRP/api"
 )
 
 type runtimeRoutingSelector struct {
 	baseTag        string
 	baseHandler    outbound.Handler
 	currentWrapper outbound.Handler
-	routePolicy    *api.PanelRoutePolicy
+	routePolicy    routingPolicyValue
 	obm            outbound.Manager
 }
 
@@ -83,8 +81,8 @@ func (s runtimeRoutingSelector) selectHandler(_ context.Context) (outbound.Handl
 
 func (s runtimeRoutingSelector) selectPolicyHandler() (outbound.Handler, error) {
 	candidates := []string{s.baseTag}
-	if s.routePolicy != nil && len(s.routePolicy.Outbound.Candidates) > 0 {
-		candidates = append([]string(nil), s.routePolicy.Outbound.Candidates...)
+	if s.routePolicy.set && len(s.routePolicy.candidates) > 0 {
+		candidates = append([]string(nil), s.routePolicy.candidates...)
 	}
 	tags, err := selectOutboundCandidates(candidates, s.routePolicy)
 	if err != nil {
@@ -101,21 +99,21 @@ func (s runtimeRoutingSelector) selectPolicyHandler() (outbound.Handler, error) 
 	return nil, fmt.Errorf("no outbound handler available for selected tags: %v", tags)
 }
 
-func selectOutboundCandidates(candidates []string, policy *api.PanelRoutePolicy) ([]string, error) {
+func selectOutboundCandidates(candidates []string, policy routingPolicyValue) ([]string, error) {
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no outbound candidates configured")
 	}
-	if policy == nil {
+	if !policy.set {
 		return candidates, nil
 	}
 
-	filtered := applyInclude(candidates, policy.Outbound.Include)
-	filtered = applyExclude(filtered, policy.Outbound.Exclude)
+	filtered := applyInclude(candidates, policy.include)
+	filtered = applyExclude(filtered, policy.exclude)
 	if len(filtered) > 0 {
 		return filtered, nil
 	}
 
-	fallback := resolveFallback(candidates, policy.Outbound.Fallback)
+	fallback := resolveFallback(candidates, policy.fallback)
 	if len(fallback) == 0 {
 		return nil, fmt.Errorf("no outbound candidates remain after include/exclude and fallback")
 	}

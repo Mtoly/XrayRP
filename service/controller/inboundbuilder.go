@@ -19,17 +19,21 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
 
-// InboundBuilderWithUsers builds an Inbound config for socks/http protocols with all users
-// embedded in the protocol config. These protocols don't support xray-core's proxy.UserManager
-// interface, so users must be included at build time.
+// InboundBuilderWithUsers is the compatibility adapter for callers that still
+// provide api.NodeInfo. Internal controller paths call buildInboundWithUsers
+// with the focused listener view.
 func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string, userInfo *[]api.UserInfo) (*core.InboundHandlerConfig, error) {
+	return buildInboundWithUsers(config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
+}
+
+func buildInboundWithUsers(config *Config, node inboundListenerView, tag string, userInfo *[]api.UserInfo) (*core.InboundHandlerConfig, error) {
 	inboundDetourConfig := &conf.InboundDetourConfig{}
 	if config.ListenIP != "" {
 		ipAddress := net.ParseAddress(config.ListenIP)
 		inboundDetourConfig.ListenOn = &conf.Address{Address: ipAddress}
 	}
 	portList := &conf.PortList{
-		Range: []conf.PortRange{{From: nodeInfo.Port, To: nodeInfo.Port}},
+		Range: []conf.PortRange{{From: node.port, To: node.port}},
 	}
 	inboundDetourConfig.PortList = portList
 	inboundDetourConfig.Tag = tag
@@ -46,7 +50,7 @@ func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string,
 	var proxySetting any
 	var protocol string
 
-	switch nodeInfo.NodeType {
+	switch node.nodeType {
 	case "Socks":
 		protocol = "socks"
 		accounts := make([]*conf.SocksAccount, 0, len(*userInfo))
@@ -80,12 +84,12 @@ func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string,
 			Accounts: accounts,
 		}
 	default:
-		return nil, fmt.Errorf("InboundBuilderWithUsers only supports Socks and HTTP, got: %s", nodeInfo.NodeType)
+		return nil, fmt.Errorf("InboundBuilderWithUsers only supports Socks and HTTP, got: %s", node.nodeType)
 	}
 
 	setting, err := json.Marshal(proxySetting)
 	if err != nil {
-		return nil, fmt.Errorf("marshal proxy %s config failed: %s", nodeInfo.NodeType, err)
+		return nil, fmt.Errorf("marshal proxy %s config failed: %s", node.nodeType, err)
 	}
 	inboundDetourConfig.Protocol = protocol
 	rawSetting := json.RawMessage(setting)
@@ -101,7 +105,7 @@ func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string,
 	streamSetting.TCPSettings = tcpSetting
 
 	// TLS for HTTP proxy (HTTPS)
-	if nodeInfo.EnableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
+	if node.enableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
 		streamSetting.Security = "tls"
 		certFile, keyFile, err := getCertFile(config.CertConfig)
 		if err != nil {
@@ -118,11 +122,16 @@ func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string,
 	return inboundDetourConfig.Build()
 }
 
-// InboundBuilder build Inbound config for different protocol
+// InboundBuilder is the compatibility adapter for callers that still provide
+// api.NodeInfo. Internal controller paths call buildInbound with a focused view.
 func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
+	return buildInbound(config, normalizeNodeInfo(nodeInfo).inboundView(), tag)
+}
+
+func buildInbound(config *Config, node inboundNodeView, tag string) (*core.InboundHandlerConfig, error) {
 	inboundDetourConfig := &conf.InboundDetourConfig{}
 	// Build Listen IP address
-	if nodeInfo.NodeType == "Shadowsocks-Plugin" {
+	if node.listener.nodeType == "Shadowsocks-Plugin" {
 		// Shdowsocks listen in 127.0.0.1 for safety
 		inboundDetourConfig.ListenOn = &conf.Address{Address: net.ParseAddress("127.0.0.1")}
 	} else if config.ListenIP != "" {
@@ -132,7 +141,7 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 
 	// Build Port
 	portList := &conf.PortList{
-		Range: []conf.PortRange{{From: nodeInfo.Port, To: nodeInfo.Port}},
+		Range: []conf.PortRange{{From: node.listener.port, To: node.listener.port}},
 	}
 	inboundDetourConfig.PortList = portList
 	// Build Tag
@@ -155,10 +164,10 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 
 	var proxySetting any
 	// Build Protocol and Protocol setting
-	switch nodeInfo.NodeType {
+	switch node.listener.nodeType {
 	case "V2ray", "Vmess", "Vless", "VLESS":
 		//  Protocol selection is driven solely by NodeType
-		useVless := nodeInfo.EnableVless || strings.EqualFold(nodeInfo.NodeType, "Vless") || strings.EqualFold(nodeInfo.NodeType, "VLESS")
+		useVless := node.enableVless || strings.EqualFold(node.listener.nodeType, "Vless") || strings.EqualFold(node.listener.nodeType, "VLESS")
 		if useVless {
 			protocol = "vless"
 			if config.EnableFallback {
@@ -196,11 +205,11 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		}
 	case "Shadowsocks", "Shadowsocks-Plugin":
 		protocol = "shadowsocks"
-		cipher := strings.ToLower(nodeInfo.CypherMethod)
+		cipher := strings.ToLower(node.cypherMethod)
 
 		proxySetting = &conf.ShadowsocksServerConfig{
 			Cipher:   cipher,
-			Password: nodeInfo.ServerKey, // shadowsocks2022 shareKey
+			Password: node.serverKey, // shadowsocks2022 shareKey
 		}
 
 		proxySetting, _ := proxySetting.(*conf.ShadowsocksServerConfig)
@@ -241,19 +250,19 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 			Accounts: []*conf.HTTPAccount{}, // users managed via full rebuild
 		}
 	default:
-		return nil, fmt.Errorf("unsupported node type: %s, Only support: Vmess, VLESS, Trojan, Shadowsocks, Shadowsocks-Plugin, Socks, and HTTP", nodeInfo.NodeType)
+		return nil, fmt.Errorf("unsupported node type: %s, Only support: Vmess, VLESS, Trojan, Shadowsocks, Shadowsocks-Plugin, Socks, and HTTP", node.listener.nodeType)
 	}
 
 	setting, err := json.Marshal(proxySetting)
 	if err != nil {
-		return nil, fmt.Errorf("marshal proxy %s config failed: %s", nodeInfo.NodeType, err)
+		return nil, fmt.Errorf("marshal proxy %s config failed: %s", node.listener.nodeType, err)
 	}
 	inboundDetourConfig.Protocol = protocol
 	inboundDetourConfig.Settings = &setting
 
 	// Build streamSettings
 	streamSetting = new(conf.StreamConfig)
-	transportProtocol := conf.TransportProtocol(nodeInfo.TransportProtocol)
+	transportProtocol := conf.TransportProtocol(node.transport.protocol)
 	networkType, err := transportProtocol.Build()
 	if err != nil {
 		return nil, fmt.Errorf("convert TransportProtocol failed: %s", err)
@@ -262,114 +271,114 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 	switch networkType {
 	case "tcp":
 		tcpSetting := &conf.TCPConfig{
-			AcceptProxyProtocol: config.EnableProxyProtocol || nodeInfo.AcceptProxyProtocol,
-			HeaderConfig:        nodeInfo.Header,
+			AcceptProxyProtocol: config.EnableProxyProtocol || node.transport.acceptProxyProtocol,
+			HeaderConfig:        node.transport.header,
 		}
 		streamSetting.TCPSettings = tcpSetting
 	case "websocket":
 		headers := make(map[string]string)
-		headers["Host"] = nodeInfo.Host
+		headers["Host"] = node.transport.host
 		wsSettings := &conf.WebSocketConfig{
-			AcceptProxyProtocol: config.EnableProxyProtocol || nodeInfo.AcceptProxyProtocol,
-			Host:                nodeInfo.Host,
-			Path:                nodeInfo.Path,
+			AcceptProxyProtocol: config.EnableProxyProtocol || node.transport.acceptProxyProtocol,
+			Host:                node.transport.host,
+			Path:                node.transport.path,
 			Headers:             headers,
 		}
 		streamSetting.WSSettings = wsSettings
 	case "grpc":
 		grpcSettings := &conf.GRPCConfig{
-			ServiceName: nodeInfo.ServiceName,
-			Authority:   nodeInfo.Authority,
+			ServiceName: node.transport.serviceName,
+			Authority:   node.transport.authority,
 		}
 		streamSetting.GRPCSettings = grpcSettings
 	case "httpupgrade":
 		httpupgradeSettings := &conf.HttpUpgradeConfig{
-			Headers:             nodeInfo.Headers,
-			Path:                nodeInfo.Path,
-			Host:                nodeInfo.Host,
-			AcceptProxyProtocol: config.EnableProxyProtocol || nodeInfo.AcceptProxyProtocol,
+			Headers:             node.transport.headers,
+			Path:                node.transport.path,
+			Host:                node.transport.host,
+			AcceptProxyProtocol: config.EnableProxyProtocol || node.transport.acceptProxyProtocol,
 		}
 		streamSetting.HTTPUPGRADESettings = httpupgradeSettings
 	case "splithttp", "xhttp":
 		splithttpSetting := &conf.SplitHTTPConfig{
-			Path:                nodeInfo.Path,
-			Host:                nodeInfo.Host,
-			Mode:                nodeInfo.XHTTPMode,
-			Extra:               nodeInfo.XHTTPExtra,
-			XPaddingObfsMode:    nodeInfo.XPaddingObfsMode,
-			XPaddingKey:         nodeInfo.XPaddingKey,
-			XPaddingHeader:      nodeInfo.XPaddingHeader,
-			XPaddingPlacement:   nodeInfo.XPaddingPlacement,
-			XPaddingMethod:      nodeInfo.XPaddingMethod,
-			UplinkHTTPMethod:    nodeInfo.UplinkHTTPMethod,
-			SessionPlacement:    nodeInfo.SessionPlacement,
-			SessionKey:          nodeInfo.SessionKey,
-			SeqPlacement:        nodeInfo.SeqPlacement,
-			SeqKey:              nodeInfo.SeqKey,
-			UplinkDataPlacement: nodeInfo.UplinkDataPlacement,
-			UplinkDataKey:       nodeInfo.UplinkDataKey,
-			UplinkChunkSize:     conf.Int32Range{From: int32(nodeInfo.UplinkChunkSize), To: int32(nodeInfo.UplinkChunkSize)},
-			NoGRPCHeader:        nodeInfo.NoGRPCHeader,
-			NoSSEHeader:         nodeInfo.NoSSEHeader,
-			ScMaxBufferedPosts:  nodeInfo.ScMaxBufferedPosts,
-			Headers:             nodeInfo.Headers,
+			Path:                node.transport.path,
+			Host:                node.transport.host,
+			Mode:                node.transport.xhttpMode,
+			Extra:               node.transport.xhttpExtra,
+			XPaddingObfsMode:    node.transport.xPaddingObfsMode,
+			XPaddingKey:         node.transport.xPaddingKey,
+			XPaddingHeader:      node.transport.xPaddingHeader,
+			XPaddingPlacement:   node.transport.xPaddingPlacement,
+			XPaddingMethod:      node.transport.xPaddingMethod,
+			UplinkHTTPMethod:    node.transport.uplinkHTTPMethod,
+			SessionPlacement:    node.transport.sessionPlacement,
+			SessionKey:          node.transport.sessionKey,
+			SeqPlacement:        node.transport.seqPlacement,
+			SeqKey:              node.transport.seqKey,
+			UplinkDataPlacement: node.transport.uplinkDataPlacement,
+			UplinkDataKey:       node.transport.uplinkDataKey,
+			UplinkChunkSize:     conf.Int32Range{From: int32(node.transport.uplinkChunkSize), To: int32(node.transport.uplinkChunkSize)},
+			NoGRPCHeader:        node.transport.noGRPCHeader,
+			NoSSEHeader:         node.transport.noSSEHeader,
+			ScMaxBufferedPosts:  node.transport.scMaxBufferedPosts,
+			Headers:             node.transport.headers,
 		}
-		if nodeInfo.XPaddingBytes != nil {
+		if node.transport.xPaddingBytes.set {
 			splithttpSetting.XPaddingBytes = conf.Int32Range{
-				From: nodeInfo.XPaddingBytes[0],
-				To:   nodeInfo.XPaddingBytes[1],
+				From: node.transport.xPaddingBytes.from,
+				To:   node.transport.xPaddingBytes.to,
 			}
 		}
-		if nodeInfo.ScMaxEachPostBytes != nil {
+		if node.transport.scMaxEachPostBytes.set {
 			splithttpSetting.ScMaxEachPostBytes = conf.Int32Range{
-				From: nodeInfo.ScMaxEachPostBytes[0],
-				To:   nodeInfo.ScMaxEachPostBytes[1],
+				From: node.transport.scMaxEachPostBytes.from,
+				To:   node.transport.scMaxEachPostBytes.to,
 			}
 		}
-		if nodeInfo.ScMinPostsIntervalMs != nil {
+		if node.transport.scMinPostsIntervalMS.set {
 			splithttpSetting.ScMinPostsIntervalMs = conf.Int32Range{
-				From: nodeInfo.ScMinPostsIntervalMs[0],
-				To:   nodeInfo.ScMinPostsIntervalMs[1],
+				From: node.transport.scMinPostsIntervalMS.from,
+				To:   node.transport.scMinPostsIntervalMS.to,
 			}
 		}
-		if nodeInfo.ScStreamUpServerSecs != nil {
+		if node.transport.scStreamUpServerSecs.set {
 			splithttpSetting.ScStreamUpServerSecs = conf.Int32Range{
-				From: nodeInfo.ScStreamUpServerSecs[0],
-				To:   nodeInfo.ScStreamUpServerSecs[1],
+				From: node.transport.scStreamUpServerSecs.from,
+				To:   node.transport.scStreamUpServerSecs.to,
 			}
 		}
-		if nodeInfo.XmuxMaxConcurrency != nil || nodeInfo.XmuxMaxConnections != nil {
+		if node.transport.xmuxMaxConcurrency.set || node.transport.xmuxMaxConnections.set {
 			splithttpSetting.Xmux = conf.XmuxConfig{
-				HKeepAlivePeriod: nodeInfo.XmuxHKeepAlivePeriod,
+				HKeepAlivePeriod: node.transport.xmuxHKeepAlivePeriod,
 			}
-			if nodeInfo.XmuxMaxConcurrency != nil {
+			if node.transport.xmuxMaxConcurrency.set {
 				splithttpSetting.Xmux.MaxConcurrency = conf.Int32Range{
-					From: nodeInfo.XmuxMaxConcurrency[0],
-					To:   nodeInfo.XmuxMaxConcurrency[1],
+					From: node.transport.xmuxMaxConcurrency.from,
+					To:   node.transport.xmuxMaxConcurrency.to,
 				}
 			}
-			if nodeInfo.XmuxMaxConnections != nil {
+			if node.transport.xmuxMaxConnections.set {
 				splithttpSetting.Xmux.MaxConnections = conf.Int32Range{
-					From: nodeInfo.XmuxMaxConnections[0],
-					To:   nodeInfo.XmuxMaxConnections[1],
+					From: node.transport.xmuxMaxConnections.from,
+					To:   node.transport.xmuxMaxConnections.to,
 				}
 			}
-			if nodeInfo.XmuxCMaxReuseTimes != nil {
+			if node.transport.xmuxCMaxReuseTimes.set {
 				splithttpSetting.Xmux.CMaxReuseTimes = conf.Int32Range{
-					From: nodeInfo.XmuxCMaxReuseTimes[0],
-					To:   nodeInfo.XmuxCMaxReuseTimes[1],
+					From: node.transport.xmuxCMaxReuseTimes.from,
+					To:   node.transport.xmuxCMaxReuseTimes.to,
 				}
 			}
-			if nodeInfo.XmuxHMaxRequestTimes != nil {
+			if node.transport.xmuxHMaxRequestTimes.set {
 				splithttpSetting.Xmux.HMaxRequestTimes = conf.Int32Range{
-					From: nodeInfo.XmuxHMaxRequestTimes[0],
-					To:   nodeInfo.XmuxHMaxRequestTimes[1],
+					From: node.transport.xmuxHMaxRequestTimes.from,
+					To:   node.transport.xmuxHMaxRequestTimes.to,
 				}
 			}
-			if nodeInfo.XmuxHMaxReusableSecs != nil {
+			if node.transport.xmuxHMaxReusableSecs.set {
 				splithttpSetting.Xmux.HMaxReusableSecs = conf.Int32Range{
-					From: nodeInfo.XmuxHMaxReusableSecs[0],
-					To:   nodeInfo.XmuxHMaxReusableSecs[1],
+					From: node.transport.xmuxHMaxReusableSecs.from,
+					To:   node.transport.xmuxHMaxReusableSecs.to,
 				}
 			}
 		}
@@ -381,21 +390,21 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 	var isREALITY bool
 	// Prefer panel-provided REALITY settings, but fall back to config.yml when
 	// the panel marks the node as REALITY without sending full REALITY opts.
-	if nodeInfo.EnableREALITY {
-		if nodeInfo.REALITYConfig != nil {
-			r := nodeInfo.REALITYConfig
-			if r.Dest != "" && r.PrivateKey != "" {
+	if node.enableReality {
+		if node.reality.set {
+			r := node.reality
+			if r.dest != "" && r.privateKey != "" {
 				isREALITY = true
 				streamSetting.Security = "reality"
 				streamSetting.REALITYSettings = &conf.REALITYConfig{
-					Dest:         []byte(`"` + r.Dest + `"`),
-					Xver:         r.ProxyProtocolVer,
-					ServerNames:  r.ServerNames,
-					PrivateKey:   r.PrivateKey,
-					MinClientVer: r.MinClientVer,
-					MaxClientVer: r.MaxClientVer,
-					MaxTimeDiff:  r.MaxTimeDiff,
-					ShortIds:     r.ShortIds,
+					Dest:         []byte(`"` + r.dest + `"`),
+					Xver:         r.proxyProtocolVer,
+					ServerNames:  r.serverNames,
+					PrivateKey:   r.privateKey,
+					MinClientVer: r.minClientVer,
+					MaxClientVer: r.maxClientVer,
+					MaxTimeDiff:  r.maxTimeDiff,
+					ShortIds:     r.shortIDs,
 				}
 			}
 		}
@@ -420,7 +429,7 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 		}
 	}
 
-	if !isREALITY && nodeInfo.EnableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
+	if !isREALITY && node.listener.enableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
 		streamSetting.Security = "tls"
 		certFile, keyFile, err := getCertFile(config.CertConfig)
 		if err != nil {
@@ -434,9 +443,9 @@ func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.I
 	}
 
 	// Support ProxyProtocol for any transport protocol
-	if networkType != "tcp" && networkType != "ws" && (config.EnableProxyProtocol || nodeInfo.AcceptProxyProtocol) {
+	if networkType != "tcp" && networkType != "ws" && (config.EnableProxyProtocol || node.transport.acceptProxyProtocol) {
 		sockoptConfig := &conf.SocketConfig{
-			AcceptProxyProtocol: config.EnableProxyProtocol || nodeInfo.AcceptProxyProtocol,
+			AcceptProxyProtocol: config.EnableProxyProtocol || node.transport.acceptProxyProtocol,
 		}
 		streamSetting.SocketSettings = sockoptConfig
 	}

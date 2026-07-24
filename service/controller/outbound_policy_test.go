@@ -16,7 +16,7 @@ func TestSelectOutboundByPolicy_IncludeExcludeFallback(t *testing.T) {
 		},
 	}
 
-	selected, err := selectOutboundCandidates(candidates, policy)
+	selected, err := selectOutboundCandidates(candidates, newRoutingPolicyValue(policy))
 	if err != nil {
 		t.Fatalf("selectOutboundCandidates returned error: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestSelectOutboundByPolicy_UsesFallbackWhenFilteredEmpty(t *testing.T) {
 		},
 	}
 
-	selected, err := selectOutboundCandidates(candidates, policy)
+	selected, err := selectOutboundCandidates(candidates, newRoutingPolicyValue(policy))
 	if err != nil {
 		t.Fatalf("selectOutboundCandidates returned error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestSelectOutboundByPolicy_FailsWhenFallbackMissing(t *testing.T) {
 		},
 	}
 
-	_, err := selectOutboundCandidates(candidates, policy)
+	_, err := selectOutboundCandidates(candidates, newRoutingPolicyValue(policy))
 	if err == nil {
 		t.Fatal("expected error when no fallback candidates are available")
 	}

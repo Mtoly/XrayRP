@@ -43,20 +43,12 @@ func (c *Controller) buildVmessUser(userInfo *[]api.UserInfo, tag string) (users
 	return users
 }
 
-func (c *Controller) buildVlessUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (users []*protocol.User) {
+func (c *Controller) buildVlessUser(userInfo *[]api.UserInfo, node vlessUserNodeView, tag string) (users []*protocol.User) {
 	users = make([]*protocol.User, len(*userInfo))
-	flow := strings.TrimSpace(nodeInfo.VlessFlow)
-	if flow != "" {
-		transport := strings.ToLower(strings.TrimSpace(nodeInfo.TransportProtocol))
-		// XTLS Vision is only valid on direct TLS/REALITY over TCP.
-		if transport != "tcp" || (!nodeInfo.EnableTLS && !nodeInfo.EnableREALITY) || nodeInfo.Header != nil {
-			flow = ""
-		}
-	}
 	for i, user := range *userInfo {
 		vlessAccount := &vless.Account{
 			Id:   user.UUID,
-			Flow: flow,
+			Flow: node.effectiveFlow,
 		}
 		users[i] = &protocol.User{
 			Level:   0,

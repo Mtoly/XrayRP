@@ -630,19 +630,25 @@ func (c *Controller) removeOldTag(oldTag string) (err error) {
 }
 
 func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error) {
+	node := normalizeNodeInfo(newNodeInfo)
+	inbound := node.inboundView()
+	outbound := node.outboundView()
+	routePolicy := node.routingPolicy()
+	nodeType := inbound.listener.nodeType
+
 	// Socks/HTTP inbounds are built with users embedded (no UserManager support).
 	// Skip here — the inbound will be created by rebuildInboundWithUsers() in addNewUser().
-	if newNodeInfo.NodeType == "Socks" || newNodeInfo.NodeType == "HTTP" {
+	if nodeType == "Socks" || nodeType == "HTTP" {
 		// Still need the outbound for routing
-		outBoundConfig, err := OutboundBuilder(c.config, newNodeInfo, tag)
+		outBoundConfig, err := buildOutbound(c.config, outbound, tag)
 		if err != nil {
 			return err
 		}
-		return c.addOutbound(outBoundConfig, tag, newNodeInfo.RoutePolicy)
+		return c.addOutbound(outBoundConfig, tag, routePolicy)
 	}
 
-	if newNodeInfo.NodeType != "Shadowsocks-Plugin" {
-		inboundConfig, err := InboundBuilder(c.config, newNodeInfo, tag)
+	if nodeType != "Shadowsocks-Plugin" {
+		inboundConfig, err := buildInbound(c.config, inbound, tag)
 		if err != nil {
 			return err
 		}
@@ -651,30 +657,28 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 
 			return err
 		}
-		outBoundConfig, err := OutboundBuilder(c.config, newNodeInfo, tag)
+		outBoundConfig, err := buildOutbound(c.config, outbound, tag)
 		if err != nil {
 
 			return err
 		}
-		err = c.addOutbound(outBoundConfig, tag, newNodeInfo.RoutePolicy)
+		err = c.addOutbound(outBoundConfig, tag, routePolicy)
 		if err != nil {
 
 			return err
 		}
 
 	} else {
-		return c.addInboundForSSPlugin(*newNodeInfo, tag)
+		return c.addInboundForSSPlugin(node, tag)
 	}
 	return nil
 }
 
-func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo, tag string) (err error) {
+func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err error) {
 	// Shadowsocks-Plugin require a separate inbound for other TransportProtocol likes: ws, grpc
-	fakeNodeInfo := newNodeInfo
-	fakeNodeInfo.TransportProtocol = "tcp"
-	fakeNodeInfo.EnableTLS = false
+	views := node.shadowsocksPluginViews()
 	// Add a regular Shadowsocks inbound and outbound
-	inboundConfig, err := InboundBuilder(c.config, &fakeNodeInfo, tag)
+	inboundConfig, err := buildInbound(c.config, views.regularInbound, tag)
 	if err != nil {
 		return err
 	}
@@ -683,22 +687,19 @@ func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo, tag string)
 
 		return err
 	}
-	outBoundConfig, err := OutboundBuilder(c.config, &fakeNodeInfo, tag)
+	outBoundConfig, err := buildOutbound(c.config, views.regularOutbound, tag)
 	if err != nil {
 
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, tag, fakeNodeInfo.RoutePolicy)
+	err = c.addOutbound(outBoundConfig, tag, views.routing)
 	if err != nil {
 
 		return err
 	}
 	// Add an inbound for upper streaming protocol
-	fakeNodeInfo = newNodeInfo
-	fakeNodeInfo.Port++
-	fakeNodeInfo.NodeType = "dokodemo-door"
 	dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
-	inboundConfig, err = InboundBuilder(c.config, &fakeNodeInfo, dokodemoTag)
+	inboundConfig, err = buildInbound(c.config, views.bridgeInbound, dokodemoTag)
 	if err != nil {
 		return err
 	}
@@ -707,12 +708,12 @@ func (c *Controller) addInboundForSSPlugin(newNodeInfo api.NodeInfo, tag string)
 
 		return err
 	}
-	outBoundConfig, err = OutboundBuilder(c.config, &fakeNodeInfo, dokodemoTag)
+	outBoundConfig, err = buildOutbound(c.config, views.bridgeOutbound, dokodemoTag)
 	if err != nil {
 
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, dokodemoTag, fakeNodeInfo.RoutePolicy)
+	err = c.addOutbound(outBoundConfig, dokodemoTag, views.routing)
 	if err != nil {
 
 		return err
@@ -727,7 +728,7 @@ func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo 
 	_ = c.removeInbound(tag)
 
 	// Build inbound with all users
-	inboundConfig, err := InboundBuilderWithUsers(c.config, nodeInfo, tag, userInfo)
+	inboundConfig, err := buildInboundWithUsers(c.config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
 	if err != nil {
 		return err
 	}
@@ -741,27 +742,29 @@ func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo 
 }
 
 func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (err error) {
+	node := normalizeNodeInfo(nodeInfo).userView()
+
 	// Socks/HTTP don't support proxy.UserManager — rebuild entire inbound with users embedded
-	if nodeInfo.NodeType == "Socks" || nodeInfo.NodeType == "HTTP" {
+	if node.nodeType == "Socks" || node.nodeType == "HTTP" {
 		return c.rebuildInboundWithUsers(userInfo, nodeInfo, tag)
 	}
 
 	users := make([]*protocol.User, 0)
-	switch nodeInfo.NodeType {
+	switch node.nodeType {
 	case "V2ray", "Vmess", "Vless":
-		if nodeInfo.EnableVless || (nodeInfo.NodeType == "Vless" && nodeInfo.NodeType != "Vmess") {
-			users = c.buildVlessUser(userInfo, nodeInfo, tag)
+		if node.enableVless || (node.nodeType == "Vless" && node.nodeType != "Vmess") {
+			users = c.buildVlessUser(userInfo, node.vless, tag)
 		} else {
 			users = c.buildVmessUser(userInfo, tag)
 		}
 	case "Trojan":
 		users = c.buildTrojanUser(userInfo, tag)
 	case "Shadowsocks":
-		users = c.buildSSUser(userInfo, nodeInfo.CypherMethod, tag)
+		users = c.buildSSUser(userInfo, node.cypherMethod, tag)
 	case "Shadowsocks-Plugin":
 		users = c.buildSSPluginUser(userInfo, tag)
 	default:
-		return fmt.Errorf("unsupported node type: %s", nodeInfo.NodeType)
+		return fmt.Errorf("unsupported node type: %s", node.nodeType)
 	}
 
 	err = c.addUsers(users, tag)

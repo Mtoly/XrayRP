@@ -150,3 +150,51 @@ func TestInboundBuilderFallsBackToLocalREALITYConfigWhenPanelOmitsRealityOpts(t 
 		t.Fatalf("expected local REALITY xver 1, got %d", realityConfig.Xver)
 	}
 }
+
+func TestInboundBuilderPrefersCompletePanelREALITYConfig(t *testing.T) {
+	const privateKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	nodeInfo := &api.NodeInfo{
+		NodeType:          "V2ray",
+		Port:              1145,
+		TransportProtocol: "tcp",
+		EnableVless:       true,
+		EnableREALITY:     true,
+		REALITYConfig: &api.REALITYConfig{
+			Dest:             "panel.example:443",
+			ProxyProtocolVer: 2,
+			ServerNames:      []string{"panel.example"},
+			PrivateKey:       privateKey,
+			ShortIds:         []string{"beef"},
+		},
+	}
+	config := &Config{
+		EnableREALITY: true,
+		REALITYConfigs: &REALITYConfig{
+			Dest:             "local.example:443",
+			ProxyProtocolVer: 1,
+			ServerNames:      []string{"local.example"},
+			PrivateKey:       privateKey,
+			ShortIds:         []string{"abcd"},
+		},
+	}
+
+	inbound, err := InboundBuilder(config, nodeInfo, "test_tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	receiver, err := inbound.ReceiverSettings.GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamSettings := receiver.(*proxyman.ReceiverConfig).StreamSettings
+	securitySettings, err := streamSettings.SecuritySettings[0].GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	realityConfig := securitySettings.(*xrayreality.Config)
+	if realityConfig.Dest != "panel.example:443" || realityConfig.Xver != 2 {
+		t.Fatalf("expected panel REALITY settings, got dest %q xver %d", realityConfig.Dest, realityConfig.Xver)
+	}
+}
