@@ -19,6 +19,7 @@ import (
 	C "github.com/sagernet/sing/common"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 	"github.com/Mtoly/XrayRP/common"
 )
 
@@ -481,72 +482,7 @@ func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *simplejson.Json) (*api
 	return nodeInfo, nil
 }
 
-type transportProfile struct {
-	TransportProtocol string
-	EnableTLS         bool
-	EnableVless       bool
-	EnableREALITY     bool
-	VlessFlow         string
-	Path              string
-	Host              string
-	ServiceName       string
-	Header            json.RawMessage
-	REALITYConfig     *api.REALITYConfig
-
-	XHTTPMode           string
-	XHTTPExtra          json.RawMessage
-	XPaddingObfsMode    bool
-	XPaddingKey         string
-	XPaddingHeader      string
-	XPaddingPlacement   string
-	XPaddingMethod      string
-	UplinkHTTPMethod    string
-	SessionPlacement    string
-	SessionKey          string
-	SeqPlacement        string
-	SeqKey              string
-	UplinkDataPlacement string
-	UplinkDataKey       string
-	UplinkChunkSize     uint32
-	NoGRPCHeader        bool
-	NoSSEHeader         bool
-}
-
-func (p transportProfile) applyToNodeInfo(nodeInfo *api.NodeInfo) {
-	if nodeInfo == nil {
-		return
-	}
-	nodeInfo.TransportProtocol = p.TransportProtocol
-	nodeInfo.EnableTLS = p.EnableTLS
-	nodeInfo.Path = p.Path
-	nodeInfo.Host = p.Host
-	nodeInfo.EnableVless = p.EnableVless
-	nodeInfo.VlessFlow = p.VlessFlow
-	nodeInfo.ServiceName = p.ServiceName
-	nodeInfo.Header = p.Header
-	nodeInfo.EnableREALITY = p.EnableREALITY
-	nodeInfo.REALITYConfig = p.REALITYConfig
-
-	nodeInfo.XHTTPMode = p.XHTTPMode
-	nodeInfo.XHTTPExtra = p.XHTTPExtra
-	nodeInfo.XPaddingObfsMode = p.XPaddingObfsMode
-	nodeInfo.XPaddingKey = p.XPaddingKey
-	nodeInfo.XPaddingHeader = p.XPaddingHeader
-	nodeInfo.XPaddingPlacement = p.XPaddingPlacement
-	nodeInfo.XPaddingMethod = p.XPaddingMethod
-	nodeInfo.UplinkHTTPMethod = p.UplinkHTTPMethod
-	nodeInfo.SessionPlacement = p.SessionPlacement
-	nodeInfo.SessionKey = p.SessionKey
-	nodeInfo.SeqPlacement = p.SeqPlacement
-	nodeInfo.SeqKey = p.SeqKey
-	nodeInfo.UplinkDataPlacement = p.UplinkDataPlacement
-	nodeInfo.UplinkDataKey = p.UplinkDataKey
-	nodeInfo.UplinkChunkSize = p.UplinkChunkSize
-	nodeInfo.NoGRPCHeader = p.NoGRPCHeader
-	nodeInfo.NoSSEHeader = p.NoSSEHeader
-}
-
-func enrichTransportProfileWithXHTTPSettings(profile *transportProfile, inboundInfo *simplejson.Json, transportProtocol string) {
+func enrichTransportProfileWithXHTTPSettings(profile *transportprofile.Input, inboundInfo *simplejson.Json, transportProtocol string) {
 	if profile == nil || inboundInfo == nil {
 		return
 	}
@@ -561,56 +497,56 @@ func enrichTransportProfileWithXHTTPSettings(profile *transportProfile, inboundI
 		}
 	}
 	ss := inboundInfo.Get("streamSettings").Get(settingsKey)
-	profile.XHTTPMode = ss.Get("mode").MustString()
-	profile.XPaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
-	profile.XPaddingKey = ss.Get("xPaddingKey").MustString()
-	profile.XPaddingHeader = ss.Get("xPaddingHeader").MustString()
-	profile.XPaddingPlacement = ss.Get("xPaddingPlacement").MustString()
-	profile.XPaddingMethod = ss.Get("xPaddingMethod").MustString()
-	profile.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
-	profile.SessionPlacement = ss.Get("sessionPlacement").MustString()
-	profile.SessionKey = ss.Get("sessionKey").MustString()
-	profile.SeqPlacement = ss.Get("seqPlacement").MustString()
-	profile.SeqKey = ss.Get("seqKey").MustString()
-	profile.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
-	profile.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
-	profile.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
-	profile.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
-	profile.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
+	profile.XHTTP.Mode = ss.Get("mode").MustString()
+	profile.XHTTP.PaddingObfsMode = ss.Get("xPaddingObfsMode").MustBool()
+	profile.XHTTP.PaddingKey = ss.Get("xPaddingKey").MustString()
+	profile.XHTTP.PaddingHeader = ss.Get("xPaddingHeader").MustString()
+	profile.XHTTP.PaddingPlacement = ss.Get("xPaddingPlacement").MustString()
+	profile.XHTTP.PaddingMethod = ss.Get("xPaddingMethod").MustString()
+	profile.XHTTP.UplinkHTTPMethod = ss.Get("uplinkHTTPMethod").MustString()
+	profile.XHTTP.SessionPlacement = ss.Get("sessionPlacement").MustString()
+	profile.XHTTP.SessionKey = ss.Get("sessionKey").MustString()
+	profile.XHTTP.SeqPlacement = ss.Get("seqPlacement").MustString()
+	profile.XHTTP.SeqKey = ss.Get("seqKey").MustString()
+	profile.XHTTP.UplinkDataPlacement = ss.Get("uplinkDataPlacement").MustString()
+	profile.XHTTP.UplinkDataKey = ss.Get("uplinkDataKey").MustString()
+	profile.XHTTP.UplinkChunkSize = uint32(ss.Get("uplinkChunkSize").MustUint64())
+	profile.XHTTP.NoGRPCHeader = ss.Get("noGRPCHeader").MustBool()
+	profile.XHTTP.NoSSEHeader = ss.Get("noSSEHeader").MustBool()
 	if extra := ss.Get("extra"); extra.Interface() != nil {
 		if extraBytes, err := extra.MarshalJSON(); err == nil {
-			profile.XHTTPExtra = extraBytes
+			profile.XHTTP.Extra = extraBytes
 		}
 	}
 }
 
-func enrichTransportProfileWithEndpoint(profile *transportProfile, inboundInfo *simplejson.Json, transportProtocol string) error {
+func enrichTransportProfileWithEndpoint(profile *transportprofile.Input, inboundInfo *simplejson.Json, transportProtocol string) error {
 	if profile == nil || inboundInfo == nil {
 		return nil
 	}
 
 	switch transportProtocol {
 	case "ws":
-		profile.Path = inboundInfo.Get("streamSettings").Get("wsSettings").Get("path").MustString()
-		profile.Host = inboundInfo.Get("streamSettings").Get("wsSettings").Get("headers").Get("Host").MustString()
+		profile.Endpoints.WebSocket.Path = inboundInfo.Get("streamSettings").Get("wsSettings").Get("path").MustString()
+		profile.Endpoints.WebSocket.Host = inboundInfo.Get("streamSettings").Get("wsSettings").Get("headers").Get("Host").MustString()
 	case "httpupgrade":
-		profile.Host = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("Host").MustString()
-		profile.Path = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("path").MustString()
+		profile.Endpoints.HTTPUpgrade.Host = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("Host").MustString()
+		profile.Endpoints.HTTPUpgrade.Path = inboundInfo.Get("streamSettings").Get("httpupgradeSettings").Get("path").MustString()
 	case "splithttp":
-		profile.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
-		profile.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
+		profile.Endpoints.SplitHTTP.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
+		profile.Endpoints.SplitHTTP.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
 	case "xhttp":
-		profile.Host = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("Host").MustString()
-		if profile.Host == "" {
-			profile.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
+		profile.Endpoints.XHTTP.Host = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("Host").MustString()
+		if profile.Endpoints.XHTTP.Host == "" {
+			profile.Endpoints.XHTTP.Host = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("Host").MustString()
 		}
-		profile.Path = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("path").MustString()
-		if profile.Path == "" {
-			profile.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
+		profile.Endpoints.XHTTP.Path = inboundInfo.Get("streamSettings").Get("xhttpSettings").Get("path").MustString()
+		if profile.Endpoints.XHTTP.Path == "" {
+			profile.Endpoints.XHTTP.Path = inboundInfo.Get("streamSettings").Get("splithttpSettings").Get("path").MustString()
 		}
 	case "grpc":
 		if data, ok := inboundInfo.Get("streamSettings").Get("grpcSettings").CheckGet("serviceName"); ok {
-			profile.ServiceName = data.MustString()
+			profile.Endpoints.GRPC.ServiceName = data.MustString()
 		}
 	case "tcp":
 		if data, ok := inboundInfo.Get("streamSettings").Get("tcpSettings").CheckGet("header"); ok {
@@ -618,26 +554,26 @@ func enrichTransportProfileWithEndpoint(profile *transportProfile, inboundInfo *
 			if err != nil {
 				return err
 			}
-			profile.Header = header
+			profile.Endpoints.TCP.Header = header
 		}
 	}
 	return nil
 }
 
-func enrichTransportProfileWithSecurity(profile *transportProfile, inboundInfo *simplejson.Json, fallbackVlessFlow string) {
+func enrichTransportProfileWithSecurity(profile *transportprofile.Input, inboundInfo *simplejson.Json, fallbackVlessFlow string) {
 	if profile == nil || inboundInfo == nil {
 		return
 	}
 
 	security := inboundInfo.Get("streamSettings").Get("security").MustString()
-	profile.EnableTLS = security == "tls"
-	profile.EnableVless = inboundInfo.Get("protocol").MustString() == "vless"
-	profile.EnableREALITY = security == "reality"
+	profile.Security.EnableTLS = security == "tls"
+	profile.Security.EnableVless = inboundInfo.Get("protocol").MustString() == "vless"
+	profile.Security.EnableREALITY = security == "reality"
 
-	profile.REALITYConfig = new(api.REALITYConfig)
-	if profile.EnableVless {
+	profile.Security.REALITYConfig = new(api.REALITYConfig)
+	if profile.Security.EnableVless {
 		// parse reality config
-		profile.REALITYConfig = &api.REALITYConfig{
+		profile.Security.REALITYConfig = &api.REALITYConfig{
 			Dest:             inboundInfo.Get("streamSettings").Get("realitySettings").Get("dest").MustString(),
 			ProxyProtocolVer: inboundInfo.Get("streamSettings").Get("realitySettings").Get("xver").MustUint64(),
 			ServerNames:      inboundInfo.Get("streamSettings").Get("realitySettings").Get("serverNames").MustStringArray(),
@@ -650,27 +586,27 @@ func enrichTransportProfileWithSecurity(profile *transportProfile, inboundInfo *
 	}
 
 	// XTLS only supports TLS and REALITY directly for now
-	if (profile.TransportProtocol == "grpc" || profile.TransportProtocol == "h2") && profile.EnableREALITY {
-		profile.VlessFlow = ""
-	} else if profile.TransportProtocol == "tcp" && profile.EnableREALITY {
-		profile.VlessFlow = "xtls-rprx-vision"
+	if (profile.Protocol == "grpc" || profile.Protocol == "h2") && profile.Security.EnableREALITY {
+		profile.Security.VlessFlow = ""
+	} else if profile.Protocol == "tcp" && profile.Security.EnableREALITY {
+		profile.Security.VlessFlow = "xtls-rprx-vision"
 	} else {
-		profile.VlessFlow = fallbackVlessFlow
+		profile.Security.VlessFlow = fallbackVlessFlow
 	}
 }
 
-func deriveTransportProfileFromInbound(inboundInfo *simplejson.Json, fallbackVlessFlow string) (transportProfile, error) {
+func deriveTransportProfileFromInbound(inboundInfo *simplejson.Json, fallbackVlessFlow string) (transportprofile.Input, error) {
 	if inboundInfo == nil {
-		return transportProfile{}, nil
+		return transportprofile.Input{}, nil
 	}
 
 	transportProtocol := inboundInfo.Get("streamSettings").Get("network").MustString()
-	profile := transportProfile{
-		TransportProtocol: transportProtocol,
+	profile := transportprofile.Input{
+		Protocol: transportProtocol,
 	}
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, fallbackVlessFlow)
 	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, transportProtocol); err != nil {
-		return transportProfile{}, err
+		return transportprofile.Input{}, err
 	}
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, transportProtocol)
 	return profile, nil
@@ -709,6 +645,6 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *simplejson.Json) (*
 		Port:     port,
 		AlterID:  0,
 	}
-	profile.applyToNodeInfo(nodeInfo)
+	transportprofile.Apply(nodeInfo, profile)
 	return nodeInfo, nil
 }

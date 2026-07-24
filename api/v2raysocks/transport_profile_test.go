@@ -1,12 +1,12 @@
 package v2raysocks
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/bitly/go-simplejson"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 )
 
 func mustSimpleJSON(t *testing.T, raw string) *simplejson.Json {
@@ -48,23 +48,23 @@ func TestDeriveTransportProfileFromInbound(t *testing.T) {
 		t.Fatalf("derive transport profile: %v", err)
 	}
 
-	if profile.TransportProtocol != "xhttp" {
-		t.Fatalf("unexpected transport protocol: %s", profile.TransportProtocol)
+	if profile.Protocol != "xhttp" {
+		t.Fatalf("unexpected transport protocol: %s", profile.Protocol)
 	}
-	if !profile.EnableVless || !profile.EnableREALITY || profile.EnableTLS {
+	if !profile.Security.EnableVless || !profile.Security.EnableREALITY || profile.Security.EnableTLS {
 		t.Fatalf("unexpected security flags: %#v", profile)
 	}
-	if profile.VlessFlow != "fallback-flow" {
-		t.Fatalf("expected fallback flow for non-tcp REALITY transport, got %q", profile.VlessFlow)
+	if profile.Security.VlessFlow != "fallback-flow" {
+		t.Fatalf("expected fallback flow for non-tcp REALITY transport, got %q", profile.Security.VlessFlow)
 	}
-	if profile.Host != "xhttp.example.com" || profile.Path != "/xhttp" {
+	if profile.Endpoints.XHTTP.Host != "xhttp.example.com" || profile.Endpoints.XHTTP.Path != "/xhttp" {
 		t.Fatalf("unexpected endpoint fields: %#v", profile)
 	}
-	if profile.XHTTPMode != "stream-one" || profile.UplinkChunkSize != 4096 {
+	if profile.XHTTP.Mode != "stream-one" || profile.XHTTP.UplinkChunkSize != 4096 {
 		t.Fatalf("unexpected XHTTP fields: %#v", profile)
 	}
-	if profile.REALITYConfig == nil || profile.REALITYConfig.Dest != "example.com:443" {
-		t.Fatalf("unexpected REALITY config: %#v", profile.REALITYConfig)
+	if profile.Security.REALITYConfig == nil || profile.Security.REALITYConfig.Dest != "example.com:443" {
+		t.Fatalf("unexpected REALITY config: %#v", profile.Security.REALITYConfig)
 	}
 }
 
@@ -73,7 +73,7 @@ func TestDeriveTransportProfileFromInboundNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nil inbound should not error: %v", err)
 	}
-	if profile.TransportProtocol != "" || profile.EnableTLS || profile.EnableVless || profile.EnableREALITY || profile.REALITYConfig != nil || len(profile.Header) != 0 {
+	if profile.Protocol != "" || profile.Security.EnableTLS || profile.Security.EnableVless || profile.Security.EnableREALITY || profile.Security.REALITYConfig != nil || len(profile.Endpoints.TCP.Header) != 0 {
 		t.Fatalf("expected zero profile for nil inbound, got %#v", profile)
 	}
 }
@@ -85,22 +85,22 @@ func TestEnrichTransportProfileWithSecurityTLS(t *testing.T) {
 			"security": "tls"
 		}
 	}`)
-	profile := transportProfile{TransportProtocol: "ws"}
+	profile := transportprofile.Input{Protocol: "ws"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
 	enrichTransportProfileWithSecurity(nil, inboundInfo, "fallback-flow")
 	enrichTransportProfileWithSecurity(&profile, nil, "fallback-flow")
 
-	if !profile.EnableTLS {
+	if !profile.Security.EnableTLS {
 		t.Fatal("expected TLS to be enabled")
 	}
-	if profile.EnableVless || profile.EnableREALITY {
+	if profile.Security.EnableVless || profile.Security.EnableREALITY {
 		t.Fatalf("unexpected VLESS/REALITY flags: %#v", profile)
 	}
-	if profile.VlessFlow != "fallback-flow" {
-		t.Fatalf("expected fallback VLESS flow, got %q", profile.VlessFlow)
+	if profile.Security.VlessFlow != "fallback-flow" {
+		t.Fatalf("expected fallback VLESS flow, got %q", profile.Security.VlessFlow)
 	}
-	if profile.REALITYConfig == nil {
+	if profile.Security.REALITYConfig == nil {
 		t.Fatal("expected empty REALITY config to preserve previous behavior")
 	}
 }
@@ -122,30 +122,30 @@ func TestEnrichTransportProfileWithSecurityRealityTCPUsesVision(t *testing.T) {
 			}
 		}
 	}`)
-	profile := transportProfile{TransportProtocol: "tcp"}
+	profile := transportprofile.Input{Protocol: "tcp"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
 
-	if profile.EnableTLS || !profile.EnableVless || !profile.EnableREALITY {
+	if profile.Security.EnableTLS || !profile.Security.EnableVless || !profile.Security.EnableREALITY {
 		t.Fatalf("unexpected security flags: %#v", profile)
 	}
-	if profile.VlessFlow != "xtls-rprx-vision" {
-		t.Fatalf("expected REALITY TCP to use vision flow, got %q", profile.VlessFlow)
+	if profile.Security.VlessFlow != "xtls-rprx-vision" {
+		t.Fatalf("expected REALITY TCP to use vision flow, got %q", profile.Security.VlessFlow)
 	}
-	if profile.REALITYConfig == nil {
+	if profile.Security.REALITYConfig == nil {
 		t.Fatal("expected REALITY config to be populated")
 	}
-	if profile.REALITYConfig.Dest != "example.com:443" || profile.REALITYConfig.ProxyProtocolVer != 1 {
-		t.Fatalf("unexpected REALITY config: %#v", profile.REALITYConfig)
+	if profile.Security.REALITYConfig.Dest != "example.com:443" || profile.Security.REALITYConfig.ProxyProtocolVer != 1 {
+		t.Fatalf("unexpected REALITY config: %#v", profile.Security.REALITYConfig)
 	}
-	if len(profile.REALITYConfig.ServerNames) != 1 || profile.REALITYConfig.ServerNames[0] != "example.com" {
-		t.Fatalf("unexpected REALITY server names: %#v", profile.REALITYConfig.ServerNames)
+	if len(profile.Security.REALITYConfig.ServerNames) != 1 || profile.Security.REALITYConfig.ServerNames[0] != "example.com" {
+		t.Fatalf("unexpected REALITY server names: %#v", profile.Security.REALITYConfig.ServerNames)
 	}
-	if profile.REALITYConfig.PrivateKey != "private-key" || profile.REALITYConfig.MaxTimeDiff != 60 {
-		t.Fatalf("unexpected REALITY key/time config: %#v", profile.REALITYConfig)
+	if profile.Security.REALITYConfig.PrivateKey != "private-key" || profile.Security.REALITYConfig.MaxTimeDiff != 60 {
+		t.Fatalf("unexpected REALITY key/time config: %#v", profile.Security.REALITYConfig)
 	}
-	if len(profile.REALITYConfig.ShortIds) != 1 || profile.REALITYConfig.ShortIds[0] != "abcd" {
-		t.Fatalf("unexpected REALITY short ids: %#v", profile.REALITYConfig.ShortIds)
+	if len(profile.Security.REALITYConfig.ShortIds) != 1 || profile.Security.REALITYConfig.ShortIds[0] != "abcd" {
+		t.Fatalf("unexpected REALITY short ids: %#v", profile.Security.REALITYConfig.ShortIds)
 	}
 }
 
@@ -156,11 +156,11 @@ func TestEnrichTransportProfileWithSecurityRealityGRPCClearsFlow(t *testing.T) {
 			"security": "reality"
 		}
 	}`)
-	profile := transportProfile{TransportProtocol: "grpc"}
+	profile := transportprofile.Input{Protocol: "grpc"}
 
 	enrichTransportProfileWithSecurity(&profile, inboundInfo, "fallback-flow")
 
-	if !profile.EnableREALITY || profile.VlessFlow != "" {
+	if !profile.Security.EnableREALITY || profile.Security.VlessFlow != "" {
 		t.Fatalf("expected REALITY grpc to clear flow, got %#v", profile)
 	}
 }
@@ -246,17 +246,19 @@ func TestEnrichTransportProfileWithEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inboundInfo := mustSimpleJSON(t, tt.fixture)
-			profile := transportProfile{}
+			profile := transportprofile.Input{Protocol: tt.transportProtocol}
 
 			if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, tt.transportProtocol); err != nil {
 				t.Fatalf("enrich endpoint: %v", err)
 			}
+			nodeInfo := new(api.NodeInfo)
+			transportprofile.Apply(nodeInfo, profile)
 
-			if profile.Host != tt.wantHost || profile.Path != tt.wantPath || profile.ServiceName != tt.wantServiceName {
+			if nodeInfo.Host != tt.wantHost || nodeInfo.Path != tt.wantPath || nodeInfo.ServiceName != tt.wantServiceName {
 				t.Fatalf("unexpected endpoint profile: %#v", profile)
 			}
-			if tt.wantHeader != "" && string(profile.Header) != tt.wantHeader {
-				t.Fatalf("unexpected tcp header: %s", string(profile.Header))
+			if tt.wantHeader != "" && string(nodeInfo.Header) != tt.wantHeader {
+				t.Fatalf("unexpected tcp header: %s", string(nodeInfo.Header))
 			}
 		})
 	}
@@ -272,20 +274,26 @@ func TestEnrichTransportProfileWithEndpointXHTTPFallsBackToSplitHTTP(t *testing.
 			}
 		}
 	}`)
-	profile := transportProfile{}
+	profile := transportprofile.Input{Protocol: "xhttp"}
 
 	if err := enrichTransportProfileWithEndpoint(&profile, inboundInfo, "xhttp"); err != nil {
 		t.Fatalf("enrich endpoint: %v", err)
 	}
 
-	if profile.Host != "split.example.com" || profile.Path != "/split" {
+	nodeInfo := new(api.NodeInfo)
+	transportprofile.Apply(nodeInfo, profile)
+	if nodeInfo.Host != "split.example.com" || nodeInfo.Path != "/split" {
 		t.Fatalf("expected XHTTP endpoint fallback to SplitHTTP, got %#v", profile)
 	}
 }
 
 func TestEnrichTransportProfileWithEndpointIgnoresNilInputs(t *testing.T) {
 	inboundInfo := mustSimpleJSON(t, `{"streamSettings": {}}`)
-	profile := transportProfile{Host: "existing"}
+	profile := transportprofile.Input{
+		Endpoints: transportprofile.Endpoints{
+			WebSocket: transportprofile.Endpoint{Host: "existing"},
+		},
+	}
 
 	if err := enrichTransportProfileWithEndpoint(nil, inboundInfo, "ws"); err != nil {
 		t.Fatalf("nil profile should not error: %v", err)
@@ -294,7 +302,7 @@ func TestEnrichTransportProfileWithEndpointIgnoresNilInputs(t *testing.T) {
 		t.Fatalf("nil inbound should not error: %v", err)
 	}
 
-	if profile.Host != "existing" {
+	if profile.Endpoints.WebSocket.Host != "existing" {
 		t.Fatalf("expected nil inputs to leave profile unchanged, got %#v", profile)
 	}
 }
@@ -326,29 +334,29 @@ func TestEnrichTransportProfileWithXHTTPSettings(t *testing.T) {
 			}
 		}
 	}`)
-	profile := transportProfile{}
+	profile := transportprofile.Input{}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
 	enrichTransportProfileWithXHTTPSettings(nil, inboundInfo, "xhttp")
 	enrichTransportProfileWithXHTTPSettings(&profile, nil, "xhttp")
 
-	if profile.XHTTPMode != "stream-one" {
-		t.Fatalf("expected xhttpSettings to be preferred, got mode %q", profile.XHTTPMode)
+	if profile.XHTTP.Mode != "stream-one" {
+		t.Fatalf("expected xhttpSettings to be preferred, got mode %q", profile.XHTTP.Mode)
 	}
-	if !profile.XPaddingObfsMode || profile.XPaddingKey != "x-padding-key" || profile.XPaddingHeader != "x-padding-header" {
+	if !profile.XHTTP.PaddingObfsMode || profile.XHTTP.PaddingKey != "x-padding-key" || profile.XHTTP.PaddingHeader != "x-padding-header" {
 		t.Fatalf("unexpected padding fields: %#v", profile)
 	}
-	if profile.UplinkHTTPMethod != "POST" || profile.SessionPlacement != "query" || profile.SeqPlacement != "path" {
+	if profile.XHTTP.UplinkHTTPMethod != "POST" || profile.XHTTP.SessionPlacement != "query" || profile.XHTTP.SeqPlacement != "path" {
 		t.Fatalf("unexpected placement fields: %#v", profile)
 	}
-	if profile.UplinkDataKey != "data-key" || profile.UplinkChunkSize != 4096 {
+	if profile.XHTTP.UplinkDataKey != "data-key" || profile.XHTTP.UplinkChunkSize != 4096 {
 		t.Fatalf("unexpected uplink fields: %#v", profile)
 	}
-	if !profile.NoGRPCHeader || !profile.NoSSEHeader {
+	if !profile.XHTTP.NoGRPCHeader || !profile.XHTTP.NoSSEHeader {
 		t.Fatal("expected header suppression flags to be copied")
 	}
-	if string(profile.XHTTPExtra) != `{"scMaxEachPostBytes":"1000"}` {
-		t.Fatalf("unexpected extra payload: %s", string(profile.XHTTPExtra))
+	if string(profile.XHTTP.Extra) != `{"scMaxEachPostBytes":"1000"}` {
+		t.Fatalf("unexpected extra payload: %s", string(profile.XHTTP.Extra))
 	}
 }
 
@@ -361,15 +369,15 @@ func TestEnrichTransportProfileWithXHTTPSettingsFallsBackToSplitHTTP(t *testing.
 			}
 		}
 	}`)
-	profile := transportProfile{}
+	profile := transportprofile.Input{}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "xhttp")
 
-	if profile.XHTTPMode != "auto" {
-		t.Fatalf("expected splithttpSettings fallback, got mode %q", profile.XHTTPMode)
+	if profile.XHTTP.Mode != "auto" {
+		t.Fatalf("expected splithttpSettings fallback, got mode %q", profile.XHTTP.Mode)
 	}
-	if profile.UplinkChunkSize != 1024 {
-		t.Fatalf("unexpected fallback uplink chunk size: %d", profile.UplinkChunkSize)
+	if profile.XHTTP.UplinkChunkSize != 1024 {
+		t.Fatalf("unexpected fallback uplink chunk size: %d", profile.XHTTP.UplinkChunkSize)
 	}
 }
 
@@ -381,90 +389,11 @@ func TestEnrichTransportProfileWithXHTTPSettingsIgnoresOtherTransports(t *testin
 			}
 		}
 	}`)
-	profile := transportProfile{XHTTPMode: "existing"}
+	profile := transportprofile.Input{XHTTP: transportprofile.XHTTP{Mode: "existing"}}
 
 	enrichTransportProfileWithXHTTPSettings(&profile, inboundInfo, "ws")
 
-	if profile.XHTTPMode != "existing" {
-		t.Fatalf("expected non-XHTTP transport to be ignored, got mode %q", profile.XHTTPMode)
-	}
-}
-
-func TestTransportProfileApplyToNodeInfo(t *testing.T) {
-	header := json.RawMessage(`{"type":"http"}`)
-	extra := json.RawMessage(`{"scMaxEachPostBytes":"1000"}`)
-	reality := &api.REALITYConfig{
-		Dest:             "example.com:443",
-		ProxyProtocolVer: 1,
-		ServerNames:      []string{"example.com"},
-		PrivateKey:       "private-key",
-		ShortIds:         []string{"abcd"},
-	}
-	profile := transportProfile{
-		TransportProtocol:   "xhttp",
-		EnableTLS:           true,
-		EnableVless:         true,
-		EnableREALITY:       true,
-		VlessFlow:           "xtls-rprx-vision",
-		Path:                "/xhttp",
-		Host:                "host.example.com",
-		ServiceName:         "grpc-service",
-		Header:              header,
-		REALITYConfig:       reality,
-		XHTTPMode:           "stream-one",
-		XHTTPExtra:          extra,
-		XPaddingObfsMode:    true,
-		XPaddingKey:         "padding-key",
-		XPaddingHeader:      "padding-header",
-		XPaddingPlacement:   "header",
-		XPaddingMethod:      "random",
-		UplinkHTTPMethod:    "POST",
-		SessionPlacement:    "query",
-		SessionKey:          "session-key",
-		SeqPlacement:        "path",
-		SeqKey:              "seq-key",
-		UplinkDataPlacement: "body",
-		UplinkDataKey:       "data-key",
-		UplinkChunkSize:     2048,
-		NoGRPCHeader:        true,
-		NoSSEHeader:         true,
-	}
-	nodeInfo := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
-
-	profile.applyToNodeInfo(nodeInfo)
-	profile.applyToNodeInfo(nil)
-
-	if nodeInfo.TransportProtocol != profile.TransportProtocol {
-		t.Fatalf("unexpected transport protocol: %s", nodeInfo.TransportProtocol)
-	}
-	if !nodeInfo.EnableTLS || !nodeInfo.EnableVless || !nodeInfo.EnableREALITY {
-		t.Fatalf("expected TLS, VLESS, and REALITY flags to be copied: %#v", nodeInfo)
-	}
-	if nodeInfo.VlessFlow != profile.VlessFlow {
-		t.Fatalf("unexpected VLESS flow: %s", nodeInfo.VlessFlow)
-	}
-	if nodeInfo.Path != profile.Path || nodeInfo.Host != profile.Host || nodeInfo.ServiceName != profile.ServiceName {
-		t.Fatalf("unexpected transport endpoint fields: path=%q host=%q service=%q", nodeInfo.Path, nodeInfo.Host, nodeInfo.ServiceName)
-	}
-	if string(nodeInfo.Header) != string(header) {
-		t.Fatalf("unexpected header: %s", string(nodeInfo.Header))
-	}
-	if nodeInfo.REALITYConfig != reality {
-		t.Fatal("expected REALITY config pointer to be copied")
-	}
-	if nodeInfo.XHTTPMode != profile.XHTTPMode || string(nodeInfo.XHTTPExtra) != string(extra) {
-		t.Fatalf("unexpected XHTTP mode/extra: mode=%q extra=%s", nodeInfo.XHTTPMode, string(nodeInfo.XHTTPExtra))
-	}
-	if !nodeInfo.XPaddingObfsMode || nodeInfo.XPaddingKey != profile.XPaddingKey || nodeInfo.XPaddingHeader != profile.XPaddingHeader {
-		t.Fatalf("unexpected XPadding fields: %#v", nodeInfo)
-	}
-	if nodeInfo.UplinkHTTPMethod != profile.UplinkHTTPMethod || nodeInfo.SessionPlacement != profile.SessionPlacement || nodeInfo.SeqPlacement != profile.SeqPlacement {
-		t.Fatalf("unexpected placement fields: %#v", nodeInfo)
-	}
-	if nodeInfo.UplinkDataKey != profile.UplinkDataKey || nodeInfo.UplinkChunkSize != profile.UplinkChunkSize {
-		t.Fatalf("unexpected uplink data fields: %#v", nodeInfo)
-	}
-	if !nodeInfo.NoGRPCHeader || !nodeInfo.NoSSEHeader {
-		t.Fatal("expected header suppression flags to be copied")
+	if profile.XHTTP.Mode != "existing" {
+		t.Fatalf("expected non-XHTTP transport to be ignored, got mode %q", profile.XHTTP.Mode)
 	}
 }

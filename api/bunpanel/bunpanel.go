@@ -16,6 +16,7 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 	"github.com/Mtoly/XrayRP/common"
 )
 
@@ -446,71 +447,71 @@ func (c *APIClient) ParseNodeInfo(nodeInfoResponse *Server) (*api.NodeInfo, erro
 		}
 	}
 
-	// Determine Host and Path based on transport protocol
-	var host, path, serviceName string
-	var header json.RawMessage
-	var headers map[string]string
-
-	switch transportProtocol {
-	case "ws":
-		host = wsConfig.Headers.Host
-		path = wsConfig.Path
-	case "grpc":
-		serviceName = grpcConfig.ServiceName
-	case "tcp":
-		header = tcpConfig.Header
-	case "splithttp", "xhttp":
-		host = splithttpConfig.Host
-		path = splithttpConfig.Path
-		headers = splithttpConfig.Headers
-	case "httpupgrade":
-		host = httpupgradeConfig.Host
-		path = httpupgradeConfig.Path
-		headers = httpupgradeConfig.Headers
-	default:
-		host = wsConfig.Headers.Host
-		path = wsConfig.Path
-	}
-
 	// Create GeneralNodeInfo
 	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              port,
-		SpeedLimit:        speedLimit,
-		AlterID:           alterID,
-		TransportProtocol: transportProtocol,
-		Host:              host,
-		Path:              path,
-		EnableTLS:         enableTLS,
-		EnableVless:       enableVless,
-		VlessFlow:         nodeConfig.Flow,
-		CypherMethod:      nodeConfig.Method,
-		ServiceName:       serviceName,
-		Header:            header,
-		Headers:           headers,
-		EnableREALITY:     enableREALITY,
-		REALITYConfig:     realityConfig,
-		// XHTTP bypass CDN fields
-		XHTTPMode:           splithttpConfig.Mode,
-		XHTTPExtra:          splithttpConfig.Extra,
-		XPaddingBytes:       splithttpConfig.XPaddingBytes,
-		XPaddingObfsMode:    splithttpConfig.XPaddingObfsMode,
-		XPaddingKey:         splithttpConfig.XPaddingKey,
-		XPaddingHeader:      splithttpConfig.XPaddingHeader,
-		XPaddingPlacement:   splithttpConfig.XPaddingPlacement,
-		XPaddingMethod:      splithttpConfig.XPaddingMethod,
-		UplinkHTTPMethod:    splithttpConfig.UplinkHTTPMethod,
-		SessionPlacement:    splithttpConfig.SessionPlacement,
-		SessionKey:          splithttpConfig.SessionKey,
-		SeqPlacement:        splithttpConfig.SeqPlacement,
-		SeqKey:              splithttpConfig.SeqKey,
-		UplinkDataPlacement: splithttpConfig.UplinkDataPlacement,
-		UplinkDataKey:       splithttpConfig.UplinkDataKey,
-		UplinkChunkSize:     splithttpConfig.UplinkChunkSize,
-		NoGRPCHeader:        splithttpConfig.NoGRPCHeader,
-		NoSSEHeader:         splithttpConfig.NoSSEHeader,
+		NodeType:     c.NodeType,
+		NodeID:       c.NodeID,
+		Port:         port,
+		SpeedLimit:   speedLimit,
+		AlterID:      alterID,
+		CypherMethod: nodeConfig.Method,
 	}
+	webSocketEndpoint := transportprofile.Endpoint{
+		Host: wsConfig.Headers.Host,
+		Path: wsConfig.Path,
+	}
+	xhttpEndpoint := transportprofile.Endpoint{
+		Host:    splithttpConfig.Host,
+		Path:    splithttpConfig.Path,
+		Headers: splithttpConfig.Headers,
+	}
+	transportprofile.Apply(nodeInfo, transportprofile.Input{
+		Protocol: transportProtocol,
+		Endpoints: transportprofile.Endpoints{
+			WebSocket: webSocketEndpoint,
+			GRPC: transportprofile.Endpoint{
+				ServiceName: grpcConfig.ServiceName,
+			},
+			TCP: transportprofile.Endpoint{
+				Header: tcpConfig.Header,
+			},
+			SplitHTTP: xhttpEndpoint,
+			XHTTP:     xhttpEndpoint,
+			HTTPUpgrade: transportprofile.Endpoint{
+				Host:    httpupgradeConfig.Host,
+				Path:    httpupgradeConfig.Path,
+				Headers: httpupgradeConfig.Headers,
+			},
+			Fallback: webSocketEndpoint,
+		},
+		Security: transportprofile.Security{
+			EnableTLS:     enableTLS,
+			EnableVless:   enableVless,
+			EnableREALITY: enableREALITY,
+			VlessFlow:     nodeConfig.Flow,
+			REALITYConfig: realityConfig,
+		},
+		XHTTP: transportprofile.XHTTP{
+			Mode:                splithttpConfig.Mode,
+			Extra:               splithttpConfig.Extra,
+			PaddingBytes:        splithttpConfig.XPaddingBytes,
+			PaddingObfsMode:     splithttpConfig.XPaddingObfsMode,
+			PaddingKey:          splithttpConfig.XPaddingKey,
+			PaddingHeader:       splithttpConfig.XPaddingHeader,
+			PaddingPlacement:    splithttpConfig.XPaddingPlacement,
+			PaddingMethod:       splithttpConfig.XPaddingMethod,
+			UplinkHTTPMethod:    splithttpConfig.UplinkHTTPMethod,
+			SessionPlacement:    splithttpConfig.SessionPlacement,
+			SessionKey:          splithttpConfig.SessionKey,
+			SeqPlacement:        splithttpConfig.SeqPlacement,
+			SeqKey:              splithttpConfig.SeqKey,
+			UplinkDataPlacement: splithttpConfig.UplinkDataPlacement,
+			UplinkDataKey:       splithttpConfig.UplinkDataKey,
+			UplinkChunkSize:     splithttpConfig.UplinkChunkSize,
+			NoGRPCHeader:        splithttpConfig.NoGRPCHeader,
+			NoSSEHeader:         splithttpConfig.NoSSEHeader,
+		},
+	})
 
 	return nodeInfo, nil
 }

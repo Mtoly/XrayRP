@@ -371,6 +371,38 @@ func TestTransportErrorsDoNotPanic(t *testing.T) {
 	}
 }
 
+func TestParseNodeInfoPreservesAdapterSpecificTransportFallbacks(t *testing.T) {
+	client := bunpanel.New(&api.Config{NodeID: contractNodeID, NodeType: "V2ray"})
+	t.Run("unknown transport falls back to websocket endpoint", func(t *testing.T) {
+		node, err := client.ParseNodeInfo(&bunpanel.Server{
+			Port:       8443,
+			Network:    "unknown",
+			WsSettings: json.RawMessage(`{"path":"/fallback","headers":{"Host":"fallback.example"}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if node.TransportProtocol != "unknown" || node.Host != "fallback.example" || node.Path != "/fallback" {
+			t.Fatalf("unexpected fallback node: %#v", node)
+		}
+	})
+
+	t.Run("present XHTTP settings do not fall back to SplitHTTP", func(t *testing.T) {
+		node, err := client.ParseNodeInfo(&bunpanel.Server{
+			Port:              8443,
+			Network:           "xhttp",
+			XHTTPSettings:     json.RawMessage(`{}`),
+			SplitHTTPSettings: json.RawMessage(`{"host":"split.example","path":"/split","mode":"auto"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if node.Host != "" || node.Path != "" || node.XHTTPMode != "" {
+			t.Fatalf("SplitHTTP unexpectedly replaced present XHTTP settings: %#v", node)
+		}
+	})
+}
+
 func integrationClient() *bunpanel.APIClient {
 	return bunpanel.New(&api.Config{
 		APIHost:  "http://localhost:8080",
