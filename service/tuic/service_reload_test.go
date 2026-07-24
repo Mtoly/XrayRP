@@ -440,6 +440,84 @@ func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T
 	}
 }
 
+func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T) {
+	buildErr := errors.New("certificate candidate build failed")
+	service, oldRuntime, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &reloadRuntime{name: "candidate"}
+	renewCalls := 0
+	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+		renewCalls++
+		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+	}
+	builds := 0
+	service.reloadRuntimeFactory = func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error) {
+		builds++
+		if builds == 1 {
+			return nil, "", buildErr
+		}
+		return candidate, "candidate-inbound", nil
+	}
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	service.startRuntime = func(runtimeInstance) error { return nil }
+
+	if err := service.certMonitor(); !errors.Is(err, buildErr) {
+		t.Fatalf("first certMonitor() error = %v, want %v", err, buildErr)
+	}
+	if service.box != oldRuntime {
+		t.Fatalf("failed certificate reload replaced runtime: box=%v want=%v", service.box, oldRuntime)
+	}
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("second certMonitor() error = %v", err)
+	}
+	if service.box != candidate {
+		t.Fatalf("pending certificate reload was not retried: box=%v want=%v", service.box, candidate)
+	}
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("third certMonitor() error = %v", err)
+	}
+	if builds != 2 {
+		t.Fatalf("runtime builds = %d, want one failure and one retry", builds)
+	}
+}
+
+func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
+	closeErr := errors.New("old runtime close failed")
+	service, oldRuntime, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &reloadRuntime{name: "candidate"}
+	renewCalls := 0
+	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+		renewCalls++
+		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+	}
+	builds := 0
+	service.reloadRuntimeFactory = func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error) {
+		builds++
+		return candidate, "candidate-inbound", nil
+	}
+	service.closeRuntime = func(runtime runtimeInstance) error {
+		if runtime == oldRuntime {
+			return closeErr
+		}
+		return nil
+	}
+	service.startRuntime = func(runtimeInstance) error { return nil }
+
+	if err := service.certMonitor(); !errors.Is(err, closeErr) {
+		t.Fatalf("first certMonitor() error = %v, want %v", err, closeErr)
+	}
+	if service.box != candidate {
+		t.Fatalf("certificate runtime was not published: box=%v want=%v", service.box, candidate)
+	}
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("second certMonitor() error = %v", err)
+	}
+	if builds != 1 {
+		t.Fatalf("runtime builds = %d, want no retry after certificate was applied", builds)
+	}
+}
+
 func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	oldTag := service.tag

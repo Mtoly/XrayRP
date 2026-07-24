@@ -92,7 +92,8 @@ type AnyTLSService struct {
 
 	// reloadMu prevents concurrent rebuilds of the underlying sing-box
 	// instance when node configuration or certificates change.
-	reloadMu sync.Mutex
+	reloadMu          sync.Mutex
+	certReloadPending bool
 }
 
 type userRecord struct {

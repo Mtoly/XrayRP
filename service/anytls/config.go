@@ -152,6 +152,7 @@ func (s *AnyTLSService) certMonitor() error {
 
 	s.lifecycleMu.Lock()
 	nodeInfo := s.nodeInfo
+	runtimeBeforeReload := s.box
 	s.lifecycleMu.Unlock()
 	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
@@ -171,9 +172,20 @@ func (s *AnyTLSService) certMonitor() error {
 			return err
 		}
 		if ok {
+			s.certReloadPending = true
 			s.logger.Infof("AnyTLS certificate renewed for %s, reloading node (cert=%s, key=%s)", s.config.CertConfig.CertDomain, certPath, keyPath)
-			return s.reloadNodeLocked(nodeInfo)
 		}
+	}
+
+	if s.certReloadPending {
+		reloadErr := s.reloadNodeLocked(nodeInfo)
+		s.lifecycleMu.Lock()
+		applied := s.state == stateRunning && s.box != runtimeBeforeReload
+		s.lifecycleMu.Unlock()
+		if reloadErr == nil || applied {
+			s.certReloadPending = false
+		}
+		return reloadErr
 	}
 
 	return nil

@@ -635,6 +635,98 @@ func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T
 	}
 }
 
+func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T) {
+	service, _, oldNode := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+	renewCalls := 0
+	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+		renewCalls++
+		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+	}
+	builds := 0
+	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		builds++
+		return &server.Config{}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
+		return candidate, nil
+	}
+	service.serveRuntime = defaultServeRuntime
+	service.closeRuntime = defaultCloseRuntime
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		start()
+		<-started
+		return nil
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	oldNode.NodeType = "unexpected"
+	if err := service.certMonitor(); err == nil {
+		t.Fatal("first certMonitor() error = nil, want invalid applied node error")
+	}
+	oldNode.NodeType = "Hysteria2"
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("second certMonitor() error = %v", err)
+	}
+	if service.server != candidate {
+		t.Fatalf("pending certificate reload was not retried: server=%v want=%v", service.server, candidate)
+	}
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("third certMonitor() error = %v", err)
+	}
+	if builds != 1 {
+		t.Fatalf("runtime builds = %d, want one retry after the pre-replacement failure", builds)
+	}
+}
+
+func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
+	closeErr := errors.New("old runtime close failed")
+	service, oldRuntime, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+	renewCalls := 0
+	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+		renewCalls++
+		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+	}
+	builds := 0
+	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		builds++
+		return &server.Config{}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
+		return candidate, nil
+	}
+	service.serveRuntime = defaultServeRuntime
+	service.closeRuntime = func(runtime runtimeServer) error {
+		err := runtime.Close()
+		if runtime == oldRuntime {
+			return errors.Join(err, closeErr)
+		}
+		return err
+	}
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		start()
+		<-started
+		return nil
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	if err := service.certMonitor(); !errors.Is(err, closeErr) {
+		t.Fatalf("first certMonitor() error = %v, want %v", err, closeErr)
+	}
+	if service.server != candidate {
+		t.Fatalf("certificate runtime was not published: server=%v want=%v", service.server, candidate)
+	}
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("second certMonitor() error = %v", err)
+	}
+	if builds != 1 {
+		t.Fatalf("runtime builds = %d, want no retry after certificate was applied", builds)
+	}
+}
+
 func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	t.Cleanup(func() { _ = service.Close() })
