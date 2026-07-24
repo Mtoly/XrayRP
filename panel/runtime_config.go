@@ -22,6 +22,7 @@ type runtimeConfigPlan struct {
 	mode                    runtimeConfigMode
 	staticNodes             []staticRuntimeNodePlan
 	machineConfig           *MachineConfig
+	machineNewAPIClient     panelClientFactory
 	machineSharedWSEndpoint string
 	showErrorDetails        bool
 }
@@ -29,6 +30,7 @@ type runtimeConfigPlan struct {
 type staticRuntimeNodePlan struct {
 	panelType                string
 	apiConfig                *api.Config
+	newAPIClient             panelClientFactory
 	controllerConfigTemplate *controller.Config
 	fallbackNodeType         string
 }
@@ -49,12 +51,13 @@ func buildRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
 
 	plan.showErrorDetails = config.ShowErrorDetails()
 	if config.MachineConfig != nil && config.MachineConfig.Enable {
-		machineConfig, sharedWSEndpoint, err := buildMachineRuntimeConfigPlan(config, plan.showErrorDetails)
+		machineConfig, newAPIClient, sharedWSEndpoint, err := buildMachineRuntimeConfigPlan(config, plan.showErrorDetails)
 		if err != nil {
 			return plan, err
 		}
 		plan.mode = runtimeConfigModeMachine
 		plan.machineConfig = machineConfig
+		plan.machineNewAPIClient = newAPIClient
 		plan.machineSharedWSEndpoint = sharedWSEndpoint
 		return plan, nil
 	}
@@ -69,11 +72,13 @@ func buildRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
 
 func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([]staticRuntimeNodePlan, error) {
 	plans := make([]staticRuntimeNodePlan, 0, len(nodes))
+	adapterRegistry := defaultPanelAdapterRegistry()
 	for index, node := range nodes {
 		if node == nil {
 			return nil, fmt.Errorf("static node config at index %d must not be nil", index)
 		}
-		if err := validateStaticPanelType(node.PanelType); err != nil {
+		newAPIClient, err := adapterRegistry.staticFactory(node.PanelType)
+		if err != nil {
 			return nil, err
 		}
 		if node.ApiConfig == nil {
@@ -87,6 +92,7 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 		plans = append(plans, staticRuntimeNodePlan{
 			panelType:                node.PanelType,
 			apiConfig:                &apiConfig,
+			newAPIClient:             newAPIClient,
 			controllerConfigTemplate: controllerConfig,
 			fallbackNodeType:         apiConfig.NodeType,
 		})
@@ -94,40 +100,28 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 	return plans, nil
 }
 
-func validateStaticPanelType(panelType string) error {
-	switch panelType {
-	case "SSpanel", "SSPanel", "NewV2board", "V2board", "PMpanel", "Proxypanel", "V2RaySocks", "GoV2Panel", "BunPanel":
-		return nil
-	default:
-		return fmt.Errorf("unsupported panel type: %s", panelType)
-	}
-}
-
-func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*MachineConfig, string, error) {
+func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*MachineConfig, panelClientFactory, string, error) {
 	machineConfig := config.MachineConfig
 	if len(config.NodesConfig) > 0 {
-		return nil, "", fmt.Errorf("machine mode cannot be enabled with static Nodes config")
+		return nil, nil, "", fmt.Errorf("machine mode cannot be enabled with static Nodes config")
 	}
 	if strings.TrimSpace(machineConfig.ApiHost) == "" {
-		return nil, "", fmt.Errorf("machine mode ApiHost must not be empty")
+		return nil, nil, "", fmt.Errorf("machine mode ApiHost must not be empty")
 	}
 	if machineConfig.MachineID <= 0 {
-		return nil, "", fmt.Errorf("machine mode MachineID must be greater than 0")
+		return nil, nil, "", fmt.Errorf("machine mode MachineID must be greater than 0")
 	}
 	if strings.TrimSpace(machineConfig.Token) == "" {
-		return nil, "", fmt.Errorf("machine mode Token must not be empty")
+		return nil, nil, "", fmt.Errorf("machine mode Token must not be empty")
 	}
-	switch panelType := strings.TrimSpace(machineConfig.PanelType); panelType {
-	case "":
-		return nil, "", fmt.Errorf("machine mode PanelType must not be empty")
-	case "NewV2board", "V2board":
-	default:
-		return nil, "", fmt.Errorf("unsupported panel type for machine mode: %s", machineConfig.PanelType)
+	newAPIClient, err := defaultPanelAdapterRegistry().machineFactory(machineConfig.PanelType)
+	if err != nil {
+		return nil, nil, "", err
 	}
 
 	controllerConfig, err := buildRuntimeControllerConfig(machineConfig.ControllerConfig, showErrorDetails)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	sharedWSEndpoint := ""
 	if wsConfig := controllerConfig.WebSocketConfig; wsConfig != nil && wsConfig.Enable {
@@ -137,14 +131,14 @@ func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*Mach
 			Key:       machineConfig.Token,
 		}, wsConfig)
 		if err != nil {
-			return nil, "", err
+			return nil, nil, "", err
 		}
 		sharedWSEndpoint = endpoint
 	}
 
 	snapshot := *machineConfig
 	snapshot.ControllerConfig = controllerConfig
-	return &snapshot, sharedWSEndpoint, nil
+	return &snapshot, newAPIClient, sharedWSEndpoint, nil
 }
 
 func buildRuntimeControllerConfig(template *controller.Config, showErrorDetails bool) (*controller.Config, error) {

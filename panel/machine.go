@@ -2,7 +2,6 @@ package panel
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -86,7 +85,7 @@ type machineRuntimeNode struct {
 }
 
 func (plan machineRuntimeNodePlan) useSharedWSRuntime() bool {
-	return plan.sharedWS != nil && machineSharedWSSupportedNodeType(plan.binding.NodeType)
+	return plan.sharedWS != nil && defaultRuntimeServiceRegistry().supportsSharedWS(plan.binding.NodeType)
 }
 
 func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, nodePlan machineRuntimeNodePlan, plan runtimeConfigPlan) (service.Service, error) {
@@ -96,22 +95,23 @@ func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, nodePlan m
 	}
 
 	machineConfig := plan.machineConfig
-	if nodePlan.useSharedWSRuntime() {
-		controllerService := controller.New(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
-		controllerService.SetWSEventRuntimeFactory(nodePlan.sharedWS.NewNodeRuntimeFactory(nodePlan.binding.NodeID))
-		return controllerService, nil
+	construction := runtimeServiceConstruction{
+		server:           server,
+		apiClient:        runtimeNode.apiClient,
+		controllerConfig: runtimeNode.controllerConfig,
+		panelType:        machineConfig.PanelType,
 	}
-
-	return p.buildNodeService(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
+	if nodePlan.useSharedWSRuntime() {
+		construction.wsEventRuntimeFactory = nodePlan.sharedWS.NewNodeRuntimeFactory(nodePlan.binding.NodeID)
+	}
+	return defaultRuntimeServiceRegistry().build(construction, ""), nil
 }
 
 func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRuntimeNodePlan, logger *log.Entry) (*machineRuntimeNode, error) {
 	apiConfig := plan.machineNodeAPIConfig(nodePlan.binding)
 	newAPIClient := nodePlan.newAPIClient
 	if newAPIClient == nil {
-		newAPIClient = func(apiConfig *api.Config) runtimePanelClient {
-			return newV2board.New(apiConfig)
-		}
+		newAPIClient = plan.machineNewAPIClient
 	}
 	apiClient := newAPIClient(apiConfig)
 
@@ -170,13 +170,4 @@ func buildMachineSharedWSRuntime(wsConfig *controller.WebSocketConfig, endpoint 
 		ResyncOnReconnect: wsConfig.ResyncOnReconnect,
 		Logger:            logger,
 	})
-}
-
-func machineSharedWSSupportedNodeType(nodeType string) bool {
-	switch strings.ToLower(strings.TrimSpace(nodeType)) {
-	case "hysteria", "hysteria2", "tuic", "anytls":
-		return false
-	default:
-		return true
-	}
 }

@@ -41,6 +41,9 @@ func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
 		plan.staticNodes[0].controllerConfigTemplate.UpdatePeriodic != controllerTemplate.UpdatePeriodic {
 		t.Fatalf("expected first static node values to be preserved, got %#v", plan.staticNodes[0])
 	}
+	if plan.staticNodes[0].newAPIClient == nil || plan.staticNodes[1].newAPIClient == nil {
+		t.Fatal("expected static node plans to retain validated adapter factories")
+	}
 	if plan.staticNodes[0].fallbackNodeType != "Hysteria2" {
 		t.Fatalf("expected fallback node type Hysteria2, got %q", plan.staticNodes[0].fallbackNodeType)
 	}
@@ -141,59 +144,6 @@ func TestBuildRuntimeConfigPlanSnapshotsStaticInputs(t *testing.T) {
 	}
 }
 
-func TestRuntimeNodeServiceTypeUsesFallbackWhenDescribeNodeTypeEmpty(t *testing.T) {
-	client := &runtimeNodeServiceTestAPI{clientInfo: api.ClientInfo{NodeType: ""}}
-
-	if got := runtimeNodeServiceType(client, "Hysteria2"); got != "Hysteria2" {
-		t.Fatalf("expected fallback node type Hysteria2, got %q", got)
-	}
-}
-
-func TestRuntimeNodeServiceTypePrefersDescribedNodeType(t *testing.T) {
-	client := &runtimeNodeServiceTestAPI{clientInfo: api.ClientInfo{NodeType: "Tuic"}}
-
-	if got := runtimeNodeServiceType(client, "Hysteria2"); got != "Tuic" {
-		t.Fatalf("expected described node type Tuic, got %q", got)
-	}
-}
-
-func TestRuntimeNodeServiceKindForNodeType(t *testing.T) {
-	tests := []struct {
-		name     string
-		nodeType string
-		want     runtimeNodeServiceKind
-	}{
-		{name: "hysteria2", nodeType: "Hysteria2", want: runtimeNodeServiceHysteria2},
-		{name: "hysteria alias", nodeType: "Hysteria", want: runtimeNodeServiceHysteria2},
-		{name: "hysteria case insensitive", nodeType: "hYsTeRiA2", want: runtimeNodeServiceHysteria2},
-		{name: "tuic", nodeType: "Tuic", want: runtimeNodeServiceTuic},
-		{name: "tuic case insensitive", nodeType: "tuic", want: runtimeNodeServiceTuic},
-		{name: "anytls", nodeType: "AnyTLS", want: runtimeNodeServiceAnyTLS},
-		{name: "anytls case insensitive", nodeType: "anytls", want: runtimeNodeServiceAnyTLS},
-		{name: "vless falls back", nodeType: "Vless", want: runtimeNodeServiceController},
-		{name: "vmess falls back", nodeType: "Vmess", want: runtimeNodeServiceController},
-		{name: "trojan falls back", nodeType: "Trojan", want: runtimeNodeServiceController},
-		{name: "shadowsocks falls back", nodeType: "Shadowsocks", want: runtimeNodeServiceController},
-		{name: "socks falls back", nodeType: "Socks", want: runtimeNodeServiceController},
-		{name: "http falls back", nodeType: "HTTP", want: runtimeNodeServiceController},
-		{name: "empty falls back", nodeType: "", want: runtimeNodeServiceController},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := runtimeNodeServiceKindForNodeType(test.nodeType); got != test.want {
-				t.Fatalf("expected %q, got %q", test.want, got)
-			}
-		})
-	}
-}
-
-type runtimeNodeServiceTestAPI struct {
-	clientInfo api.ClientInfo
-}
-
-func (a *runtimeNodeServiceTestAPI) Describe() api.ClientInfo { return a.clientInfo }
-
 func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	config := validMachineModeConfig()
 	config.LogConfig = &LogConfig{ShowErrorDetails: true}
@@ -209,6 +159,9 @@ func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	if plan.machineConfig == config.MachineConfig {
 		t.Fatal("expected machine config snapshot to be independently owned")
 	}
+	if plan.machineNewAPIClient == nil {
+		t.Fatal("expected machine plan to retain its validated adapter factory")
+	}
 	if plan.machineConfig.ApiHost != config.MachineConfig.ApiHost ||
 		plan.machineConfig.MachineID != config.MachineConfig.MachineID ||
 		plan.machineConfig.Token != config.MachineConfig.Token {
@@ -219,6 +172,22 @@ func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	}
 	if !plan.showErrorDetails {
 		t.Fatal("expected ShowErrorDetails to be carried into runtime plan")
+	}
+}
+
+func TestBuildRuntimeConfigPlanPreservesRawMachinePanelAlias(t *testing.T) {
+	config := validMachineModeConfig()
+	config.MachineConfig.PanelType = " V2board "
+
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.machineConfig.PanelType != " V2board " {
+		t.Fatalf("machine PanelType = %q, want raw alias preserved", plan.machineConfig.PanelType)
+	}
+	if plan.machineNewAPIClient == nil {
+		t.Fatal("expected trimmed alias validation to retain a machine adapter factory")
 	}
 }
 

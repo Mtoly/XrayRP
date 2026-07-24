@@ -3,26 +3,13 @@ package panel
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/core"
 
-	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/api/bunpanel"
-	"github.com/Mtoly/XrayRP/api/gov2panel"
-	"github.com/Mtoly/XrayRP/api/newV2board"
-	"github.com/Mtoly/XrayRP/api/pmpanel"
-	"github.com/Mtoly/XrayRP/api/proxypanel"
-	"github.com/Mtoly/XrayRP/api/sspanel"
-	"github.com/Mtoly/XrayRP/api/v2raysocks"
 	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/service"
-	"github.com/Mtoly/XrayRP/service/anytls"
-	"github.com/Mtoly/XrayRP/service/controller"
-	"github.com/Mtoly/XrayRP/service/hysteria2"
-	"github.com/Mtoly/XrayRP/service/tuic"
 )
 
 // Panel Structure
@@ -209,27 +196,10 @@ func (p *Panel) logLifecycleError(message string, err error) {
 
 func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
 	services := make([]service.Service, 0, len(plan.staticNodes))
+	runtimeRegistry := defaultRuntimeServiceRegistry()
 	for _, nodePlan := range plan.staticNodes {
 		apiConfig := *nodePlan.apiConfig
-		var apiClient runtimePanelClient
-		switch nodePlan.panelType {
-		case "SSpanel", "SSPanel":
-			apiClient = sspanel.New(&apiConfig)
-		case "NewV2board", "V2board":
-			apiClient = newV2board.New(&apiConfig)
-		case "PMpanel":
-			apiClient = pmpanel.New(&apiConfig)
-		case "Proxypanel":
-			apiClient = proxypanel.New(&apiConfig)
-		case "V2RaySocks":
-			apiClient = v2raysocks.New(&apiConfig)
-		case "GoV2Panel":
-			apiClient = gov2panel.New(&apiConfig)
-		case "BunPanel":
-			apiClient = bunpanel.New(&apiConfig)
-		default:
-			return nil, fmt.Errorf("unsupported panel type: %s", nodePlan.panelType)
-		}
+		apiClient := nodePlan.newAPIClient(&apiConfig)
 
 		controllerConfig, err := nodePlan.materializeControllerConfig()
 		if err != nil {
@@ -237,80 +207,15 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 		}
 		materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
 
-		controllerService, err := p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, nodePlan.panelType, nodePlan.fallbackNodeType)
-		if err != nil {
-			return nil, err
-		}
-		services = append(services, controllerService)
+		runtimeService := runtimeRegistry.build(runtimeServiceConstruction{
+			server:           server,
+			apiClient:        apiClient,
+			controllerConfig: controllerConfig,
+			panelType:        nodePlan.panelType,
+		}, nodePlan.fallbackNodeType)
+		services = append(services, runtimeService)
 	}
 	return services, nil
-}
-
-type runtimePanelClient interface {
-	Describe() api.ClientInfo
-	GetNodeInfo() (*api.NodeInfo, error)
-	GetUserList() (*[]api.UserInfo, error)
-	GetNodeRule() (*[]api.DetectRule, error)
-	ReportNodeStatus(*api.NodeStatus) error
-	ReportNodeOnlineUsers(*[]api.OnlineUser) error
-	ReportUserTraffic(*[]api.UserTraffic) error
-	ReportIllegal(*[]api.DetectResult) error
-}
-
-func (p *Panel) buildNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType string) (service.Service, error) {
-	return p.buildNodeServiceWithFallbackNodeType(server, apiClient, controllerConfig, panelType, "")
-}
-
-func (p *Panel) buildNodeServiceWithFallbackNodeType(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, fallbackNodeType string) (service.Service, error) {
-	nodeType := runtimeNodeServiceType(apiClient, fallbackNodeType)
-	return p.buildRuntimeNodeService(server, apiClient, controllerConfig, panelType, nodeType)
-}
-
-type runtimeNodeServiceKind string
-
-const (
-	runtimeNodeServiceController runtimeNodeServiceKind = "controller"
-	runtimeNodeServiceHysteria2  runtimeNodeServiceKind = "hysteria2"
-	runtimeNodeServiceTuic       runtimeNodeServiceKind = "tuic"
-	runtimeNodeServiceAnyTLS     runtimeNodeServiceKind = "anytls"
-)
-
-type describer interface {
-	Describe() api.ClientInfo
-}
-
-func runtimeNodeServiceType(apiClient describer, fallbackNodeType string) string {
-	nodeType := apiClient.Describe().NodeType
-	if nodeType == "" {
-		return fallbackNodeType
-	}
-	return nodeType
-}
-
-func runtimeNodeServiceKindForNodeType(nodeType string) runtimeNodeServiceKind {
-	switch {
-	case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
-		return runtimeNodeServiceHysteria2
-	case strings.EqualFold(nodeType, "Tuic"):
-		return runtimeNodeServiceTuic
-	case strings.EqualFold(nodeType, "AnyTLS"):
-		return runtimeNodeServiceAnyTLS
-	default:
-		return runtimeNodeServiceController
-	}
-}
-
-func (p *Panel) buildRuntimeNodeService(server *core.Instance, apiClient runtimePanelClient, controllerConfig *controller.Config, panelType, nodeType string) (service.Service, error) {
-	switch runtimeNodeServiceKindForNodeType(nodeType) {
-	case runtimeNodeServiceHysteria2:
-		return hysteria2.New(apiClient, controllerConfig), nil
-	case runtimeNodeServiceTuic:
-		return tuic.New(apiClient, controllerConfig), nil
-	case runtimeNodeServiceAnyTLS:
-		return anytls.New(apiClient, controllerConfig), nil
-	default:
-		return controller.New(server, apiClient, controllerConfig, panelType), nil
-	}
 }
 
 // Close the panel
