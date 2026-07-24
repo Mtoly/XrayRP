@@ -8,7 +8,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
@@ -19,7 +18,7 @@ func TestValidateMachineModeRejectsStaticNodes(t *testing.T) {
 	config := validMachineModeConfig()
 	config.NodesConfig = []*NodesConfig{{PanelType: "SSPanel"}}
 
-	err := validateMachineModeConfig(config)
+	_, err := buildRuntimeConfigPlan(config)
 	if err == nil {
 		t.Fatal("expected static Nodes conflict error")
 	}
@@ -34,25 +33,12 @@ func TestValidateMachineModeAllowsWebSocketEnabled(t *testing.T) {
 		WebSocketConfig: &controller.WebSocketConfig{Enable: true},
 	}
 
-	err := validateMachineModeConfig(config)
+	plan, err := buildRuntimeConfigPlan(config)
 	if err != nil {
 		t.Fatalf("expected WebSocket config to be valid in machine mode, got %v", err)
 	}
-}
-
-func TestBuildMachineSupervisorRejectsStaticPlan(t *testing.T) {
-	panel := New(validMachineModeConfig())
-	plan := runtimeConfigPlan{mode: runtimeConfigModeStatic}
-
-	service, err := panel.buildMachineSupervisor(nil, plan)
-	if err == nil {
-		t.Fatal("expected static runtime plan error")
-	}
-	if service != nil {
-		t.Fatalf("expected no supervisor service, got %T", service)
-	}
-	if !strings.Contains(err.Error(), "machine mode") {
-		t.Fatalf("expected machine mode error, got %v", err)
+	if plan.machineSharedWSEndpoint == "" {
+		t.Fatal("expected shared WebSocket endpoint to be resolved during plan construction")
 	}
 }
 
@@ -132,7 +118,7 @@ func TestValidateMachineModeRejectsInvalidMachineCredentials(t *testing.T) {
 			config := validMachineModeConfig()
 			test.mutate(config.MachineConfig)
 
-			err := validateMachineModeConfig(config)
+			_, err := buildRuntimeConfigPlan(config)
 			if err == nil {
 				t.Fatalf("expected error containing %q", test.want)
 			}
@@ -143,56 +129,21 @@ func TestValidateMachineModeRejectsInvalidMachineCredentials(t *testing.T) {
 	}
 }
 
-func TestBuildMachineReportingConfigUsesNewV2boardReporter(t *testing.T) {
-	discoveryConfig := newV2board.MachineDiscoveryConfig{
-		APIHost:   "https://panel.example.com",
-		MachineID: 7,
-		Token:     "machine-token",
-		Timeout:   3 * time.Second,
-	}
-
-	reportingConfig := buildMachineReportingConfig(discoveryConfig)
-	if reportingConfig.Collector != nil {
-		t.Fatalf("expected reporting config to leave collector unset for supervisor default, got %T", reportingConfig.Collector)
-	}
-	if reportingConfig.StatusInterval != 0 || reportingConfig.MinStatusInterval != 0 {
-		t.Fatalf("expected reporting config to leave status intervals unchanged, got %#v", reportingConfig)
-	}
-	reporter, ok := reportingConfig.Reporter.(*newV2boardMachineStatusReporter)
-	if !ok {
-		t.Fatalf("expected newV2board machine status reporter, got %T", reportingConfig.Reporter)
-	}
-	if reporter.config != discoveryConfig {
-		t.Fatalf("expected reporter to use discovery config %#v, got %#v", discoveryConfig, reporter.config)
-	}
-}
-
-func TestBuildMachineStatusReporterUsesSameMachineDiscoveryConfig(t *testing.T) {
-	discoveryConfig := newV2board.MachineDiscoveryConfig{
-		APIHost:   " https://panel.example.com ",
-		MachineID: 42,
-		Token:     " machine-token ",
-		Timeout:   31 * time.Second,
-	}
-
-	reporter, ok := buildMachineStatusReporter(discoveryConfig).(*newV2boardMachineStatusReporter)
-	if !ok {
-		t.Fatalf("expected newV2board machine status reporter, got %T", reporter)
-	}
-	if reporter.config != discoveryConfig {
-		t.Fatalf("expected reporter config %#v, got %#v", discoveryConfig, reporter.config)
-	}
-}
-
 func TestBuildMachineDiscoveryConfigPreservesMachineConfigFields(t *testing.T) {
 	machineConfig := &MachineConfig{
+		Enable:    true,
+		PanelType: "NewV2board",
 		ApiHost:   " https://panel.example.com ",
 		MachineID: 42,
 		Token:     " machine-token ",
 		Timeout:   31,
 	}
 
-	discoveryConfig := buildMachineDiscoveryConfig(machineConfig)
+	plan, err := buildRuntimeConfigPlan(&Config{MachineConfig: machineConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryConfig := plan.machineDiscoveryConfig()
 	if discoveryConfig.APIHost != machineConfig.ApiHost {
 		t.Fatalf("expected APIHost %q, got %q", machineConfig.ApiHost, discoveryConfig.APIHost)
 	}
@@ -207,25 +158,10 @@ func TestBuildMachineDiscoveryConfigPreservesMachineConfigFields(t *testing.T) {
 	}
 }
 
-func TestBuildMachineDiscovererUsesNewV2boardDiscoverer(t *testing.T) {
-	discoveryConfig := newV2board.MachineDiscoveryConfig{
-		APIHost:   "https://panel.example.com",
-		MachineID: 7,
-		Token:     "machine-token",
-		Timeout:   3 * time.Second,
-	}
-
-	discoverer, ok := buildMachineDiscoverer(discoveryConfig).(*machine.NewV2boardDiscoverer)
-	if !ok {
-		t.Fatalf("expected newV2board machine discoverer, got %T", discoverer)
-	}
-	if discoverer.Config != discoveryConfig {
-		t.Fatalf("expected discoverer config %#v, got %#v", discoveryConfig, discoverer.Config)
-	}
-}
-
 func TestBuildMachineNodeAPIConfigIncludesMachineID(t *testing.T) {
 	machineConfig := &MachineConfig{
+		Enable:    true,
+		PanelType: "NewV2board",
 		ApiHost:   " https://panel.example.com ",
 		MachineID: 42,
 		Token:     " machine-token ",
@@ -236,7 +172,11 @@ func TestBuildMachineNodeAPIConfigIncludesMachineID(t *testing.T) {
 		NodeType: "VLESS",
 	}
 
-	apiConfig := buildMachineNodeAPIConfig(machineConfig, binding)
+	plan, err := buildRuntimeConfigPlan(&Config{MachineConfig: machineConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiConfig := plan.machineNodeAPIConfig(binding)
 	if apiConfig == nil {
 		t.Fatal("expected api config")
 	}
@@ -279,11 +219,17 @@ func TestBuildMachineControllerConfigReturnsFreshConfigPerNode(t *testing.T) {
 		},
 	}
 
-	cfg1, err := buildMachineNodeControllerConfig(template)
+	config := validMachineModeConfig()
+	config.MachineConfig.ControllerConfig = template
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg1, err := plan.machineNodeControllerConfig()
 	if err != nil {
 		t.Fatalf("build first controller config: %v", err)
 	}
-	cfg2, err := buildMachineNodeControllerConfig(template)
+	cfg2, err := plan.machineNodeControllerConfig()
 	if err != nil {
 		t.Fatalf("build second controller config: %v", err)
 	}
@@ -371,6 +317,7 @@ func TestApplyPanelCertConfigUsesDNSOnlyWhenPanelProvidesDNSFields(t *testing.T)
 func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(t *testing.T) {
 	panel := New(&Config{})
 	machineConfig := &MachineConfig{
+		Enable:    true,
 		PanelType: "NewV2board",
 		ApiHost:   "https://panel.example.com",
 		MachineID: 42,
@@ -387,10 +334,16 @@ func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(
 	var materializedControllerConfig *controller.Config
 	var materializedLogger *log.Entry
 
-	runtimeNode, err := panel.materializeMachineRuntimeNode(machineRuntimeNodePlan{
-		machineConfig:    machineConfig,
-		binding:          binding,
-		showErrorDetails: true,
+	config := &Config{
+		LogConfig:     &LogConfig{ShowErrorDetails: true},
+		MachineConfig: machineConfig,
+	}
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeNode, err := plan.materializeMachineRuntimeNode(machineRuntimeNodePlan{
+		binding: binding,
 		newAPIClient: func(config *api.Config) runtimePanelClient {
 			gotAPIConfig = config
 			return client
@@ -401,7 +354,7 @@ func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(
 			materializedLogger = logger
 			controllerConfig.CertConfig = &mylego.CertConfig{CertMode: "file", CertFile: "/panel/cert.crt", KeyFile: "/panel/cert.key"}
 		},
-	})
+	}, panel.logger)
 	if err != nil {
 		t.Fatalf("materialize machine runtime node: %v", err)
 	}

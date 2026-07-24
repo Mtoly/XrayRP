@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -24,103 +23,46 @@ func (r *newV2boardMachineStatusReporter) ReportMachineStatus(status api.Machine
 	return newV2board.ReportMachineStatus(r.config, status)
 }
 
-func buildMachineStatusReporter(config newV2board.MachineDiscoveryConfig) machine.MachineStatusReporter {
-	return &newV2boardMachineStatusReporter{config: config}
-}
-
-func buildMachineReportingConfig(config newV2board.MachineDiscoveryConfig) machine.MachineStatusReporterConfig {
-	return machine.MachineStatusReporterConfig{
-		Reporter: buildMachineStatusReporter(config),
-	}
-}
-
-func buildMachineDiscoveryConfig(machineConfig *MachineConfig) newV2board.MachineDiscoveryConfig {
-	if machineConfig == nil {
+func (plan runtimeConfigPlan) machineDiscoveryConfig() newV2board.MachineDiscoveryConfig {
+	if plan.machineConfig == nil {
 		return newV2board.MachineDiscoveryConfig{}
 	}
 	return newV2board.MachineDiscoveryConfig{
-		APIHost:   machineConfig.ApiHost,
-		MachineID: machineConfig.MachineID,
-		Token:     machineConfig.Token,
-		Timeout:   time.Duration(machineConfig.Timeout) * time.Second,
+		APIHost:   plan.machineConfig.ApiHost,
+		MachineID: plan.machineConfig.MachineID,
+		Token:     plan.machineConfig.Token,
+		Timeout:   time.Duration(plan.machineConfig.Timeout) * time.Second,
 	}
-}
-
-func buildMachineDiscoverer(config newV2board.MachineDiscoveryConfig) machine.NodeDiscoverer {
-	return &machine.NewV2boardDiscoverer{Config: config}
-}
-
-func machineModeEnabled(config *Config) bool {
-	return config != nil && config.MachineConfig != nil && config.MachineConfig.Enable
-}
-
-func validateMachineModeConfig(config *Config) error {
-	if !machineModeEnabled(config) {
-		return nil
-	}
-
-	machineConfig := config.MachineConfig
-	if len(config.NodesConfig) > 0 {
-		return fmt.Errorf("machine mode cannot be enabled with static Nodes config")
-	}
-	if strings.TrimSpace(machineConfig.ApiHost) == "" {
-		return fmt.Errorf("machine mode ApiHost must not be empty")
-	}
-	if machineConfig.MachineID <= 0 {
-		return fmt.Errorf("machine mode MachineID must be greater than 0")
-	}
-	if strings.TrimSpace(machineConfig.Token) == "" {
-		return fmt.Errorf("machine mode Token must not be empty")
-	}
-
-	switch panelType := strings.TrimSpace(machineConfig.PanelType); panelType {
-	case "":
-		return fmt.Errorf("machine mode PanelType must not be empty")
-	case "NewV2board", "V2board":
-	default:
-		return fmt.Errorf("unsupported panel type for machine mode: %s", machineConfig.PanelType)
-	}
-
-	if _, err := buildMachineNodeControllerConfig(machineConfig.ControllerConfig); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (p *Panel) buildMachineSupervisor(server *core.Instance, plan runtimeConfigPlan) (service.Service, error) {
-	if plan.mode != runtimeConfigModeMachine {
-		return nil, fmt.Errorf("machine mode is not enabled")
-	}
-
 	mc := plan.machineConfig
-	baseControllerConfig, err := buildMachineNodeControllerConfigWithOptions(mc.ControllerConfig, runtimeControllerConfigOptions{
-		showErrorDetails: plan.showErrorDetails,
-		clone:            true,
-	})
+	baseControllerConfig, err := plan.machineNodeControllerConfig()
 	if err != nil {
 		return nil, err
 	}
-	sharedWS, err := buildMachineSharedWSRuntime(mc, baseControllerConfig.WebSocketConfig, p.logger.WithField("service", "machine-websocket"))
-	if err != nil {
-		return nil, err
-	}
+	sharedWS := buildMachineSharedWSRuntime(
+		baseControllerConfig.WebSocketConfig,
+		plan.machineSharedWSEndpoint,
+		p.logger.WithField("service", "machine-websocket"),
+	)
 
-	discoveryConfig := buildMachineDiscoveryConfig(mc)
-	discoverer := buildMachineDiscoverer(discoveryConfig)
+	discoveryConfig := plan.machineDiscoveryConfig()
+	discoverer := &machine.NewV2boardDiscoverer{Config: discoveryConfig}
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
 		return p.buildMachineRuntimeNodeService(server, machineRuntimeNodePlan{
-			machineConfig:    mc,
-			binding:          binding,
-			sharedWS:         sharedWS,
-			showErrorDetails: plan.showErrorDetails,
-		})
+			binding:  binding,
+			sharedWS: sharedWS,
+		}, plan)
 	}
 
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
-		MachineStatus:     buildMachineReportingConfig(discoveryConfig),
-		Logger:            p.logger.WithField("service", "machine-supervisor"),
-		ShowErrorDetails:  plan.showErrorDetails,
+		MachineStatus: machine.MachineStatusReporterConfig{
+			Reporter: &newV2boardMachineStatusReporter{config: discoveryConfig},
+		},
+		Logger:           p.logger.WithField("service", "machine-supervisor"),
+		ShowErrorDetails: plan.showErrorDetails,
 	}, discoverer, factory)
 	if err != nil {
 		return nil, err
@@ -132,10 +74,8 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance, plan runtimeConfig
 }
 
 type machineRuntimeNodePlan struct {
-	machineConfig         *MachineConfig
 	binding               machine.NodeBinding
 	sharedWS              *machine.SharedWSRuntime
-	showErrorDetails      bool
 	newAPIClient          func(*api.Config) runtimePanelClient
 	materializeCertConfig func(any, *controller.Config, *log.Entry)
 }
@@ -149,26 +89,25 @@ func (plan machineRuntimeNodePlan) useSharedWSRuntime() bool {
 	return plan.sharedWS != nil && machineSharedWSSupportedNodeType(plan.binding.NodeType)
 }
 
-func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, plan machineRuntimeNodePlan) (service.Service, error) {
-	runtimeNode, err := p.materializeMachineRuntimeNode(plan)
+func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, nodePlan machineRuntimeNodePlan, plan runtimeConfigPlan) (service.Service, error) {
+	runtimeNode, err := plan.materializeMachineRuntimeNode(nodePlan, p.logger)
 	if err != nil {
 		return nil, err
 	}
 
 	machineConfig := plan.machineConfig
-	if plan.useSharedWSRuntime() {
+	if nodePlan.useSharedWSRuntime() {
 		controllerService := controller.New(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
-		controllerService.SetWSEventRuntimeFactory(plan.sharedWS.NewNodeRuntimeFactory(plan.binding.NodeID))
+		controllerService.SetWSEventRuntimeFactory(nodePlan.sharedWS.NewNodeRuntimeFactory(nodePlan.binding.NodeID))
 		return controllerService, nil
 	}
 
 	return p.buildNodeService(server, runtimeNode.apiClient, runtimeNode.controllerConfig, machineConfig.PanelType)
 }
 
-func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*machineRuntimeNode, error) {
-	machineConfig := plan.machineConfig
-	apiConfig := buildMachineNodeAPIConfig(machineConfig, plan.binding)
-	newAPIClient := plan.newAPIClient
+func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRuntimeNodePlan, logger *log.Entry) (*machineRuntimeNode, error) {
+	apiConfig := plan.machineNodeAPIConfig(nodePlan.binding)
+	newAPIClient := nodePlan.newAPIClient
 	if newAPIClient == nil {
 		newAPIClient = func(apiConfig *api.Config) runtimePanelClient {
 			return newV2board.New(apiConfig)
@@ -176,20 +115,17 @@ func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*mac
 	}
 	apiClient := newAPIClient(apiConfig)
 
-	controllerConfig, err := buildMachineNodeControllerConfigWithOptions(machineConfig.ControllerConfig, runtimeControllerConfigOptions{
-		showErrorDetails: plan.showErrorDetails,
-		clone:            true,
-	})
+	controllerConfig, err := plan.machineNodeControllerConfig()
 	if err != nil {
 		return nil, err
 	}
-	materializeCertConfig := plan.materializeCertConfig
+	materializeCertConfig := nodePlan.materializeCertConfig
 	if materializeCertConfig == nil {
 		materializeCertConfig = materializeRuntimeCertConfig
 	}
-	materializeCertConfig(apiClient, controllerConfig, p.logger)
-	if plan.sharedWS != nil {
-		apiClient = machine.WrapAPIWithReporter(apiClient, plan.binding.NodeID, plan.sharedWS)
+	materializeCertConfig(apiClient, controllerConfig, logger)
+	if nodePlan.sharedWS != nil {
+		apiClient = machine.WrapAPIWithReporter(apiClient, nodePlan.binding.NodeID, nodePlan.sharedWS)
 	}
 
 	return &machineRuntimeNode{
@@ -198,11 +134,12 @@ func (p *Panel) materializeMachineRuntimeNode(plan machineRuntimeNodePlan) (*mac
 	}, nil
 }
 
-func buildMachineNodeAPIConfig(machineConfig *MachineConfig, binding machine.NodeBinding) *api.Config {
+func (plan runtimeConfigPlan) machineNodeAPIConfig(binding machine.NodeBinding) *api.Config {
 	apiConfig := &api.Config{
 		NodeID:   binding.NodeID,
 		NodeType: binding.NodeType,
 	}
+	machineConfig := plan.machineConfig
 	if machineConfig == nil {
 		return apiConfig
 	}
@@ -214,36 +151,25 @@ func buildMachineNodeAPIConfig(machineConfig *MachineConfig, binding machine.Nod
 	return apiConfig
 }
 
-func buildMachineNodeControllerConfig(template *controller.Config) (*controller.Config, error) {
-	return buildMachineNodeControllerConfigWithOptions(template, runtimeControllerConfigOptions{clone: true})
-}
-
-func buildMachineNodeControllerConfigWithOptions(template *controller.Config, options runtimeControllerConfigOptions) (*controller.Config, error) {
-	options.clone = true
-	return materializeRuntimeControllerConfig(template, options)
-}
-
-func buildMachineSharedWSRuntime(machineConfig *MachineConfig, wsConfig *controller.WebSocketConfig, logger *log.Entry) (*machine.SharedWSRuntime, error) {
-	if machineConfig == nil || wsConfig == nil || !wsConfig.Enable {
-		return nil, nil
-	}
-
-	endpoint, err := controller.BuildWSEndpoint(&api.WSConfig{
-		APIHost:   machineConfig.ApiHost,
-		MachineID: machineConfig.MachineID,
-		Key:       machineConfig.Token,
-	}, wsConfig)
+func (plan runtimeConfigPlan) machineNodeControllerConfig() (*controller.Config, error) {
+	controllerConfig, err := cloneControllerConfig(plan.machineConfig.ControllerConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to clone controller config: %w", err)
 	}
+	return controllerConfig, nil
+}
 
+func buildMachineSharedWSRuntime(wsConfig *controller.WebSocketConfig, endpoint string, logger *log.Entry) *machine.SharedWSRuntime {
+	if wsConfig == nil || !wsConfig.Enable {
+		return nil
+	}
 	return machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{
 		Endpoint:          endpoint,
 		HeartbeatInterval: time.Duration(wsConfig.HeartbeatInterval) * time.Second,
 		ReconnectBackoff:  time.Duration(wsConfig.ReconnectBackoff) * time.Second,
 		ResyncOnReconnect: wsConfig.ResyncOnReconnect,
 		Logger:            logger,
-	}), nil
+	})
 }
 
 func machineSharedWSSupportedNodeType(nodeType string) bool {
@@ -253,21 +179,4 @@ func machineSharedWSSupportedNodeType(nodeType string) bool {
 	default:
 		return true
 	}
-}
-
-func cloneControllerConfig(config *controller.Config) (*controller.Config, error) {
-	if config == nil {
-		return nil, nil
-	}
-
-	data, err := json.Marshal(config)
-	if err != nil {
-		return nil, err
-	}
-
-	var cloned controller.Config
-	if err := json.Unmarshal(data, &cloned); err != nil {
-		return nil, err
-	}
-	return &cloned, nil
 }

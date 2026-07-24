@@ -32,8 +32,14 @@ func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
 	if len(plan.staticNodes) != 2 {
 		t.Fatalf("expected two static node plans, got %#v", plan.staticNodes)
 	}
-	if plan.staticNodes[0].panelType != "SSPanel" || plan.staticNodes[0].apiConfig != apiConfig || plan.staticNodes[0].controllerConfigTemplate != controllerTemplate {
-		t.Fatalf("expected first static node plan to preserve node config pointers, got %#v", plan.staticNodes[0])
+	if plan.staticNodes[0].panelType != "SSPanel" ||
+		plan.staticNodes[0].apiConfig == apiConfig ||
+		plan.staticNodes[0].controllerConfigTemplate == controllerTemplate {
+		t.Fatalf("expected first static node plan to own config snapshots, got %#v", plan.staticNodes[0])
+	}
+	if plan.staticNodes[0].apiConfig.NodeType != apiConfig.NodeType ||
+		plan.staticNodes[0].controllerConfigTemplate.UpdatePeriodic != controllerTemplate.UpdatePeriodic {
+		t.Fatalf("expected first static node values to be preserved, got %#v", plan.staticNodes[0])
 	}
 	if plan.staticNodes[0].fallbackNodeType != "Hysteria2" {
 		t.Fatalf("expected fallback node type Hysteria2, got %q", plan.staticNodes[0].fallbackNodeType)
@@ -49,24 +55,89 @@ func TestBuildRuntimeConfigPlanSelectsStaticNodes(t *testing.T) {
 	}
 }
 
-func TestBuildStaticNodeServicesRejectsUnsupportedPanelType(t *testing.T) {
-	panel := New(&Config{})
-	plan := runtimeConfigPlan{
-		mode: runtimeConfigModeStatic,
-		staticNodes: []staticRuntimeNodePlan{{
-			panelType: "UnsupportedPanel",
+func TestBuildRuntimeConfigPlanHandlesNilConfigAsEmptyStaticPlan(t *testing.T) {
+	plan, err := buildRuntimeConfigPlan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.mode != runtimeConfigModeStatic || len(plan.staticNodes) != 0 || plan.machineConfig != nil || plan.showErrorDetails {
+		t.Fatalf("unexpected nil-config plan: %#v", plan)
+	}
+}
+
+func TestBuildRuntimeConfigPlanRejectsInvalidStaticNodes(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []*NodesConfig
+		want  string
+	}{
+		{
+			name:  "unsupported panel",
+			nodes: []*NodesConfig{{PanelType: "UnsupportedPanel", ApiConfig: &api.Config{}}},
+			want:  "unsupported panel type: UnsupportedPanel",
+		},
+		{
+			name:  "nil node",
+			nodes: []*NodesConfig{nil},
+			want:  "static node config at index 0 must not be nil",
+		},
+		{
+			name:  "nil API config",
+			nodes: []*NodesConfig{{PanelType: "SSPanel"}},
+			want:  "static node API config at index 0 must not be nil",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildRuntimeConfigPlan(&Config{NodesConfig: tt.nodes})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildRuntimeConfigPlanSnapshotsStaticInputs(t *testing.T) {
+	apiConfig := &api.Config{NodeType: "Hysteria2", APIHost: "https://original.example"}
+	controllerTemplate := &controller.Config{
+		UpdatePeriodic: 12,
+		WebSocketConfig: &controller.WebSocketConfig{
+			Endpoint: "wss://original.example/ws",
+		},
+	}
+	config := &Config{
+		LogConfig: &LogConfig{ShowErrorDetails: true},
+		NodesConfig: []*NodesConfig{{
+			PanelType:        "SSPanel",
+			ApiConfig:        apiConfig,
+			ControllerConfig: controllerTemplate,
 		}},
 	}
 
-	services, err := panel.buildStaticNodeServices(nil, plan)
-	if err == nil {
-		t.Fatal("expected unsupported panel type error")
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if services != nil {
-		t.Fatalf("expected no services, got %#v", services)
+	apiConfig.NodeType = "Tuic"
+	apiConfig.APIHost = "https://mutated.example"
+	controllerTemplate.UpdatePeriodic = 99
+	controllerTemplate.WebSocketConfig.Endpoint = "wss://mutated.example/ws"
+	config.LogConfig.ShowErrorDetails = false
+
+	nodePlan := plan.staticNodes[0]
+	if nodePlan.apiConfig.NodeType != "Hysteria2" || nodePlan.apiConfig.APIHost != "https://original.example" {
+		t.Fatalf("static API config changed with source: %#v", nodePlan.apiConfig)
 	}
-	if !strings.Contains(err.Error(), "unsupported panel type: UnsupportedPanel") {
-		t.Fatalf("expected unsupported panel type error, got %v", err)
+	if nodePlan.controllerConfigTemplate.UpdatePeriodic != 12 ||
+		nodePlan.controllerConfigTemplate.WebSocketConfig.Endpoint != "wss://original.example/ws" {
+		t.Fatalf("static controller config changed with source: %#v", nodePlan.controllerConfigTemplate)
+	}
+	if !nodePlan.controllerConfigTemplate.ShowErrorDetails {
+		t.Fatal("static controller snapshot lost ShowErrorDetails")
+	}
+	if nodePlan.fallbackNodeType != "Hysteria2" || !plan.showErrorDetails {
+		t.Fatalf("derived static values changed: node=%#v plan=%#v", nodePlan, plan)
 	}
 }
 
@@ -135,14 +206,117 @@ func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	if plan.mode != runtimeConfigModeMachine {
 		t.Fatalf("expected machine runtime mode, got %q", plan.mode)
 	}
-	if plan.machineConfig != config.MachineConfig {
-		t.Fatalf("expected machine config to be preserved, got %#v", plan.machineConfig)
+	if plan.machineConfig == config.MachineConfig {
+		t.Fatal("expected machine config snapshot to be independently owned")
+	}
+	if plan.machineConfig.ApiHost != config.MachineConfig.ApiHost ||
+		plan.machineConfig.MachineID != config.MachineConfig.MachineID ||
+		plan.machineConfig.Token != config.MachineConfig.Token {
+		t.Fatalf("expected machine config values to be preserved, got %#v", plan.machineConfig)
 	}
 	if len(plan.staticNodes) != 0 {
 		t.Fatalf("expected no static nodes in machine plan, got %#v", plan.staticNodes)
 	}
 	if !plan.showErrorDetails {
 		t.Fatal("expected ShowErrorDetails to be carried into runtime plan")
+	}
+}
+
+func TestBuildRuntimeConfigPlanSnapshotsMachineInputs(t *testing.T) {
+	config := validMachineModeConfig()
+	config.LogConfig = &LogConfig{ShowErrorDetails: true}
+	config.MachineConfig.DiscoveryInterval = 17
+	config.MachineConfig.ControllerConfig = &controller.Config{
+		UpdatePeriodic: 45,
+		WebSocketConfig: &controller.WebSocketConfig{
+			Enable:            true,
+			HeartbeatInterval: 30,
+			ReconnectBackoff:  5,
+		},
+	}
+
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.MachineConfig.ApiHost = "https://mutated.example"
+	config.MachineConfig.MachineID = 99
+	config.MachineConfig.Token = "mutated-token"
+	config.MachineConfig.Timeout = 99
+	config.MachineConfig.DiscoveryInterval = 99
+	config.MachineConfig.ControllerConfig.UpdatePeriodic = 99
+	config.MachineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval = 99
+	config.LogConfig.ShowErrorDetails = false
+
+	if plan.machineConfig.ApiHost != "https://panel.example.com" ||
+		plan.machineConfig.MachineID != 7 ||
+		plan.machineConfig.Token != "machine-token" ||
+		plan.machineConfig.Timeout != 30 ||
+		plan.machineConfig.DiscoveryInterval != 17 {
+		t.Fatalf("machine config changed with source: %#v", plan.machineConfig)
+	}
+	if plan.machineConfig.ControllerConfig.UpdatePeriodic != 45 ||
+		plan.machineConfig.ControllerConfig.WebSocketConfig.HeartbeatInterval != 30 {
+		t.Fatalf("machine controller config changed with source: %#v", plan.machineConfig.ControllerConfig)
+	}
+	if !plan.machineConfig.ControllerConfig.ShowErrorDetails {
+		t.Fatal("machine controller snapshot lost ShowErrorDetails")
+	}
+	if !plan.showErrorDetails {
+		t.Fatal("ShowErrorDetails changed with source")
+	}
+}
+
+func TestBuildRuntimeConfigPlanRejectsInvalidSharedWebSocketEndpoint(t *testing.T) {
+	config := validMachineModeConfig()
+	config.MachineConfig.ControllerConfig = &controller.Config{
+		WebSocketConfig: &controller.WebSocketConfig{
+			Enable:   true,
+			Endpoint: "ftp://panel.example/ws",
+		},
+	}
+
+	_, err := buildRuntimeConfigPlan(config)
+	if err == nil || !strings.Contains(err.Error(), "unsupported websocket endpoint scheme") {
+		t.Fatalf("error = %v, want shared WebSocket endpoint validation", err)
+	}
+}
+
+func TestRuntimeConfigPlanMaterializesIndependentControllerConfigs(t *testing.T) {
+	template := &controller.Config{
+		WebSocketConfig: &controller.WebSocketConfig{HeartbeatInterval: 99},
+		GlobalDeviceLimitConfig: &limiter.GlobalDeviceLimitConfig{
+			RedisAddr: "127.0.0.1:6379",
+		},
+	}
+	plan, err := buildRuntimeConfigPlan(&Config{
+		NodesConfig: []*NodesConfig{{
+			PanelType:        "SSPanel",
+			ApiConfig:        &api.Config{},
+			ControllerConfig: template,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := plan.staticNodes[0].materializeControllerConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := plan.staticNodes[0].materializeControllerConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first.WebSocketConfig == second.WebSocketConfig ||
+		first.GlobalDeviceLimitConfig == second.GlobalDeviceLimitConfig {
+		t.Fatalf("materialized configs share ownership: first=%#v second=%#v", first, second)
+	}
+	first.WebSocketConfig.HeartbeatInterval = 1
+	first.GlobalDeviceLimitConfig.RedisAddr = "10.0.0.1:6379"
+	if second.WebSocketConfig.HeartbeatInterval != 99 ||
+		second.GlobalDeviceLimitConfig.RedisAddr != "127.0.0.1:6379" {
+		t.Fatalf("mutating one materialization changed another: first=%#v second=%#v", first, second)
 	}
 }
 
@@ -159,7 +333,7 @@ func TestBuildRuntimeConfigPlanPreservesMachineValidation(t *testing.T) {
 	}
 }
 
-func TestMaterializeRuntimeControllerConfigPreservesDefaultsAndOverrides(t *testing.T) {
+func TestBuildRuntimeControllerConfigPreservesDefaultsAndOverrides(t *testing.T) {
 	template := &controller.Config{
 		UpdatePeriodic: 45,
 		WebSocketConfig: &controller.WebSocketConfig{
@@ -178,7 +352,7 @@ func TestMaterializeRuntimeControllerConfigPreservesDefaultsAndOverrides(t *test
 		},
 	}
 
-	cfg, err := materializeRuntimeControllerConfig(template, runtimeControllerConfigOptions{showErrorDetails: true})
+	cfg, err := buildRuntimeControllerConfig(template, true)
 	if err != nil {
 		t.Fatalf("materialize controller config: %v", err)
 	}
@@ -203,7 +377,7 @@ func TestMaterializeRuntimeControllerConfigPreservesDefaultsAndOverrides(t *test
 	}
 }
 
-func TestMaterializeRuntimeControllerConfigCloneOptionIsIndependent(t *testing.T) {
+func TestBuildRuntimeControllerConfigIsIndependent(t *testing.T) {
 	template := &controller.Config{
 		WebSocketConfig: &controller.WebSocketConfig{HeartbeatInterval: 99},
 		GlobalDeviceLimitConfig: &limiter.GlobalDeviceLimitConfig{
@@ -211,11 +385,11 @@ func TestMaterializeRuntimeControllerConfigCloneOptionIsIndependent(t *testing.T
 		},
 	}
 
-	cfg1, err := materializeRuntimeControllerConfig(template, runtimeControllerConfigOptions{clone: true})
+	cfg1, err := buildRuntimeControllerConfig(template, false)
 	if err != nil {
 		t.Fatalf("materialize first controller config: %v", err)
 	}
-	cfg2, err := materializeRuntimeControllerConfig(template, runtimeControllerConfigOptions{clone: true})
+	cfg2, err := buildRuntimeControllerConfig(template, false)
 	if err != nil {
 		t.Fatalf("materialize second controller config: %v", err)
 	}

@@ -208,35 +208,30 @@ func (p *Panel) logLifecycleError(message string, err error) {
 }
 
 func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
-	if plan.mode != runtimeConfigModeStatic {
-		return nil, fmt.Errorf("static node mode is not enabled")
-	}
-
 	services := make([]service.Service, 0, len(plan.staticNodes))
 	for _, nodePlan := range plan.staticNodes {
+		apiConfig := *nodePlan.apiConfig
 		var apiClient runtimePanelClient
 		switch nodePlan.panelType {
 		case "SSpanel", "SSPanel":
-			apiClient = sspanel.New(nodePlan.apiConfig)
+			apiClient = sspanel.New(&apiConfig)
 		case "NewV2board", "V2board":
-			apiClient = newV2board.New(nodePlan.apiConfig)
+			apiClient = newV2board.New(&apiConfig)
 		case "PMpanel":
-			apiClient = pmpanel.New(nodePlan.apiConfig)
+			apiClient = pmpanel.New(&apiConfig)
 		case "Proxypanel":
-			apiClient = proxypanel.New(nodePlan.apiConfig)
+			apiClient = proxypanel.New(&apiConfig)
 		case "V2RaySocks":
-			apiClient = v2raysocks.New(nodePlan.apiConfig)
+			apiClient = v2raysocks.New(&apiConfig)
 		case "GoV2Panel":
-			apiClient = gov2panel.New(nodePlan.apiConfig)
+			apiClient = gov2panel.New(&apiConfig)
 		case "BunPanel":
-			apiClient = bunpanel.New(nodePlan.apiConfig)
+			apiClient = bunpanel.New(&apiConfig)
 		default:
 			return nil, fmt.Errorf("unsupported panel type: %s", nodePlan.panelType)
 		}
 
-		controllerConfig, err := materializeRuntimeControllerConfig(nodePlan.controllerConfigTemplate, runtimeControllerConfigOptions{
-			showErrorDetails: plan.showErrorDetails,
-		})
+		controllerConfig, err := nodePlan.materializeControllerConfig()
 		if err != nil {
 			return nil, err
 		}
