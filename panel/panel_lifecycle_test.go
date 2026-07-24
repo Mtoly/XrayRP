@@ -38,7 +38,7 @@ func TestPanelStartClosesCoreWhenRuntimePlanFails(t *testing.T) {
 	coreCloses := 0
 
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) {
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) {
 		return server, nil
 	}
 	p.lifecycle.startCore = func(got *core.Instance) error {
@@ -77,7 +77,7 @@ func TestPanelStartClosesCoreWhenCoreStartFails(t *testing.T) {
 	events := []string{}
 	server := &core.Instance{}
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) { return server, nil }
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return server, nil }
 	p.lifecycle.startCore = func(got *core.Instance) error {
 		if got != server {
 			t.Fatalf("startCore received unexpected server: %p", got)
@@ -244,7 +244,7 @@ func TestPanelStartCoreFailurePreservesCloseError(t *testing.T) {
 	closeErr := errors.New("core close failed")
 	server := &core.Instance{}
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) { return server, nil }
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return server, nil }
 	p.lifecycle.startCore = func(*core.Instance) error { return startErr }
 	p.lifecycle.closeCore = func(*core.Instance) error { return closeErr }
 
@@ -265,7 +265,7 @@ func TestPanelStartCanRetryAfterFailedStartup(t *testing.T) {
 	planCalls := 0
 	module := &lifecycleTestService{name: "service", events: &events}
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) {
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) {
 		server := servers[loadCalls]
 		loadCalls++
 		return server, nil
@@ -337,7 +337,7 @@ func TestPanelStartAfterCloseCreatesFreshResources(t *testing.T) {
 	loadCalls := 0
 	buildCalls := 0
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) {
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) {
 		server := servers[loadCalls]
 		loadCalls++
 		return server, nil
@@ -514,7 +514,7 @@ func newLifecycleTestPanel(t *testing.T, events *[]string, modules func() ([]ser
 	t.Helper()
 	server := &core.Instance{}
 	p := New(&Config{})
-	p.lifecycle.loadCore = func(*Panel, *Config) (*core.Instance, error) {
+	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) {
 		return server, nil
 	}
 	p.lifecycle.startCore = func(got *core.Instance) error {
