@@ -145,8 +145,8 @@ func (c *APIClient) postXboardReport(payload map[string]any) error {
 		SetBody(payload).
 		ForceContentType("application/json").
 		Post(xboardReportPath)
-	if err != nil {
-		return err
+	if err != nil || res == nil || res.RawResponse == nil {
+		return c.httpPolicy.CheckResponse(res, xboardReportPath, err)
 	}
 	if isReportEndpointUnsupported(res.StatusCode(), res.Body()) {
 		return errXboardReportUnsupported

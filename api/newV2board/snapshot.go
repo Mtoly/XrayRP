@@ -256,11 +256,13 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 	}
 
 	res, err := req.Get(path)
-	if useETag && res != nil && res.StatusCode() == 304 {
-		return nil, api.ErrNodeNotModified
-	}
-
-	if useETag && res != nil {
+	if useETag {
+		if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
+			return nil, err
+		}
+		if res.StatusCode() == 304 {
+			return nil, api.ErrNodeNotModified
+		}
 		if etag := res.Header().Get("Etag"); etag != "" && etag != c.eTags["node"] {
 			c.eTags["node"] = etag
 		}

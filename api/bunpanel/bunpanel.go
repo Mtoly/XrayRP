@@ -7,19 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 )
 
 type APIClient struct {
 	client           *resty.Client
+	httpPolicy       panelhttp.Policy
 	APIHost          string
 	NodeID           int
 	Key              string
@@ -56,21 +57,11 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 }
 
 func New(apiConfig *api.Config) *APIClient {
-	client := resty.New()
-	client.SetRetryCount(3)
-	if apiConfig.Timeout > 0 {
-		client.SetTimeout(time.Duration(apiConfig.Timeout) * time.Second)
-	} else {
-		client.SetTimeout(5 * time.Second)
-	}
-	client.OnError(func(req *resty.Request, err error) {
-		if v, ok := err.(*resty.ResponseError); ok {
-			// v.Response contains the last response from the server
-			// v.Err contains the original error
-			log.Print(v.Err)
-		}
+	client, httpPolicy := panelhttp.NewClient(panelhttp.ClientConfig{
+		BaseURL:        apiConfig.APIHost,
+		TimeoutSeconds: apiConfig.Timeout,
+		Credentials:    []string{apiConfig.Key},
 	})
-	client.SetBaseURL(apiConfig.APIHost)
 	// Create Key for each requests
 	client.SetQueryParams(map[string]string{
 		"serverId": strconv.Itoa(apiConfig.NodeID),
@@ -84,6 +75,7 @@ func New(apiConfig *api.Config) *APIClient {
 	}
 	apiClient := &APIClient{
 		client:        client,
+		httpPolicy:    httpPolicy,
 		NodeID:        apiConfig.NodeID,
 		Key:           apiConfig.Key,
 		APIHost:       apiConfig.APIHost,
@@ -113,14 +105,10 @@ func (c *APIClient) assembleURL(path string) string {
 }
 
 func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (*Response, error) {
+	response, err := panelhttp.TypedResult[Response](c.httpPolicy, res, path, err)
 	if err != nil {
-		return nil, fmt.Errorf("request %s failed: %s", c.assembleURL(path), err)
+		return nil, err
 	}
-
-	if res.StatusCode() >= 400 {
-		return nil, fmt.Errorf("request %s failed: status %d", c.assembleURL(path), res.StatusCode())
-	}
-	response := res.Result().(*Response)
 
 	if response.StatusCode != 200 {
 		return nil, fmt.Errorf("request %s returned unexpected status code: %d", c.assembleURL(path), response.StatusCode)
@@ -135,8 +123,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		SetHeader("If-None-Match", c.eTags["node"]).
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil || res == nil {
-		_, err = c.parseResponse(res, path, err)
+	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
 		return nil, err
 	}
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
@@ -176,8 +163,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil || res == nil {
-		_, err = c.parseResponse(res, path, err)
+	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
 		return nil, err
 	}
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed

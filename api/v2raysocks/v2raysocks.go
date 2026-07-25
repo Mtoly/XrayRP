@@ -2,12 +2,10 @@ package v2raysocks
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -17,6 +15,7 @@ import (
 	C "github.com/sagernet/sing/common"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 	"github.com/Mtoly/XrayRP/common"
@@ -25,6 +24,7 @@ import (
 // APIClient create an api client to the panel.
 type APIClient struct {
 	client        *resty.Client
+	httpPolicy    panelhttp.Policy
 	APIHost       string
 	NodeID        int
 	Key           string
@@ -41,24 +41,12 @@ type APIClient struct {
 
 // New create an api instance
 func New(apiConfig *api.Config) *APIClient {
-
-	client := resty.New()
-	client.SetHeader("User-Agent", "XrayR/0.9.6")
-	client.SetRetryCount(3)
-	if apiConfig.Timeout > 0 {
-		client.SetTimeout(time.Duration(apiConfig.Timeout) * time.Second)
-	} else {
-		client.SetTimeout(5 * time.Second)
-	}
-
-	client.OnError(func(req *resty.Request, err error) {
-		var v *resty.ResponseError
-		if errors.As(err, &v) {
-			// v.Response contains the last response from the server
-			// v.Err contains the original error
-			log.Print(v.Err)
-		}
+	client, httpPolicy := panelhttp.NewClient(panelhttp.ClientConfig{
+		BaseURL:        apiConfig.APIHost,
+		TimeoutSeconds: apiConfig.Timeout,
+		Credentials:    []string{apiConfig.Key},
 	})
+	client.SetHeader("User-Agent", "XrayR/0.9.6")
 
 	// Create Key for each requests
 	client.SetQueryParams(map[string]string{
@@ -72,6 +60,7 @@ func New(apiConfig *api.Config) *APIClient {
 	}
 	apiClient := &APIClient{
 		client:        client,
+		httpPolicy:    httpPolicy,
 		NodeID:        apiConfig.NodeID,
 		Key:           apiConfig.Key,
 		APIHost:       apiConfig.APIHost,
@@ -106,12 +95,8 @@ func (c *APIClient) assembleURL(path string) string {
 }
 
 func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (*simplejson.Json, error) {
-	if err != nil {
-		return nil, fmt.Errorf("request %s failed: %s", c.assembleURL(path), err)
-	}
-
-	if res.StatusCode() >= 400 {
-		return nil, fmt.Errorf("request %s failed: status %d", c.assembleURL(path), res.StatusCode())
+	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
+		return nil, err
 	}
 	rtn, err := simplejson.NewJson(res.Body())
 	if err != nil {
@@ -139,6 +124,9 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		}).
 		ForceContentType("application/json").
 		Get(c.APIHost)
+	if err := c.httpPolicy.CheckResponse(res, "", err); err != nil {
+		return nil, err
+	}
 
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {
@@ -192,6 +180,9 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		}).
 		ForceContentType("application/json").
 		Get(c.APIHost)
+	if err := c.httpPolicy.CheckResponse(res, "", err); err != nil {
+		return nil, err
+	}
 
 	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
 	if res.StatusCode() == 304 {

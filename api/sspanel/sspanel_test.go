@@ -11,6 +11,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
 )
@@ -42,6 +45,71 @@ func assertAuthentication(t *testing.T, r *http.Request, wantNodeID bool) {
 	if wantNodeID && r.URL.Query().Get("node_id") != fmt.Sprint(testNodeID) {
 		t.Fatalf("node_id query = %q, want %d", r.URL.Query().Get("node_id"), testNodeID)
 	}
+}
+
+func TestNewAppliesSharedHTTPMechanics(t *testing.T) {
+	client := New(&api.Config{
+		APIHost: "https://panel.example",
+		Key:     testKey,
+		Timeout: 7,
+	})
+
+	if client.client.RetryCount != 3 {
+		t.Fatalf("retry count = %d, want 3", client.client.RetryCount)
+	}
+	if got := client.client.GetClient().Timeout; got != 7*time.Second {
+		t.Fatalf("timeout = %s, want 7s", got)
+	}
+}
+
+func TestGetNodeInfoPreRequestFailureDoesNotPanic(t *testing.T) {
+	sentinel := errors.New("pre-request failed")
+	client := New(&api.Config{
+		APIHost:             "https://panel.example",
+		Key:                 testKey,
+		NodeID:              testNodeID,
+		NodeType:            "V2ray",
+		DisableCustomConfig: true,
+	})
+	client.client.OnBeforeRequest(func(*resty.Client, *resty.Request) error {
+		return sentinel
+	})
+
+	_, err := client.GetNodeInfo()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want pre-request failure identity", err)
+	}
+}
+
+func TestGetNodeInfoTransportFailurePreservesCauseAndRedactsKey(t *testing.T) {
+	secret := "contract key/+?"
+	sentinel := errors.New("transport failed")
+	client := New(&api.Config{
+		APIHost:             "https://panel.example",
+		Key:                 secret,
+		NodeID:              testNodeID,
+		NodeType:            "V2ray",
+		DisableCustomConfig: true,
+	})
+	client.client.SetRetryWaitTime(time.Nanosecond)
+	client.client.SetRetryMaxWaitTime(time.Nanosecond)
+	client.client.SetTransport(sspanelRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, sentinel
+	}))
+
+	_, err := client.GetNodeInfo()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want transport failure identity", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error contains panel credential %q: %v", secret, err)
+	}
+}
+
+type sspanelRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f sspanelRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func writeResponse(t *testing.T, w http.ResponseWriter, data any) {

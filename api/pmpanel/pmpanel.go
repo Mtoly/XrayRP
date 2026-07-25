@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
 )
@@ -19,6 +19,7 @@ import (
 // APIClient create a api client to the panel.
 type APIClient struct {
 	client        *resty.Client
+	httpPolicy    panelhttp.Policy
 	APIHost       string
 	NodeID        int
 	Key           string
@@ -32,22 +33,11 @@ type APIClient struct {
 
 // New creat a api instance
 func New(apiConfig *api.Config) *APIClient {
-
-	client := resty.New()
-	client.SetRetryCount(3)
-	if apiConfig.Timeout > 0 {
-		client.SetTimeout(time.Duration(apiConfig.Timeout) * time.Second)
-	} else {
-		client.SetTimeout(5 * time.Second)
-	}
-	client.OnError(func(req *resty.Request, err error) {
-		if v, ok := err.(*resty.ResponseError); ok {
-			// v.Response contains the last response from the server
-			// v.Err contains the original error
-			log.Print(v.Err)
-		}
+	client, httpPolicy := panelhttp.NewClient(panelhttp.ClientConfig{
+		BaseURL:        apiConfig.APIHost,
+		TimeoutSeconds: apiConfig.Timeout,
+		Credentials:    []string{apiConfig.Key},
 	})
-	client.SetBaseURL(apiConfig.APIHost)
 	// Create Key for each requests
 	client.SetHeaders(map[string]string{
 		"key": apiConfig.Key,
@@ -59,6 +49,7 @@ func New(apiConfig *api.Config) *APIClient {
 	}
 	apiClient := &APIClient{
 		client:        client,
+		httpPolicy:    httpPolicy,
 		NodeID:        apiConfig.NodeID,
 		Key:           apiConfig.Key,
 		APIHost:       apiConfig.APIHost,
@@ -92,14 +83,10 @@ func (c *APIClient) assembleURL(path string) string {
 }
 
 func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (*Response, error) {
+	response, err := panelhttp.TypedResult[Response](c.httpPolicy, res, path, err)
 	if err != nil {
-		return nil, fmt.Errorf("request %s failed: %s", c.assembleURL(path), err)
+		return nil, err
 	}
-
-	if res.StatusCode() >= 400 {
-		return nil, fmt.Errorf("request %s failed: status %d", c.assembleURL(path), res.StatusCode())
-	}
-	response := res.Result().(*Response)
 
 	if response.Ret != 200 {
 		return nil, fmt.Errorf("request %s returned unexpected ret code: %d", c.assembleURL(path), response.Ret)
