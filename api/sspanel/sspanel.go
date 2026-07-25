@@ -1,11 +1,9 @@
 package sspanel
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -18,6 +16,7 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
 )
 
@@ -71,7 +70,10 @@ func New(apiConfig *api.Config) *APIClient {
 	// Add support for muKey
 	client.SetQueryParam("muKey", apiConfig.Key)
 	// Read local rule list
-	localRuleList := readLocalRuleList(apiConfig.RuleListPath)
+	localRuleList, diagnostics := panelrules.Load(apiConfig.RuleListPath)
+	for _, diagnostic := range diagnostics {
+		log.Print(diagnostic)
+	}
 
 	return &APIClient{
 		client:              client,
@@ -88,44 +90,6 @@ func New(apiConfig *api.Config) *APIClient {
 		LastReportOnline:    make(map[int]int),
 		eTags:               make(map[string]string),
 	}
-}
-
-// readLocalRuleList reads the local rule list file
-func readLocalRuleList(path string) (LocalRuleList []api.DetectRule) {
-	LocalRuleList = make([]api.DetectRule, 0)
-	if path != "" {
-		// open the file
-		file, err := os.Open(path)
-
-		// handle errors while opening
-		if err != nil {
-			log.Printf("Error when opening file: %s", err)
-			return LocalRuleList
-		}
-		defer file.Close()
-
-		fileScanner := bufio.NewScanner(file)
-
-		// read line by line
-		for fileScanner.Scan() {
-			pattern, err := common.SafeCompileRegex(fileScanner.Text())
-			if err != nil {
-				log.Printf("Invalid rule regex: %s, skipping", err)
-				continue
-			}
-			LocalRuleList = append(LocalRuleList, api.DetectRule{
-				ID:      -1,
-				Pattern: pattern,
-			})
-		}
-		// handle first encountered error while reading
-		if err := fileScanner.Err(); err != nil {
-			log.Printf("Error while reading file: %s", err)
-			return
-		}
-	}
-
-	return LocalRuleList
 }
 
 // Describe return a description of the client

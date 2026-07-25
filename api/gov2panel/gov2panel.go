@@ -1,16 +1,15 @@
 package gov2panel
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
 	"github.com/gogf/gf/v2/encoding/gjson"
 	"github.com/gogf/gf/v2/frame/g"
@@ -41,6 +40,10 @@ type APIClient struct {
 func New(apiConfig *api.Config) *APIClient {
 
 	//https://goframe.org/pages/viewpage.action?pageId=1114381
+	localRuleList, diagnostics := panelrules.Load(apiConfig.RuleListPath)
+	for _, diagnostic := range diagnostics {
+		log.Print(diagnostic)
+	}
 
 	apiClient := &APIClient{
 		ctx:                 context.Background(),
@@ -55,48 +58,9 @@ func New(apiConfig *api.Config) *APIClient {
 		RuleListPath:        apiConfig.RuleListPath,
 		DisableCustomConfig: apiConfig.DisableCustomConfig,
 
-		LocalRuleList: readLocalRuleList(apiConfig.RuleListPath), //加载本地路由规则
+		LocalRuleList: localRuleList, //加载本地路由规则
 	}
 	return apiClient
-}
-
-// readLocalRuleList reads the local rule list file
-func readLocalRuleList(path string) (LocalRuleList []api.DetectRule) {
-
-	LocalRuleList = make([]api.DetectRule, 0)
-	if path != "" {
-		// open the file
-		file, err := os.Open(path)
-
-		// handle errors while opening
-		if err != nil {
-			log.Printf("Error when opening file: %s", err)
-			return LocalRuleList
-		}
-		defer file.Close()
-
-		fileScanner := bufio.NewScanner(file)
-
-		// read line by line
-		for fileScanner.Scan() {
-			pattern, err := common.SafeCompileRegex(fileScanner.Text())
-			if err != nil {
-				log.Printf("Invalid rule regex: %s, skipping", err)
-				continue
-			}
-			LocalRuleList = append(LocalRuleList, api.DetectRule{
-				ID:      -1,
-				Pattern: pattern,
-			})
-		}
-		// handle first encountered error while reading
-		if err := fileScanner.Err(); err != nil {
-			log.Printf("Error while reading file: %s", err)
-			return
-		}
-	}
-
-	return LocalRuleList
 }
 
 func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {

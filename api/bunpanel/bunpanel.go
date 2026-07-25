@@ -1,10 +1,8 @@
 package bunpanel
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,8 +14,8 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
-	"github.com/Mtoly/XrayRP/common"
 )
 
 type APIClient struct {
@@ -80,7 +78,10 @@ func New(apiConfig *api.Config) *APIClient {
 		"token":    apiConfig.Key,
 	})
 	// Read local rule list
-	localRuleList := readLocalRuleList(apiConfig.RuleListPath)
+	localRuleList, diagnostics := panelrules.Load(apiConfig.RuleListPath)
+	for _, diagnostic := range diagnostics {
+		log.Print(diagnostic)
+	}
 	apiClient := &APIClient{
 		client:        client,
 		NodeID:        apiConfig.NodeID,
@@ -95,44 +96,6 @@ func New(apiConfig *api.Config) *APIClient {
 		eTags:         make(map[string]string),
 	}
 	return apiClient
-}
-
-// readLocalRuleList reads the local rule list file
-func readLocalRuleList(path string) (LocalRuleList []api.DetectRule) {
-	LocalRuleList = make([]api.DetectRule, 0)
-
-	if path != "" {
-		// open the file
-		file, err := os.Open(path)
-
-		// handle errors while opening
-		if err != nil {
-			log.Printf("Error when opening file: %s", err)
-			return LocalRuleList
-		}
-		defer file.Close()
-		fileScanner := bufio.NewScanner(file)
-
-		// read line by line
-		for fileScanner.Scan() {
-			pattern, err := common.SafeCompileRegex(fileScanner.Text())
-			if err != nil {
-				log.Printf("Invalid rule regex: %s, skipping", err)
-				continue
-			}
-			LocalRuleList = append(LocalRuleList, api.DetectRule{
-				ID:      -1,
-				Pattern: pattern,
-			})
-		}
-		// handle first encountered error while reading
-		if err := fileScanner.Err(); err != nil {
-			log.Printf("Error while reading file: %s", err)
-			return
-		}
-	}
-
-	return LocalRuleList
 }
 
 // Describe return a description of the client
