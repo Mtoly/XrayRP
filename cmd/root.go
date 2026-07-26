@@ -91,82 +91,23 @@ func run() error {
 		return fmt.Errorf("Parse config file %v failed: %s \n", cfgFile, err)
 	}
 
-	if panelConfig.LogConfig != nil && panelConfig.LogConfig.Level == "debug" {
-		log.SetReportCaller(true)
-	} else {
-		log.SetReportCaller(false)
-	}
-	common.SetShowErrorDetails(panelConfig.ShowErrorDetails())
+	applyPanelProcessConfig(panelConfig)
 
 	// Create initial panel instance.
-	p := panel.New(panelConfig)
-	lastTime := time.Now()
+	initialPanel := panel.New(panelConfig)
+	reloader := newPanelReloadModule(panelConfig, initialPanel, panelReloadOptions{
+		configFile:    cfgFile,
+		lastAppliedAt: time.Now(),
+	})
 	config.OnConfigChange(func(e fsnotify.Event) {
-		// Discard events received within a short period of time after receiving an event.
-		if !time.Now().After(lastTime.Add(3 * time.Second)) {
-			return
-		}
-
-		// Hot reload function
-		fmt.Println("Config file changed:", e.Name)
-
-		// To avoid stopping running services due to temporary write/parse errors, read and parse
-		// the updated config into a new viper instance first, and only swap when successful.
-		newPanelConfig := &panel.Config{}
-		newViper := viper.New()
-		if e.Name != "" {
-			newViper.SetConfigFile(e.Name)
-		} else if cfgFile != "" {
-			newViper.SetConfigFile(cfgFile)
-		} else {
-			// Fallback to the same search logic as getConfig
-			newViper.SetConfigName("config")
-			newViper.SetConfigType("yml")
-			newViper.AddConfigPath(".")
-		}
-
-		if err := newViper.ReadInConfig(); err != nil {
-			log.Errorf("Hot reload: failed to read new config file %s: %v; keeping existing configuration", e.Name, err)
-			return
-		}
-		if err := newViper.Unmarshal(newPanelConfig); err != nil {
-			log.Errorf("Hot reload: failed to parse new config file %s: %v; keeping existing configuration", e.Name, err)
-			return
-		}
-		if len(newPanelConfig.NodesConfig) == 0 {
-			log.Warnf("Hot reload: new config file %s contains no Nodes; ignoring reload to avoid stopping running services", e.Name)
-			return
-		}
-
-		// Swap to the new config and panel instance after successful parse.
-		if err := p.Close(); err != nil {
-			log.Error("Hot reload: failed to close old panel")
-		}
-		// Delete old instance and trigger GC
-		runtime.GC()
-
-		if newPanelConfig.LogConfig != nil && newPanelConfig.LogConfig.Level == "debug" {
-			log.SetReportCaller(true)
-		} else {
-			log.SetReportCaller(false)
-		}
-		common.SetShowErrorDetails(newPanelConfig.ShowErrorDetails())
-
-		panelConfig = newPanelConfig
-		p = panel.New(panelConfig)
-
-		if err := p.Start(); err != nil {
-			log.Error("Hot reload: failed to start new panel")
-			return
-		}
-		lastTime = time.Now()
+		_ = reloader.Reload(e.Name)
 	})
 
-	if err := p.Start(); err != nil {
+	if err := initialPanel.Start(); err != nil {
 		return fmt.Errorf("failed to start panel: %w", err)
 	}
 	defer func() {
-		if err := p.Close(); err != nil {
+		if err := reloader.Close(); err != nil {
 			log.Error("Failed to close panel")
 		}
 	}()
