@@ -29,22 +29,10 @@ import (
 
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/rule"
+	"github.com/Mtoly/XrayRP/internal/managednode"
 )
 
 var errSniffingTimeout = newError("timeout on sniffing")
-
-// xrayRManagedPrefixes defines protocol prefixes managed by XrayR nodes.
-// Tags follow {Protocol}_{IP}_{Port}_{NodeID}.
-var xrayRManagedPrefixes = []string{"VLESS_", "Trojan_", "Vmess_", "Shadowsocks_"}
-
-func isXrayRManagedTag(tag string) bool {
-	for _, prefix := range xrayRManagedPrefixes {
-		if strings.HasPrefix(tag, prefix) {
-			return true
-		}
-	}
-	return false
-}
 
 type cachedReader struct {
 	sync.Mutex
@@ -464,7 +452,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	if sessionInbound := session.InboundFromContext(ctx); sessionInbound != nil && sessionInbound.Tag != "" {
 		inTag = sessionInbound.Tag
 	}
-	isXrayRNode := isXrayRManagedTag(inTag)
+	isXrayRNode := managednode.IsTag(inTag)
 
 	if inTag != "" && isXrayRNode {
 		if h := d.ohm.GetHandler(inTag); h != nil {

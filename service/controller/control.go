@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common"
@@ -24,28 +23,6 @@ import (
 func (c *Controller) removeInbound(tag string) error {
 	err := c.ibm.RemoveHandler(context.Background(), tag)
 	return err
-}
-
-// xrayRManagedPrefixes defines all protocol prefixes that XrayR manages.
-// Tags with these prefixes follow the format: {Protocol}_{IP}_{Port}_{NodeID}
-var xrayRManagedPrefixes = []string{
-	"VLESS_",
-	"Trojan_",
-	"Vmess_",
-	"Shadowsocks_",
-	"Socks_",
-	"HTTP_",
-}
-
-// isXrayRManagedTag checks if a tag is managed by XrayR (i.e., it belongs to a specific node).
-// XrayR-managed tags have the format: {Protocol}_{IP}_{Port}_{NodeID}
-func isXrayRManagedTag(tag string) bool {
-	for _, prefix := range xrayRManagedPrefixes {
-		if strings.HasPrefix(tag, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // dataPathWrapper wraps outbound.Handler to enforce device limit, user/node speed limit,

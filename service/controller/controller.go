@@ -23,6 +23,7 @@ import (
 	"github.com/Mtoly/XrayRP/app/mydispatcher"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/internal/managednode"
 )
 
 type PanelClient interface {
@@ -984,27 +985,9 @@ func (c *Controller) syncAliveListFromPanel(tag string) {
 }
 
 func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {
-	// Normalize NodeType for tag prefix so same-node routing and data path guards
-	// consistently recognize managed protocols.
-	base := nodeInfo.NodeType
-	switch strings.ToLower(base) {
-	case "vless":
-		base = "VLESS"
-	case "trojan":
-		base = "Trojan"
-	case "vmess", "v2ray":
-		base = "Vmess"
-	case "shadowsocks":
-		base = "Shadowsocks"
-	case "socks":
-		base = "Socks"
-	case "http":
-		base = "HTTP"
-	}
-
 	// Include NodeID to avoid cross-node mixing when multiple logical nodes share
 	// the same NodeType/ListenIP/Port (e.g., CDN or multi-node deployments).
-	return fmt.Sprintf("%s_%s_%d_%d", base, c.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
+	return managednode.BuildTag(nodeInfo.NodeType, c.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
 }
 
 func (c *Controller) buildNodeTag() string {

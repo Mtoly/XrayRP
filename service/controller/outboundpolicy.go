@@ -7,6 +7,8 @@ import (
 
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/outbound"
+
+	"github.com/Mtoly/XrayRP/internal/managednode"
 )
 
 type runtimeRoutingSelector struct {
@@ -31,7 +33,7 @@ type runtimeDispatchDecision struct {
 func (s runtimeRoutingSelector) selectDispatch(ctx context.Context) runtimeDispatchDecision {
 	if inbound := session.InboundFromContext(ctx); inbound != nil {
 		inboundTag := inbound.Tag
-		if inboundTag != "" && inboundTag != s.baseTag && isXrayRManagedTag(inboundTag) {
+		if inboundTag != "" && inboundTag != s.baseTag && managednode.IsTag(inboundTag) {
 			if s.obm != nil {
 				if handler := s.obm.GetHandler(inboundTag); handler != nil {
 					if handler == s.currentWrapper || handler.Tag() != inboundTag {
@@ -61,7 +63,7 @@ func (s runtimeRoutingSelector) resolveTagToHandler(tag string) (outbound.Handle
 	if tag == s.baseTag {
 		return s.baseHandler, true
 	}
-	if isXrayRManagedTag(tag) && tag != s.baseTag {
+	if managednode.IsTag(tag) && tag != s.baseTag {
 		return nil, false
 	}
 	if s.obm != nil {
