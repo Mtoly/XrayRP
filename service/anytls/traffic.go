@@ -285,7 +285,7 @@ func (s *AnyTLSService) restoreTraffic(snapshot map[string]userTraffic) {
 
 func (s *AnyTLSService) userMonitor() error {
 	_, tag, startAt := s.appliedStateSnapshot()
-	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -360,7 +360,7 @@ func (s *AnyTLSService) userMonitor() error {
 // instance when a change is detected.
 func (s *AnyTLSService) nodeMonitor() error {
 	currentNode, _, startAt := s.appliedStateSnapshot()
-	if time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
+	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 

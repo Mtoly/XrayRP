@@ -213,8 +213,10 @@ func TestRuntimeFakeInjectsStartAndCloseErrors(t *testing.T) {
 type configurablePanelClient struct {
 	nodeInfo      *api.NodeInfo
 	nodeInfoErr   error
+	nodeInfoCalls int
 	users         []api.UserInfo
 	userListErr   error
+	userListCalls int
 	rules         []api.DetectRule
 	nodeRuleErr   error
 	nodeRuleCalls int
@@ -222,9 +224,11 @@ type configurablePanelClient struct {
 
 func (c *configurablePanelClient) Describe() api.ClientInfo { return api.ClientInfo{NodeID: 8} }
 func (c *configurablePanelClient) GetNodeInfo() (*api.NodeInfo, error) {
+	c.nodeInfoCalls++
 	return c.nodeInfo, c.nodeInfoErr
 }
 func (c *configurablePanelClient) GetUserList() (*[]api.UserInfo, error) {
+	c.userListCalls++
 	return &c.users, c.userListErr
 }
 func (c *configurablePanelClient) GetNodeRule() (*[]api.DetectRule, error) {
@@ -485,6 +489,23 @@ func TestStartPublishesOnlyAfterRuntimeAndTasksAreReady(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "start", "ready", "task-start:Tuic_127.0.0.1_8443_8", "task-start:node monitor"}) {
 		t.Fatalf("events = %v, want synchronous runtime readiness before tasks", got)
+	}
+}
+
+func TestStartPeriodicCallbacksWaitForAppliedStatePublication(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.taskFactory = defaultTaskFactory
+	client := service.apiClient.(*configurablePanelClient)
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if client.nodeInfoCalls != 1 || client.userListCalls != 1 {
+		t.Fatalf("panel calls before publication: node=%d users=%d, want initial fetches only", client.nodeInfoCalls, client.userListCalls)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 

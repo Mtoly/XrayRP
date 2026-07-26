@@ -10,7 +10,8 @@ import (
 // hyAuthenticator implements server.Authenticator and performs user lookup
 // and local device limit enforcement based on SSPanel's UUID.
 type hyAuthenticator struct {
-	svc *Hysteria2Service
+	svc      *Hysteria2Service
+	authGate *runtimeAuthGate
 }
 
 func (a *hyAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (bool, string) {
@@ -26,6 +27,10 @@ func (a *hyAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (b
 
 	if auth == "" {
 		logger.WithField("remote", host).Warn("Hysteria2 auth failed: empty auth string")
+		return false, ""
+	}
+	if !a.authGate.wait() {
+		logger.WithField("remote", host).Warn("Hysteria2 auth rejected before runtime publication")
 		return false, ""
 	}
 

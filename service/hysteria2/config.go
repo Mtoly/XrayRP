@@ -12,15 +12,6 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
 
-// buildServerConfig constructs the Hysteria2 server configuration based on
-// the current node information and controller configuration.
-func (h *Hysteria2Service) buildServerConfig() (*server.Config, error) {
-	return h.buildServerConfigFor(serverBuildSpec{
-		nodeInfo:   h.nodeInfo,
-		certConfig: h.config.CertConfig,
-	})
-}
-
 func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.Config, error) {
 	hy := spec.nodeInfo.Hysteria2Config
 	if hy == nil {
@@ -101,7 +92,7 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 
 		BandwidthConfig:       bandwidth,
 		IgnoreClientBandwidth: hy.IgnoreClientBandwidth,
-		Authenticator:         &hyAuthenticator{svc: h},
+		Authenticator:         &hyAuthenticator{svc: h, authGate: spec.authGate},
 		EventLogger:           &hyEventLogger{svc: h},
 		TrafficLogger:         &hyTrafficLogger{svc: h},
 	}

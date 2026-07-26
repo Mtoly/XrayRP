@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"errors"
+	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -105,7 +106,7 @@ func (f *fakeRuntimeServer) Close() error {
 
 func TestRuntimeLifecycleSeamCompiles(t *testing.T) {
 	var runtime runtimeServer = &fakeRuntimeServer{events: &lifecycleEvents{}}
-	var configFactory serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
+	var configFactory serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	var factory runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
@@ -125,7 +126,7 @@ func TestBuildRuntimeServerRecordsBuildOrder(t *testing.T) {
 	events := &lifecycleEvents{}
 	runtime := &fakeRuntimeServer{events: events}
 	service := &Hysteria2Service{
-		serverConfigFactory: func(*Hysteria2Service) (*server.Config, error) {
+		serverConfigFactory: func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 			events.add("build-config")
 			return &server.Config{}, nil
 		},
@@ -135,7 +136,7 @@ func TestBuildRuntimeServerRecordsBuildOrder(t *testing.T) {
 		},
 	}
 
-	gotRuntime, err := service.buildRuntimeServer()
+	gotRuntime, err := service.buildRuntimeServer(serverBuildSpec{})
 	if err != nil {
 		t.Fatalf("buildRuntimeServer() error = %v", err)
 	}
@@ -151,7 +152,7 @@ func TestBuildRuntimeServerStopsAfterConfigError(t *testing.T) {
 	wantErr := errors.New("config failed")
 	events := &lifecycleEvents{}
 	service := &Hysteria2Service{
-		serverConfigFactory: func(*Hysteria2Service) (*server.Config, error) {
+		serverConfigFactory: func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 			events.add("build-config")
 			return nil, wantErr
 		},
@@ -161,7 +162,7 @@ func TestBuildRuntimeServerStopsAfterConfigError(t *testing.T) {
 		},
 	}
 
-	_, err := service.buildRuntimeServer()
+	_, err := service.buildRuntimeServer(serverBuildSpec{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("buildRuntimeServer() error = %v, want %v", err, wantErr)
 	}
@@ -175,7 +176,7 @@ func TestBuildRuntimeServerReturnsInjectedFakeAndFactoryError(t *testing.T) {
 	events := &lifecycleEvents{}
 	wantRuntime := &fakeRuntimeServer{events: events}
 	service := &Hysteria2Service{
-		serverConfigFactory: func(*Hysteria2Service) (*server.Config, error) {
+		serverConfigFactory: func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 			events.add("build-config")
 			return &server.Config{}, nil
 		},
@@ -185,14 +186,14 @@ func TestBuildRuntimeServerReturnsInjectedFakeAndFactoryError(t *testing.T) {
 		},
 	}
 
-	if _, err := service.buildRuntimeServer(); !errors.Is(err, wantErr) {
+	if _, err := service.buildRuntimeServer(serverBuildSpec{}); !errors.Is(err, wantErr) {
 		t.Fatalf("buildRuntimeServer() error = %v, want %v", err, wantErr)
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
 		events.add("build-server")
 		return wantRuntime, nil
 	}
-	gotRuntime, err := service.buildRuntimeServer()
+	gotRuntime, err := service.buildRuntimeServer(serverBuildSpec{})
 	if err != nil {
 		t.Fatalf("buildRuntimeServer() error = %v", err)
 	}
@@ -290,8 +291,11 @@ func TestRuntimeServerFakeInjectsServeAndCloseErrors(t *testing.T) {
 type configurablePanelClient struct {
 	nodeInfo      *api.NodeInfo
 	nodeInfoErr   error
+	nodeInfoCalls int
 	users         []api.UserInfo
+	userListNil   bool
 	userListErr   error
+	userListCalls int
 	rules         []api.DetectRule
 	nodeRuleErr   error
 	nodeRuleCalls int
@@ -299,9 +303,14 @@ type configurablePanelClient struct {
 
 func (c *configurablePanelClient) Describe() api.ClientInfo { return api.ClientInfo{NodeID: 9} }
 func (c *configurablePanelClient) GetNodeInfo() (*api.NodeInfo, error) {
+	c.nodeInfoCalls++
 	return c.nodeInfo, c.nodeInfoErr
 }
 func (c *configurablePanelClient) GetUserList() (*[]api.UserInfo, error) {
+	c.userListCalls++
+	if c.userListNil {
+		return nil, c.userListErr
+	}
 	return &c.users, c.userListErr
 }
 func (c *configurablePanelClient) GetNodeRule() (*[]api.DetectRule, error) {
@@ -323,6 +332,31 @@ type fakePeriodicTask struct {
 func (t *fakePeriodicTask) Start() error { t.events.add("task-start:" + t.tag); return t.startErr }
 func (t *fakePeriodicTask) Close() error { t.events.add("task-close:" + t.tag); return t.closeErr }
 
+type blockingStartPeriodicTask struct {
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (t *blockingStartPeriodicTask) Start() error {
+	close(t.entered)
+	<-t.release
+	return nil
+}
+
+func (*blockingStartPeriodicTask) Close() error { return nil }
+
+type waitThenFailPeriodicTask struct {
+	wait <-chan struct{}
+	err  error
+}
+
+func (t *waitThenFailPeriodicTask) Start() error {
+	<-t.wait
+	return t.err
+}
+
+func (*waitThenFailPeriodicTask) Close() error { return nil }
+
 func newStartTestService(events *lifecycleEvents, runtime *fakeRuntimeServer) *Hysteria2Service {
 	client := &configurablePanelClient{
 		nodeInfo: &api.NodeInfo{NodeType: "Hysteria2", NodeID: 9, Port: 9443, Hysteria2Config: &api.Hysteria2Config{}},
@@ -333,7 +367,7 @@ func newStartTestService(events *lifecycleEvents, runtime *fakeRuntimeServer) *H
 		DisableGetRule: true,
 		CertConfig:     &mylego.CertConfig{},
 	})
-	service.serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		events.add("build-config")
 		return &server.Config{}, nil
 	}
@@ -363,6 +397,38 @@ func (f *fakeRuntimeServer) servingSignal() <-chan struct{} {
 	ready := make(chan struct{})
 	close(ready)
 	return ready
+}
+
+func TestStartPreservesUsersWhenPanelReturnsNoUserSnapshot(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeServer{events: events})
+	client := service.apiClient.(*configurablePanelClient)
+	client.userListNil = true
+	client.nodeInfo.SpeedLimit = 128
+	user := userRecord{UID: 42, LimiterKey: "last-known-good"}
+	service.users["last-known-good"] = user
+	service.users["last-known-good-alias"] = user
+	oldLimiter := rate.NewLimiter(10, 10)
+	service.rateLimiters = map[string]*rate.Limiter{
+		"last-known-good":       oldLimiter,
+		"last-known-good-alias": oldLimiter,
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if user, ok := service.users["last-known-good"]; !ok || user.UID != 42 {
+		t.Fatalf("published users = %v, want last-known-good user", service.users)
+	}
+	if limiter := service.rateLimiters["last-known-good"]; limiter == nil || limiter.Limit() != 128 {
+		t.Fatalf("published limiter = %v, want candidate node limit 128", limiter)
+	}
+	if service.rateLimiters["last-known-good"] != service.rateLimiters["last-known-good-alias"] {
+		t.Fatal("published aliases do not share one limiter")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 }
 
 func TestStartBuildFailureDoesNotPublishRuntime(t *testing.T) {
@@ -549,7 +615,7 @@ func TestCloseWhileStartingIsRejectedWithoutClosingService(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	service := newStartTestService(events, &fakeRuntimeServer{events: events})
-	service.serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		close(entered)
 		<-release
 		return nil, errors.New("build failed")
@@ -601,6 +667,191 @@ func TestStartPublishesUserStateOnSuccess(t *testing.T) {
 	}
 }
 
+func TestStartKeepsCandidateStatePrivateUntilRuntimePublication(t *testing.T) {
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{events: events, serveBlock: make(chan struct{})}
+	service := newStartTestService(events, runtime)
+	client := service.apiClient.(*configurablePanelClient)
+	client.nodeInfo.SpeedLimit = 128
+	client.users = []api.UserInfo{{UID: 42, UUID: "candidate-user"}}
+	service.users["old-user"] = userRecord{UID: 1}
+
+	var observedNode *api.NodeInfo
+	var observedTag string
+	var observedUsers map[string]userRecord
+	service.serverConfigFactory = func(h *Hysteria2Service, _ serverBuildSpec) (*server.Config, error) {
+		observedNode, observedTag, _ = h.appliedStateSnapshot()
+		h.mu.RLock()
+		observedUsers = make(map[string]userRecord, len(h.users))
+		for key, user := range h.users {
+			observedUsers[key] = user
+		}
+		h.mu.RUnlock()
+		return &server.Config{}, nil
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if observedNode != nil || observedTag != "" {
+		t.Fatalf("candidate applied state was visible during build: node=%v tag=%q", observedNode, observedTag)
+	}
+	if _, ok := observedUsers["old-user"]; !ok || len(observedUsers) != 1 {
+		t.Fatalf("candidate users were visible during build: %v", observedUsers)
+	}
+	if _, ok := service.users["candidate-user"]; !ok || len(service.users) != 1 {
+		t.Fatalf("published users = %v, want candidate user", service.users)
+	}
+	if limiter := service.rateLimiters["candidate-user"]; limiter == nil || limiter.Limit() != 128 {
+		t.Fatalf("candidate limiter = %v, want node speed limit 128", limiter)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestStartDoesNotRejectCandidateUserBeforePublishingRuntime(t *testing.T) {
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{
+		events:     events,
+		serveBlock: make(chan struct{}),
+	}
+	service := newStartTestService(events, runtime)
+	service.apiClient.(*configurablePanelClient).users = []api.UserInfo{{
+		UID:  42,
+		UUID: "candidate-user",
+	}}
+
+	var authenticator server.Authenticator
+	service.serverConfigFactory = func(h *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		authenticator = &hyAuthenticator{svc: h, authGate: spec.authGate}
+		return &server.Config{Authenticator: authenticator}, nil
+	}
+	authEntered := make(chan struct{})
+	authResult := make(chan bool, 1)
+	service.serveRuntime = func(runtime runtimeServer) error {
+		close(authEntered)
+		ok, _ := authenticator.Authenticate(
+			&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			"candidate-user",
+			0,
+		)
+		authResult <- ok
+		return runtime.Serve()
+	}
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		start()
+		<-started
+		<-authEntered
+		return nil
+	}
+	taskStartEntered := make(chan struct{})
+	releaseTaskStart := make(chan struct{})
+	var releaseTaskStartOnce sync.Once
+	releaseTaskStartNow := func() {
+		releaseTaskStartOnce.Do(func() { close(releaseTaskStart) })
+	}
+	defer releaseTaskStartNow()
+	createdTasks := 0
+	service.taskFactory = func(tag string, _ time.Duration, _ func() error) lifecycleTask {
+		createdTasks++
+		if createdTasks == 1 {
+			return &blockingStartPeriodicTask{
+				entered: taskStartEntered,
+				release: releaseTaskStart,
+			}
+		}
+		return &fakePeriodicTask{tag: tag, events: events}
+	}
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- service.Start() }()
+	select {
+	case <-taskStartEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not reach synchronous periodic task startup")
+	}
+	select {
+	case ok := <-authResult:
+		releaseTaskStartNow()
+		<-startDone
+		t.Fatalf("authentication returned %v before runtime publication", ok)
+	default:
+	}
+	releaseTaskStartNow()
+	if err := <-startDone; err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	select {
+	case ok := <-authResult:
+		if !ok {
+			t.Fatal("candidate user was rejected between Serve start and runtime publication")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authentication remained blocked after runtime publication")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestStartFailureRejectsBlockedAuthenticationBeforeRuntimeCleanup(t *testing.T) {
+	taskErr := errors.New("task start failed")
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{
+		events:      events,
+		serveBlock:  make(chan struct{}),
+		serveExited: make(chan struct{}),
+	}
+	service := newStartTestService(events, runtime)
+	service.apiClient.(*configurablePanelClient).users = []api.UserInfo{{
+		UID:  42,
+		UUID: "candidate-user",
+	}}
+
+	var authenticator server.Authenticator
+	service.serverConfigFactory = func(h *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		authenticator = &hyAuthenticator{svc: h, authGate: spec.authGate}
+		return &server.Config{Authenticator: authenticator}, nil
+	}
+	authEntered := make(chan struct{})
+	authResult := make(chan bool, 1)
+	service.serveRuntime = func(runtime runtimeServer) error {
+		close(authEntered)
+		ok, _ := authenticator.Authenticate(
+			&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			"candidate-user",
+			0,
+		)
+		authResult <- ok
+		return runtime.Serve()
+	}
+	service.taskFactory = func(string, time.Duration, func() error) lifecycleTask {
+		return &waitThenFailPeriodicTask{wait: authEntered, err: taskErr}
+	}
+	var authAllowed bool
+	service.closeRuntime = func(runtime runtimeServer) error {
+		select {
+		case authAllowed = <-authResult:
+		case <-time.After(time.Second):
+			t.Fatal("runtime cleanup began before blocked authentication was released")
+		}
+		return runtime.Close()
+	}
+
+	if err := service.Start(); !errors.Is(err, taskErr) {
+		t.Fatalf("Start() error = %v, want %v", err, taskErr)
+	}
+	if authAllowed {
+		t.Fatal("authentication was allowed after startup failed")
+	}
+	select {
+	case <-runtime.serveExited:
+	default:
+		t.Fatal("Serve goroutine was not joined after startup failure")
+	}
+}
+
 func TestServeFailureAfterReadinessIsRecorded(t *testing.T) {
 	serveErr := errors.New("serve stopped")
 	events := &lifecycleEvents{}
@@ -641,6 +892,24 @@ func TestStartPublishesOnlyAfterRuntimeAndTasksAreReady(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build-config", "build-server", "serve", "task-start:Hysteria2_127.0.0.1_9443_9", "task-start:node monitor"}) {
 		t.Fatalf("events = %v, want Serve started before tasks", got)
+	}
+}
+
+func TestStartPeriodicCallbacksWaitForAppliedStatePublication(t *testing.T) {
+	events := &lifecycleEvents{}
+	runtime := &fakeRuntimeServer{events: events, serveBlock: make(chan struct{})}
+	service := newStartTestService(events, runtime)
+	service.taskFactory = defaultTaskFactory
+	client := service.apiClient.(*configurablePanelClient)
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if client.nodeInfoCalls != 1 || client.userListCalls != 1 {
+		t.Fatalf("panel calls before publication: node=%d users=%d, want initial fetches only", client.nodeInfoCalls, client.userListCalls)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 

@@ -109,11 +109,15 @@ func (t *hyTrafficLogger) UntraceStream(stream server.HyStream) {}
 
 // syncUsers syncs the internal user map from the panel provided user list.
 func (h *Hysteria2Service) syncUsers(userInfo *[]api.UserInfo) {
+	nodeInfo, _, _ := h.appliedStateSnapshot()
+	h.syncUsersFor(userInfo, nodeInfo)
+}
+
+func (h *Hysteria2Service) syncUsersFor(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo) {
 	if userInfo == nil {
 		return
 	}
 
-	nodeInfo, _, _ := h.appliedStateSnapshot()
 	var nodeLimit uint64
 	if nodeInfo != nil {
 		nodeLimit = nodeInfo.SpeedLimit
@@ -121,7 +125,24 @@ func (h *Hysteria2Service) syncUsers(userInfo *[]api.UserInfo) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.users, h.rateLimiters = reconcileUsers(
+		userInfo,
+		nodeLimit,
+		h.traffic,
+		h.onlineIPs,
+		h.ipLastActive,
+		h.rateLimiters,
+	)
+}
 
+func reconcileUsers(
+	userInfo *[]api.UserInfo,
+	nodeLimit uint64,
+	traffic map[string]*userTraffic,
+	onlineIPs map[string]map[string]struct{},
+	ipLastActive map[string]map[string]time.Time,
+	rateLimiters map[string]*rate.Limiter,
+) (map[string]userRecord, map[string]*rate.Limiter) {
 	newUsers := make(map[string]userRecord, len(*userInfo))
 	newRateLimiters := make(map[string]*rate.Limiter)
 
@@ -149,7 +170,7 @@ func (h *Hysteria2Service) syncUsers(userInfo *[]api.UserInfo) {
 				if k == "" {
 					continue
 				}
-				if old, ok := h.rateLimiters[k]; ok && old != nil {
+				if old, ok := rateLimiters[k]; ok && old != nil {
 					old.SetLimit(rate.Limit(limit))
 					old.SetBurst(int(limit))
 					limiter = old
@@ -171,27 +192,128 @@ func (h *Hysteria2Service) syncUsers(userInfo *[]api.UserInfo) {
 			if limiter != nil {
 				newRateLimiters[k] = limiter
 			}
-			if _, ok := h.traffic[k]; !ok {
-				h.traffic[k] = &userTraffic{}
+			if _, ok := traffic[k]; !ok {
+				traffic[k] = &userTraffic{}
 			}
 		}
 	}
 
-	h.users = newUsers
-	h.rateLimiters = newRateLimiters
-
 	// Clean online IP records for removed users
-	for uuid := range h.onlineIPs {
+	for uuid := range onlineIPs {
 		if _, ok := newUsers[uuid]; !ok {
-			delete(h.onlineIPs, uuid)
+			delete(onlineIPs, uuid)
 		}
 	}
 	// Clean ipLastActive records for removed users
-	for uuid := range h.ipLastActive {
+	for uuid := range ipLastActive {
 		if _, ok := newUsers[uuid]; !ok {
-			delete(h.ipLastActive, uuid)
+			delete(ipLastActive, uuid)
 		}
 	}
+	return newUsers, newRateLimiters
+}
+
+type candidateUserState struct {
+	users        map[string]userRecord
+	traffic      map[string]*userTraffic
+	overLimit    map[string]bool
+	onlineIPs    map[string]map[string]struct{}
+	ipLastActive map[string]map[string]time.Time
+	rateLimiters map[string]*rate.Limiter
+}
+
+func (h *Hysteria2Service) buildCandidateUserState(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo) candidateUserState {
+	h.mu.RLock()
+	state := candidateUserState{
+		users:        cloneUserRecords(h.users),
+		traffic:      cloneUserTraffic(h.traffic),
+		overLimit:    cloneBoolValues(h.overLimit),
+		onlineIPs:    cloneStringSets(h.onlineIPs),
+		ipLastActive: cloneLastActive(h.ipLastActive),
+		rateLimiters: cloneRateLimiters(h.rateLimiters),
+	}
+	h.mu.RUnlock()
+
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+	if userInfo != nil {
+		state.users, state.rateLimiters = reconcileUsers(
+			userInfo,
+			nodeLimit,
+			state.traffic,
+			state.onlineIPs,
+			state.ipLastActive,
+			state.rateLimiters,
+		)
+	} else {
+		state.rateLimiters = rebuildNodeRateLimiters(state.users, state.rateLimiters, nodeLimit)
+	}
+	return state
+}
+
+func cloneUserRecords(source map[string]userRecord) map[string]userRecord {
+	cloned := make(map[string]userRecord, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneUserTraffic(source map[string]*userTraffic) map[string]*userTraffic {
+	cloned := make(map[string]*userTraffic, len(source))
+	for key, value := range source {
+		if value == nil {
+			cloned[key] = nil
+			continue
+		}
+		snapshot := *value
+		cloned[key] = &snapshot
+	}
+	return cloned
+}
+
+func cloneBoolValues(source map[string]bool) map[string]bool {
+	cloned := make(map[string]bool, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneStringSets(source map[string]map[string]struct{}) map[string]map[string]struct{} {
+	cloned := make(map[string]map[string]struct{}, len(source))
+	for key, values := range source {
+		valueCopy := make(map[string]struct{}, len(values))
+		for value := range values {
+			valueCopy[value] = struct{}{}
+		}
+		cloned[key] = valueCopy
+	}
+	return cloned
+}
+
+func cloneLastActive(source map[string]map[string]time.Time) map[string]map[string]time.Time {
+	cloned := make(map[string]map[string]time.Time, len(source))
+	for key, values := range source {
+		valueCopy := make(map[string]time.Time, len(values))
+		for value, lastActive := range values {
+			valueCopy[value] = lastActive
+		}
+		cloned[key] = valueCopy
+	}
+	return cloned
+}
+
+func cloneRateLimiters(source map[string]*rate.Limiter) map[string]*rate.Limiter {
+	cloned := make(map[string]*rate.Limiter, len(source))
+	for key, limiter := range source {
+		if limiter != nil {
+			cloned[key] = rate.NewLimiter(limiter.Limit(), limiter.Burst())
+		}
+	}
+	return cloned
 }
 
 func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
@@ -212,20 +334,20 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 	return nodeLimit
 }
 
-func (h *Hysteria2Service) applyNodeRateLimitLocked(nodeLimit uint64) {
+func rebuildNodeRateLimiters(users map[string]userRecord, rateLimiters map[string]*rate.Limiter, nodeLimit uint64) map[string]*rate.Limiter {
 	sharedByKey := make(map[string]*rate.Limiter)
-	for key, user := range h.users {
+	for key, user := range users {
 		limiterKey := user.LimiterKey
 		if limiterKey == "" {
 			limiterKey = key
 		}
-		if h.rateLimiters[key] != nil {
-			sharedByKey[limiterKey] = h.rateLimiters[key]
+		if rateLimiters[key] != nil {
+			sharedByKey[limiterKey] = rateLimiters[key]
 		}
 	}
 
 	updated := make(map[string]*rate.Limiter)
-	for key, user := range h.users {
+	for key, user := range users {
 		limit := determineRate(nodeLimit, user.SpeedLimit)
 		if limit == 0 {
 			continue
@@ -234,9 +356,9 @@ func (h *Hysteria2Service) applyNodeRateLimitLocked(nodeLimit uint64) {
 		if limiterKey == "" {
 			limiterKey = key
 		}
-		limiter := h.rateLimiters[key]
+		limiter := sharedByKey[limiterKey]
 		if limiter == nil {
-			limiter = sharedByKey[limiterKey]
+			limiter = rateLimiters[key]
 		}
 		if limiter == nil {
 			limiter = rate.NewLimiter(rate.Limit(limit), int(limit))
@@ -247,7 +369,11 @@ func (h *Hysteria2Service) applyNodeRateLimitLocked(nodeLimit uint64) {
 		updated[key] = limiter
 		sharedByKey[limiterKey] = limiter
 	}
-	h.rateLimiters = updated
+	return updated
+}
+
+func (h *Hysteria2Service) applyNodeRateLimitLocked(nodeLimit uint64) {
+	h.rateLimiters = rebuildNodeRateLimiters(h.users, h.rateLimiters, nodeLimit)
 }
 
 // collectUsage builds traffic and online user reports and resets the
@@ -335,7 +461,7 @@ func (h *Hysteria2Service) restoreTraffic(snapshot map[string]userTraffic) {
 func (h *Hysteria2Service) userMonitor() error {
 	// delay to start
 	_, tag, startAt := h.appliedStateSnapshot()
-	if time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
+	if startAt.IsZero() || time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
@@ -423,7 +549,7 @@ func (h *Hysteria2Service) userMonitor() error {
 func (h *Hysteria2Service) nodeMonitor() error {
 	// delay to start, keep in sync with userMonitor behaviour
 	currentNode, _, startAt := h.appliedStateSnapshot()
-	if time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
+	if startAt.IsZero() || time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 

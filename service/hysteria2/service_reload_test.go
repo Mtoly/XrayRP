@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net"
 	"reflect"
 	"regexp"
 	"testing"
@@ -44,27 +45,26 @@ func newReloadTestService() (*Hysteria2Service, *fakeRuntimeServer, *api.NodeInf
 	return service, oldRuntime, oldNode
 }
 
-func TestReloadRequiresExplicitCandidateConfigFactory(t *testing.T) {
+func TestRuntimeConfigFactoryReceivesExplicitCandidateSpec(t *testing.T) {
 	service, _, _ := newReloadTestService()
-	legacyCalled := false
-	service.reloadServerConfigFactory = nil
-	service.serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
-		legacyCalled = true
+	var got serverBuildSpec
+	service.serverConfigFactory = func(_ *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		got = spec
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
 		return &fakeRuntimeServer{events: &lifecycleEvents{}}, nil
 	}
 
-	_, err := service.buildReloadRuntimeServer(serverBuildSpec{
+	want := serverBuildSpec{
 		nodeInfo:   newReloadNode(10443, "new.example.com"),
 		certConfig: cloneCertConfig(service.config.CertConfig),
-	})
-	if err == nil {
-		t.Fatal("buildReloadRuntimeServer() error = nil, want missing explicit candidate factory error")
 	}
-	if legacyCalled {
-		t.Fatal("buildReloadRuntimeServer() called legacy factory that reads mutable service fields")
+	if _, err := service.buildRuntimeServer(want); err != nil {
+		t.Fatalf("buildRuntimeServer() error = %v", err)
+	}
+	if got.nodeInfo != want.nodeInfo || got.certConfig != want.certConfig {
+		t.Fatalf("config factory spec = %+v, want explicit candidate inputs %+v", got, want)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestRuntimeCallbacksReadTagThroughAppliedSnapshot(t *testing.T) {
 func TestReloadNilNodeInfoIsNoOp(t *testing.T) {
 	service, oldRuntime, oldNode := newReloadTestService()
 	called := false
-	service.serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		called = true
 		return nil, nil
 	}
@@ -120,7 +120,7 @@ func TestReloadRejectsInvalidCandidateWithoutMutation(t *testing.T) {
 			service, oldRuntime, oldNode := newReloadTestService()
 			oldCert := *service.config.CertConfig
 			called := false
-			service.serverConfigFactory = func(*Hysteria2Service) (*server.Config, error) {
+			service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 				called = true
 				return nil, nil
 			}
@@ -143,7 +143,7 @@ func TestReloadBuildFailureRetainsOldRuntimeRulesAndAppliedState(t *testing.T) {
 	oldRules := []portHopRule{{FromPortStart: 30001, FromPortEnd: 30002, ToPort: 9443}}
 	service.portHopRules = append([]portHopRule(nil), oldRules...)
 	events := &lifecycleEvents{}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		events.add("build:candidate")
 		return nil, buildErr
 	}
@@ -178,7 +178,7 @@ func TestReloadServeFailureCleansCandidateAndRestoresOldRuntime(t *testing.T) {
 	restored := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	events := &lifecycleEvents{}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		if builds == 1 {
 			events.add("build:candidate")
@@ -256,7 +256,7 @@ func TestReloadSameEndpointWaitsForOldServeAndWatcherBeforeCandidateBuild(t *tes
 		}
 		return nil
 	}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		close(candidateBuildEntered)
 		return &server.Config{}, nil
 	}
@@ -293,7 +293,7 @@ func TestReloadServeResultIsObservableWithoutWatcherLeak(t *testing.T) {
 	serveErr := errors.New("candidate serve failed after claimed readiness")
 	service, _, _ := newReloadTestService()
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
@@ -340,7 +340,7 @@ func TestReloadRestorationFailureJoinsErrorsAndRecordsFailure(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		if builds == 1 {
 			return &server.Config{}, nil
@@ -368,7 +368,7 @@ func TestReloadSurfacesOldCloseFailureAfterSuccessfulReplacement(t *testing.T) {
 	closeErr := errors.New("old close failed")
 	service, oldRuntime, _ := newReloadTestService()
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
 	service.closeRuntime = func(runtime runtimeServer) error {
 		if runtime == oldRuntime {
@@ -401,7 +401,7 @@ func TestReloadPublishesRuntimeRulesAndOwnershipOnlyAfterServeReady(t *testing.T
 	serveEntered := make(chan struct{})
 	releaseServe := make(chan struct{})
 	releaseHandshake := make(chan struct{})
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
 	service.closeRuntime = func(runtimeServer) error { return nil }
 	service.serveRuntime = func(runtimeServer) error {
@@ -447,12 +447,170 @@ func TestReloadPublishesRuntimeRulesAndOwnershipOnlyAfterServeReady(t *testing.T
 	<-watcherDone
 }
 
+func TestReloadAuthenticationWaitsForCandidatePublication(t *testing.T) {
+	service, oldRuntime, _ := newReloadTestService()
+	service.users["candidate-user"] = userRecord{UID: 42}
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+
+	var authenticator server.Authenticator
+	service.serverConfigFactory = func(h *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		authenticator = &hyAuthenticator{svc: h, authGate: spec.authGate}
+		return &server.Config{Authenticator: authenticator}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
+		return candidate, nil
+	}
+	authEntered := make(chan struct{})
+	authResult := make(chan bool, 1)
+	service.serveRuntime = func(runtime runtimeServer) error {
+		close(authEntered)
+		ok, _ := authenticator.Authenticate(
+			&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			"candidate-user",
+			0,
+		)
+		authResult <- ok
+		return runtime.Serve()
+	}
+	handshakeEntered := make(chan struct{})
+	releaseHandshake := make(chan struct{})
+	service.serveHandshake = func(start func(), _ <-chan struct{}, _ <-chan error) error {
+		start()
+		<-authEntered
+		close(handshakeEntered)
+		<-releaseHandshake
+		return nil
+	}
+
+	reloadDone := make(chan error, 1)
+	go func() { reloadDone <- service.reloadNode(newReloadNode(10443, "new.example.com")) }()
+	<-handshakeEntered
+	select {
+	case ok := <-authResult:
+		close(releaseHandshake)
+		<-reloadDone
+		t.Fatalf("candidate authentication returned %v before publication", ok)
+	default:
+	}
+	if service.server != oldRuntime {
+		t.Fatal("candidate runtime was published before handshake completed")
+	}
+	close(releaseHandshake)
+	if err := <-reloadDone; err != nil {
+		t.Fatalf("reloadNode() error = %v", err)
+	}
+	select {
+	case ok := <-authResult:
+		if !ok {
+			t.Fatal("candidate authentication was rejected after successful publication")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("candidate authentication remained blocked after publication")
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestReloadFailureRejectsBlockedAuthenticationBeforeCandidateCleanup(t *testing.T) {
+	applyErr := errors.New("apply candidate rules failed")
+	service, oldRuntime, oldNode := newReloadTestService()
+	service.users["candidate-user"] = userRecord{UID: 42}
+	candidate := &fakeRuntimeServer{
+		events:      &lifecycleEvents{},
+		serveBlock:  make(chan struct{}),
+		serveExited: make(chan struct{}),
+	}
+	restored := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+
+	var candidateAuthenticator server.Authenticator
+	builds := 0
+	service.serverConfigFactory = func(h *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		builds++
+		authenticator := &hyAuthenticator{svc: h, authGate: spec.authGate}
+		if builds == 1 {
+			candidateAuthenticator = authenticator
+		}
+		return &server.Config{Authenticator: authenticator}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
+		if builds == 1 {
+			return candidate, nil
+		}
+		return restored, nil
+	}
+	authEntered := make(chan struct{})
+	authResult := make(chan bool, 1)
+	service.serveRuntime = func(runtime runtimeServer) error {
+		if runtime == candidate {
+			close(authEntered)
+			ok, _ := candidateAuthenticator.Authenticate(
+				&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+				"candidate-user",
+				0,
+			)
+			authResult <- ok
+		}
+		return runtime.Serve()
+	}
+	handshakes := 0
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		handshakes++
+		start()
+		<-started
+		if handshakes == 1 {
+			<-authEntered
+		}
+		return nil
+	}
+	var authAllowed bool
+	service.closeRuntime = func(runtime runtimeServer) error {
+		switch runtime {
+		case oldRuntime:
+			return nil
+		case candidate:
+			select {
+			case authAllowed = <-authResult:
+			case <-time.After(time.Second):
+				t.Fatal("candidate cleanup began before blocked authentication was released")
+			}
+		}
+		return runtime.Close()
+	}
+	originalApply, originalDelete := applyPortHopRules, deletePortHopRules
+	t.Cleanup(func() {
+		applyPortHopRules = originalApply
+		deletePortHopRules = originalDelete
+		_ = service.Close()
+	})
+	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func([]portHopRule, *log.Entry) error { return applyErr }
+	newNode := newReloadNode(10443, "new.example.com")
+	newNode.Hysteria2Config.PortHopEnabled = true
+	newNode.Hysteria2Config.PortHopPorts = "31001-31002"
+
+	if err := service.reloadNode(newNode); !errors.Is(err, applyErr) {
+		t.Fatalf("reloadNode() error = %v, want %v", err, applyErr)
+	}
+	if authAllowed {
+		t.Fatal("candidate authentication was allowed after reload failed")
+	}
+	select {
+	case <-candidate.serveExited:
+	default:
+		t.Fatal("candidate Serve goroutine was not joined after reload failure")
+	}
+	if service.server != restored || service.nodeInfo != oldNode || service.state != stateRunning {
+		t.Fatalf("restored state = server:%v node:%v state:%v", service.server, service.nodeInfo, service.state)
+	}
+}
+
 func TestReloadHoldsSerializationUntilServeReadiness(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	serveEntered := make(chan struct{})
 	releaseServe := make(chan struct{})
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
 	service.closeRuntime = func(runtimeServer) error { return nil }
 	service.serveRuntime = func(runtimeServer) error {
@@ -487,7 +645,7 @@ func TestConcurrentReloadsExecuteSequentially(t *testing.T) {
 	releaseFirstBuild := make(chan struct{})
 	secondBuildEntered := make(chan struct{})
 	builds := 0
-	service.reloadServerConfigFactory = func(_ *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(_ *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
 		builds++
 		switch spec.nodeInfo.Port {
 		case 10443:
@@ -552,7 +710,7 @@ func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
 		<-releaseRenew
 		return "renewed.cert", "renewed.key", true, nil
 	}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
@@ -586,7 +744,7 @@ func TestCertificateRenewalFailureIsReturnedWithoutReplacingRuntime(t *testing.T
 	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
 		return "", "", false, renewErr
 	}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		t.Fatal("certificate renewal failure attempted a runtime build")
 		return nil, nil
 	}
@@ -609,7 +767,7 @@ func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T
 		return "renewed.cert", "renewed.key", true, nil
 	}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		if builds == 1 {
 			return nil, buildErr
@@ -645,7 +803,7 @@ func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T
 		return "renewed.cert", "renewed.key", renewCalls == 1, nil
 	}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		return &server.Config{}, nil
 	}
@@ -691,7 +849,7 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 		return "renewed.cert", "renewed.key", renewCalls == 1, nil
 	}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		return &server.Config{}, nil
 	}
@@ -736,7 +894,7 @@ func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 		t.Fatalf("UpdateRule() error = %v", err)
 	}
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{}), serving: make(chan struct{})}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
@@ -767,7 +925,7 @@ func TestSuccessfulReloadPublishesNodeRateLimitWithRuntime(t *testing.T) {
 	oldLimiter := rate.NewLimiter(10, 10)
 	service.rateLimiters = map[string]*rate.Limiter{"user": oldLimiter}
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{}), serving: make(chan struct{})}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
@@ -796,7 +954,7 @@ func TestSuccessfulReloadSharesNewNodeLimiterAcrossUserAliases(t *testing.T) {
 	users := []api.UserInfo{{UID: 0, UUID: "user-uuid", Passwd: "user-password"}}
 	service.syncUsers(&users)
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{}), serving: make(chan struct{})}
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
@@ -870,7 +1028,7 @@ func TestReloadPortHopRollbackFailureDoesNotPublishFalseOwnership(t *testing.T) 
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
 	restored := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{}), serveErr: restoredServeErr}
 	builds := 0
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		return &server.Config{}, nil
 	}
@@ -946,7 +1104,7 @@ func TestCloseRacingWithReloadIsRejectedWithoutMutation(t *testing.T) {
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	serveEntered := make(chan struct{})
 	releaseServe := make(chan struct{})
-	service.reloadServerConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
 	service.closeRuntime = func(runtimeServer) error { return nil }
 	service.serveRuntime = func(runtimeServer) error {

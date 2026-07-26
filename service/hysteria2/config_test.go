@@ -39,7 +39,10 @@ func TestBuildServerConfigKeepsVulnerableSniffHookDisabled(t *testing.T) {
 		},
 	}
 
-	cfg, err := h.buildServerConfig()
+	cfg, err := h.buildServerConfigFor(serverBuildSpec{
+		nodeInfo:   h.nodeInfo,
+		certConfig: h.config.CertConfig,
+	})
 	if err != nil {
 		t.Fatalf("buildServerConfig returned error: %v", err)
 	}

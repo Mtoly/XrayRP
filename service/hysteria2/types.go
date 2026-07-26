@@ -22,12 +22,12 @@ type runtimeServer interface {
 	Close() error
 }
 
-type serverConfigFactory func(*Hysteria2Service) (*server.Config, error)
+type serverConfigFactory func(*Hysteria2Service, serverBuildSpec) (*server.Config, error)
 type serverBuildSpec struct {
 	nodeInfo   *api.NodeInfo
 	certConfig *mylego.CertConfig
+	authGate   *runtimeAuthGate
 }
-type reloadServerConfigFactory func(*Hysteria2Service, serverBuildSpec) (*server.Config, error)
 type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error
 type closeRuntimeFunc func(runtimeServer) error
@@ -41,8 +41,37 @@ type runtimeServeOutcome struct {
 }
 
 type reloadRuntime struct {
-	runtime runtimeServer
-	serve   *runtimeServeOutcome
+	runtime  runtimeServer
+	serve    *runtimeServeOutcome
+	authGate *runtimeAuthGate
+}
+
+type runtimeAuthGate struct {
+	ready   chan struct{}
+	once    sync.Once
+	allowed bool
+}
+
+func newRuntimeAuthGate() *runtimeAuthGate {
+	return &runtimeAuthGate{ready: make(chan struct{})}
+}
+
+func (g *runtimeAuthGate) resolve(allowed bool) {
+	if g == nil {
+		return
+	}
+	g.once.Do(func() {
+		g.allowed = allowed
+		close(g.ready)
+	})
+}
+
+func (g *runtimeAuthGate) wait() bool {
+	if g == nil {
+		return true
+	}
+	<-g.ready
+	return g.allowed
 }
 
 type lifecycleState uint8
@@ -88,17 +117,16 @@ type Hysteria2Service struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	server                    runtimeServer
-	serverConfigFactory       serverConfigFactory
-	reloadServerConfigFactory reloadServerConfigFactory
-	runtimeServerFactory      runtimeServerFactory
-	serveRuntime              serveRuntimeFunc
-	closeRuntime              closeRuntimeFunc
-	renewCertificate          renewCertificateFunc
-	taskFactory               taskFactory
-	serveHandshake            serveHandshakeFunc
-	serveDone                 <-chan struct{}
-	watcherDone               <-chan struct{}
+	server               runtimeServer
+	serverConfigFactory  serverConfigFactory
+	runtimeServerFactory runtimeServerFactory
+	serveRuntime         serveRuntimeFunc
+	closeRuntime         closeRuntimeFunc
+	renewCertificate     renewCertificateFunc
+	taskFactory          taskFactory
+	serveHandshake       serveHandshakeFunc
+	serveDone            <-chan struct{}
+	watcherDone          <-chan struct{}
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState
