@@ -12,7 +12,7 @@
 
 یک فریمورک بک اند مبتنی بر xray که از چند از پنل پشتیبانی می کند
 
-یک چارچوب بک‌اند مبتنی بر Xray که از پروتکل‌های V2ay، Trojan و Shadowsocks پشتیبانی می‌کند، به راحتی قابل گسترش است و از اتصال چند پنل پشتیبانی می‌کند.
+یک چارچوب بک‌اند مبتنی بر Xray که از پروتکل‌های V2Ray، Trojan و Shadowsocks پشتیبانی می‌کند، به راحتی قابل گسترش است و از اتصال چند پنل پشتیبانی می‌کند.
 
 اگر این پروژه را دوست دارید، می توانید با کلیک بر روی ستاره+ساعت در گوشه بالا سمت راست به ادامه روند پیشرفت این پروژه توجه کنید.
 
@@ -92,7 +92,7 @@ wget -N https://raw.githubusercontent.com/Mtoly/XrayRP-release/master/install.sh
 
 [Mozilla Public License Version 2.0](https://github.com/Mtoly/XrayRP/blob/master/LICENSE)
 
-## Telgram
+## Telegram
 
 [بحث در مورد XrayR Backend](https://t.me/XrayR_project)
 

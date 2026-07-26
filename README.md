@@ -13,16 +13,6 @@
 
 A Xray backend framework that can easily support many panels.
 
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-## 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-
 ## 当前版本
 
 当前预发布版本：`0.9-alpha`
@@ -33,7 +23,7 @@ Xboard / NewV2board 相关的 WebSocket 双通道同步、机器/服务器管理
 
 在 Xboard / NewV2board 的 machine mode 下，XrayRP 会按面板下发的 `base_config.push_interval` 自动上报整机 CPU、内存、Swap、磁盘和网络速率到服务器管理页，无需额外本地配置。
 
-一个基于Xray的后端框架，支持V2ay,Trojan,Shadowsocks协议，极易扩展，支持多面板对接。
+一个基于Xray的后端框架，支持V2Ray,Trojan,Shadowsocks协议，极易扩展，支持多面板对接。
 
 如果您喜欢本项目，可以右上角点个star+watch，持续关注本项目的进展。
 
@@ -133,7 +123,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-mac
 
 [Mozilla Public License Version 2.0](https://github.com/Mtoly/XrayRP/blob/master/LICENSE)
 
-## Telgram
+## Telegram
 
 [XrayR后端讨论](https://t.me/XrayR_project)
 

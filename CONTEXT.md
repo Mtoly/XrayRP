@@ -27,3 +27,19 @@ _Avoid_: raw server config, v2board cache, API response
 **Transport profile**:
 The normalized transport and security shape derived from panel node data before it is applied to local Xray inbound and user configuration.
 _Avoid_: protocol helper, transport config, node parser utility
+
+**Specialized runtime lifecycle**:
+The ownership of start, readiness, stop and join, replacement, rollback, and runtime failure state for AnyTLS, TUIC, and Hysteria2 runtimes.
+_Avoid_: specialized service state, protocol restart flow, runtime helper
+
+**Applied node value**:
+The immutable, deeply cloned panel node value retained as the authoritative input for Node runtime state and compatibility snapshots.
+_Avoid_: raw NodeInfo, normalized node pointer, controller node copy
+
+**Runtime construction plan**:
+The fully validated immutable choice of static or machine mode together with the inputs and factories required to construct panel-managed runtimes.
+_Avoid_: panel config copy, runtime options, service factory arguments
+
+**Panel transport mechanics**:
+The protocol-independent HTTP request behavior shared by compatible panel adapters, including retry, timeout, response safety, typed-result validation, and credential redaction.
+_Avoid_: panel protocol semantics, shared panel API, adapter request format

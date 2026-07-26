@@ -13,7 +13,7 @@ Currently covered backend-facing areas:
 - Xboard `base_config` runtime interval updates for controller sync/report tasks and machine discovery polling.
 - Route/outbound policy compatibility for the Xboard UniProxy config shape.
 - Panel-provided certificate config (`cert_config`) where available.
-- WebSocket + Polling dual-active control-plane skeleton.
+- WebSocket + Polling dual-active control path.
 - `/api/v2/server/report` compatibility for status, online-user, and traffic reports with legacy UniProxy fallback.
 - Polling fallback for final consistency.
 
@@ -81,7 +81,6 @@ The fallback is only for unsupported endpoint responses. Authentication failures
 
 Follow-up items not covered by this phase:
 
-- machine mode;
 - Trojan REALITY;
 - outbound safe regex filters;
 - uTLS/xmux advanced field completion.
@@ -133,7 +132,7 @@ Supported route behavior includes:
 - Direct domain extraction for supported route entries.
 - Runtime outbound handler selection with fallback.
 
-The runtime still protects same-node routing. XrayR-managed inbound tags do not arbitrarily dispatch into another node's outbound handler.
+The runtime still protects same-node routing. XrayRP-managed inbound tags do not arbitrarily dispatch into another node's outbound handler.
 
 ## VLESS + REALITY + xhttp
 

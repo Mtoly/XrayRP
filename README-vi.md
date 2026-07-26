@@ -12,7 +12,7 @@
 
 A Xray backend framework that can easily support many panels.
 
-Khung trở lại dựa trên XRay hỗ trợ các giao thức V2ay, Trojan, Shadowsocks, dễ dàng mở rộng và hỗ trợ kết nối nhiều người.
+Khung trở lại dựa trên XRay hỗ trợ các giao thức V2Ray, Trojan, Shadowsocks, dễ dàng mở rộng và hỗ trợ kết nối nhiều người.
 
 Nếu bạn thích dự án này, bạn có thể nhấp vào Star+Watch ở góc trên bên phải để tiếp tục chú ý đến tiến trình của dự án này.
 
@@ -94,7 +94,7 @@ wget -N https://raw.githubusercontent.com/Mtoly/XrayRP-release/master/install.sh
 
 [Mozilla Public License Version 2.0](https://github.com/Mtoly/XrayRP/blob/master/LICENSE)
 
-## Telgram
+## Telegram
 
 [Xrayr Back-end Thảo luận](https://t.me/XrayR_project)
 

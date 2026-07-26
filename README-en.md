@@ -12,7 +12,7 @@
 
 A Xray backend framework that can easily support many panels.
 
-A back -end framework based on XRAY supports V2ay, Trojan, Shadowsocks protocols, which are easy to expand and support multi -panel docker.
+A back -end framework based on XRAY supports V2Ray, Trojan, Shadowsocks protocols, which are easy to expand and support multi -panel docker.
 
 
 If you like this project, you can click STAR+WATCH in the upper right corner to continue to pay attention to the progress of this project.
@@ -114,7 +114,7 @@ If `/etc/XrayR/config.yml` already exists, the script will not overwrite it by d
 
 [Mozilla Public License Version 2.0](https://github.com/Mtoly/XrayRP/blob/master/LICENSE)
 
-## Telgram
+## Telegram
 
 [Xrayr back-end discussion](https://t.me/XrayR_project)
 
