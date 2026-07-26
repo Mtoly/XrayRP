@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	xcommon "github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
@@ -46,7 +45,11 @@ func (t *stagedPeriodicTask) Close() error { return errors.Join(t.Stop(), t.Wait
 type recordingManagedPeriodic struct {
 	tag    string
 	events *lifecycleEvents
-	task   *xcommon.ManagedPeriodic
+	task   interface {
+		Start() error
+		Stop() error
+		Wait() error
+	}
 }
 
 func (t *recordingManagedPeriodic) Start() error { return t.task.Start() }
@@ -201,21 +204,18 @@ func TestStartTaskFailureStopsTasksClosesRuntimeThenWaits(t *testing.T) {
 	service.taskFactory = func(tag string, _ time.Duration, _ func() error) lifecycleTask {
 		created++
 		if created == 1 {
-			managed := &xcommon.ManagedPeriodic{
-				Interval: time.Nanosecond,
-				Execute: func() error {
-					calls++
-					if calls == 1 {
-						events.add("callback-initial")
-						return nil
-					}
-					events.add("callback-start")
-					close(callbackStarted)
-					<-runtimeClosed
-					events.add("callback-exit")
-					return callbackErr
-				},
-			}
+			managed := specialruntime.NewPeriodic(time.Nanosecond, func() error {
+				calls++
+				if calls == 1 {
+					events.add("callback-initial")
+					return nil
+				}
+				events.add("callback-start")
+				close(callbackStarted)
+				<-runtimeClosed
+				events.add("callback-exit")
+				return callbackErr
+			})
 			return &recordingManagedPeriodic{tag: tag, events: events, task: managed}
 		}
 		return &stagedPeriodicTask{

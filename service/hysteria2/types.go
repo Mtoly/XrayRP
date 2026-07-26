@@ -9,7 +9,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
-	xcommon "github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
 	"github.com/Mtoly/XrayRP/service/controller"
@@ -66,7 +65,7 @@ type taskFactory func(tag string, interval time.Duration, execute func() error) 
 type serveHandshakeFunc func(start func(), started <-chan struct{}, result <-chan error) error
 
 func defaultTaskFactory(tag string, interval time.Duration, execute func() error) lifecycleTask {
-	return &xcommon.ManagedPeriodic{Interval: interval, Execute: execute}
+	return specialruntime.NewPeriodic(interval, execute)
 }
 
 // defaultServeHandshake only establishes that the Serve goroutine reached the

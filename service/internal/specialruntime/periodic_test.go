@@ -1,4 +1,4 @@
-package common
+package specialruntime
 
 import (
 	"errors"
@@ -11,9 +11,9 @@ import (
 func TestManagedPeriodicStartWaitsForFirstExecute(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
-	task := &ManagedPeriodic{
-		Interval: time.Hour,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Hour,
+		execute: func() error {
 			close(started)
 			<-release
 			return nil
@@ -38,7 +38,7 @@ func TestManagedPeriodicStartWaitsForFirstExecute(t *testing.T) {
 
 func TestManagedPeriodicPropagatesImmediateExecuteError(t *testing.T) {
 	wantErr := errors.New("execute failed")
-	task := &ManagedPeriodic{Interval: time.Hour, Execute: func() error { return wantErr }}
+	task := &managedPeriodic{interval: time.Hour, execute: func() error { return wantErr }}
 	if err := task.Start(); !errors.Is(err, wantErr) {
 		t.Fatalf("Start() error = %v, want %v", err, wantErr)
 	}
@@ -51,9 +51,9 @@ func TestManagedPeriodicFailedStartCanBeClosedWhileExecuteReturns(t *testing.T) 
 	wantErr := errors.New("execute failed")
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
-	task := &ManagedPeriodic{
-		Interval: time.Hour,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Hour,
+		execute: func() error {
 			close(callbackStarted)
 			<-releaseCallback
 			return wantErr
@@ -88,9 +88,9 @@ func TestManagedPeriodicCloseWaitsForCallback(t *testing.T) {
 	releaseCallback := make(chan struct{})
 	var calls atomic.Int32
 	var signaled atomic.Bool
-	task := &ManagedPeriodic{
-		Interval: time.Millisecond,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Millisecond,
+		execute: func() error {
 			if calls.Add(1) == 1 {
 				return nil
 			}
@@ -122,9 +122,9 @@ func TestManagedPeriodicCloseReturnsLaterExecuteError(t *testing.T) {
 	wantErr := errors.New("later execute failed")
 	secondCall := make(chan struct{})
 	var calls atomic.Int32
-	task := &ManagedPeriodic{
-		Interval: time.Millisecond,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Millisecond,
+		execute: func() error {
 			if calls.Add(1) == 1 {
 				return nil
 			}
@@ -141,6 +141,61 @@ func TestManagedPeriodicCloseReturnsLaterExecuteError(t *testing.T) {
 	}
 }
 
+func TestManagedPeriodicRetriesAfterLaterExecuteError(t *testing.T) {
+	wantErr := errors.New("later execute failed")
+	firstTimer := newManualManagedPeriodicTimer()
+	secondTimer := newManualManagedPeriodicTimer()
+	thirdTimer := newManualManagedPeriodicTimer()
+	thirdCall := make(chan struct{})
+	var calls atomic.Int32
+	var timersMu sync.Mutex
+	timers := []*manualManagedPeriodicTimer{firstTimer, secondTimer, thirdTimer}
+	task := &managedPeriodic{
+		interval: time.Hour,
+		execute: func() error {
+			switch calls.Add(1) {
+			case 1:
+				return nil
+			case 2:
+				return wantErr
+			case 3:
+				close(thirdCall)
+				return nil
+			default:
+				t.Fatal("unexpected extra callback")
+				return nil
+			}
+		},
+		newTimer: func(time.Duration) managedPeriodicTimer {
+			timersMu.Lock()
+			defer timersMu.Unlock()
+			if len(timers) == 0 {
+				t.Fatal("unexpected extra timer")
+			}
+			timer := timers[0]
+			timers = timers[1:]
+			return timer
+		},
+	}
+
+	if err := task.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	firstTimer.waitObserved(t)
+	firstTimer.fire()
+	secondTimer.waitObserved(t)
+	secondTimer.fire()
+	select {
+	case <-thirdCall:
+	case <-time.After(time.Second):
+		t.Fatal("callback was not retried after a later error")
+	}
+	thirdTimer.waitObserved(t)
+	if err := task.Close(); !errors.Is(err, wantErr) {
+		t.Fatalf("Close() error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestManagedPeriodicSchedulesNextIntervalAfterCallbackCompletes(t *testing.T) {
 	firstTimer := newManualManagedPeriodicTimer()
 	secondTimer := newManualManagedPeriodicTimer()
@@ -149,9 +204,9 @@ func TestManagedPeriodicSchedulesNextIntervalAfterCallbackCompletes(t *testing.T
 	var calls atomic.Int32
 	var timersMu sync.Mutex
 	timers := []*manualManagedPeriodicTimer{firstTimer, secondTimer}
-	task := &ManagedPeriodic{
-		Interval: time.Hour,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Hour,
+		execute: func() error {
 			if calls.Add(1) == 2 {
 				close(callbackStarted)
 				<-releaseCallback
@@ -191,9 +246,9 @@ func TestManagedPeriodicDoesNotRestartUntilStoppedCallbackCompletes(t *testing.T
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
 	var calls atomic.Int32
-	task := &ManagedPeriodic{
-		Interval: time.Millisecond,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Millisecond,
+		execute: func() error {
 			if calls.Add(1) == 2 {
 				close(callbackStarted)
 				<-releaseCallback
@@ -224,9 +279,9 @@ func TestManagedPeriodicStopAndWaitAreSequentiallyIdempotent(t *testing.T) {
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
 	var calls atomic.Int32
-	task := &ManagedPeriodic{
-		Interval: time.Millisecond,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Millisecond,
+		execute: func() error {
 			if calls.Add(1) == 1 {
 				return nil
 			}
@@ -266,9 +321,9 @@ func TestManagedPeriodicRegistersRunningCallbackBeforeStopReturns(t *testing.T) 
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
 	var calls atomic.Int32
-	task := &ManagedPeriodic{
-		Interval: time.Hour,
-		Execute: func() error {
+	task := &managedPeriodic{
+		interval: time.Hour,
+		execute: func() error {
 			if calls.Add(1) == 2 {
 				close(callbackStarted)
 				<-releaseCallback
@@ -308,7 +363,7 @@ func TestManagedPeriodicRegistersRunningCallbackBeforeStopReturns(t *testing.T) 
 }
 
 func TestManagedPeriodicRejectsSecondStartAfterTerminal(t *testing.T) {
-	task := &ManagedPeriodic{Interval: time.Hour, Execute: func() error { return nil }}
+	task := &managedPeriodic{interval: time.Hour, execute: func() error { return nil }}
 	if err := task.Start(); err != nil {
 		t.Fatalf("first Start() error = %v", err)
 	}

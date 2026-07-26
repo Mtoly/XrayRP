@@ -1,4 +1,4 @@
-package common
+package specialruntime
 
 import (
 	"errors"
@@ -6,11 +6,11 @@ import (
 	"time"
 )
 
-// ManagedPeriodic runs Execute immediately on Start, then waits Interval after
-// each successful callback, and waits for an in-flight callback when closed.
-type ManagedPeriodic struct {
-	Interval time.Duration
-	Execute  func() error
+// managedPeriodic runs execute immediately on Start, then waits interval after
+// every callback, retries later errors, and joins in-flight work when closed.
+type managedPeriodic struct {
+	interval time.Duration
+	execute  func() error
 
 	mu       sync.Mutex
 	stop     chan struct{}
@@ -21,6 +21,13 @@ type ManagedPeriodic struct {
 	active   int
 	runErr   error
 	newTimer func(time.Duration) managedPeriodicTimer
+}
+
+func NewPeriodic(interval time.Duration, execute func() error) *managedPeriodic {
+	return &managedPeriodic{
+		interval: interval,
+		execute:  execute,
+	}
 }
 
 type managedPeriodicTimer interface {
@@ -40,7 +47,7 @@ func newManagedPeriodicTimer(interval time.Duration) managedPeriodicTimer {
 	return standardManagedPeriodicTimer{Timer: time.NewTimer(interval)}
 }
 
-func (p *ManagedPeriodic) Start() error {
+func (p *managedPeriodic) Start() error {
 	p.mu.Lock()
 	if p.terminal {
 		p.mu.Unlock()
@@ -50,9 +57,9 @@ func (p *ManagedPeriodic) Start() error {
 		p.mu.Unlock()
 		return nil
 	}
-	if p.Execute == nil {
+	if p.execute == nil {
 		p.mu.Unlock()
-		return errors.New("periodic task Execute is nil")
+		return errors.New("periodic task execute callback is nil")
 	}
 	p.started = true
 	p.running = true
@@ -61,8 +68,8 @@ func (p *ManagedPeriodic) Start() error {
 	p.runErr = nil
 	stop := p.stop
 	done := p.done
-	interval := p.Interval
-	execute := p.Execute
+	interval := p.interval
+	execute := p.execute
 	newTimer := p.newTimer
 	if newTimer == nil {
 		newTimer = newManagedPeriodicTimer
@@ -95,7 +102,7 @@ func (p *ManagedPeriodic) Start() error {
 	return nil
 }
 
-func (p *ManagedPeriodic) run(stop <-chan struct{}, done chan struct{}, interval time.Duration, execute func() error, newTimer func(time.Duration) managedPeriodicTimer) {
+func (p *managedPeriodic) run(stop <-chan struct{}, done chan struct{}, interval time.Duration, execute func() error, newTimer func(time.Duration) managedPeriodicTimer) {
 	var runErr error
 	defer func() {
 		p.mu.Lock()
@@ -133,12 +140,11 @@ func (p *ManagedPeriodic) run(stop <-chan struct{}, done chan struct{}, interval
 		p.mu.Unlock()
 		if err != nil {
 			runErr = err
-			return
 		}
 	}
 }
 
-func (p *ManagedPeriodic) Stop() error {
+func (p *managedPeriodic) Stop() error {
 	p.mu.Lock()
 	if !p.running {
 		p.mu.Unlock()
@@ -150,7 +156,7 @@ func (p *ManagedPeriodic) Stop() error {
 	return nil
 }
 
-func (p *ManagedPeriodic) Wait() error {
+func (p *managedPeriodic) Wait() error {
 	p.mu.Lock()
 	done := p.done
 	p.mu.Unlock()
@@ -163,6 +169,6 @@ func (p *ManagedPeriodic) Wait() error {
 	return err
 }
 
-func (p *ManagedPeriodic) Close() error {
+func (p *managedPeriodic) Close() error {
 	return errors.Join(p.Stop(), p.Wait())
 }

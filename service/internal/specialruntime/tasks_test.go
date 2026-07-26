@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type recordingTask struct {
@@ -36,6 +37,16 @@ func (t *recordingTask) Wait() error {
 
 type closeOnlyTask struct {
 	events *[]string
+}
+
+func TestPeriodicSatisfiesTaskInterface(t *testing.T) {
+	var task Task = NewPeriodic(time.Hour, func() error { return nil })
+	if err := task.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (t *closeOnlyTask) Start() error { return nil }
