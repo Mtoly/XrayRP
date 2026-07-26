@@ -84,7 +84,12 @@ func newWSRuntime(factory wsRuntimeClientFactory, submitter syncActionSubmitter,
 }
 
 func (r *wsRuntime) Start() {
-	r.lifecycle.Start()
+	r.mu.Lock()
+	if r.lifecycle.Start() {
+		// Connection outcomes use the same lock, so none can overtake this reset.
+		r.degraded = false
+	}
+	r.mu.Unlock()
 }
 
 func (r *wsRuntime) Stop() {

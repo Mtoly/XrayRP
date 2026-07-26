@@ -336,6 +336,48 @@ func TestWSRuntime_RepeatedStartDoesNotClearDegradedState(t *testing.T) {
 	runtime.Stop()
 }
 
+func TestWSRuntime_RestartClearsPriorDegradedStateBeforeConnecting(t *testing.T) {
+	t.Parallel()
+
+	firstClient := newStubWSRuntimeClient()
+	attempts := make(chan int, 3)
+	attempt := 0
+	factory := func(ctx context.Context) (wsRuntimeClient, error) {
+		attempt++
+		attempts <- attempt
+		if attempt == 1 {
+			return firstClient, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory, submitter, wsRuntimeOptions{})
+	t.Cleanup(runtime.Stop)
+
+	runtime.Start()
+	if got := receiveWSRuntimeAttempt(t, attempts); got != 1 {
+		t.Fatalf("initial connect attempt = %d, want 1", got)
+	}
+	firstClient.failTransport()
+	_ = submitter.WaitAction(t)
+	if got := receiveWSRuntimeAttempt(t, attempts); got != 2 {
+		t.Fatalf("reconnect attempt = %d, want 2", got)
+	}
+	if !runtime.Degraded() {
+		t.Fatal("disconnect did not mark runtime degraded before reconnect")
+	}
+	runtime.Stop()
+
+	runtime.Start()
+	if got := receiveWSRuntimeAttempt(t, attempts); got != 3 {
+		t.Fatalf("restart connect attempt = %d, want 3", got)
+	}
+	if runtime.Degraded() {
+		t.Fatal("accepted restart retained degraded state from the previous run")
+	}
+}
+
 func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSubmit(t *testing.T) {
 	t.Parallel()
 
@@ -676,6 +718,17 @@ func expectNoKeepAlive(t *testing.T, client *stubWSRuntimeClient, wait time.Dura
 	case <-client.keepAliveCh:
 		t.Fatal("expected no keepalive")
 	case <-time.After(wait):
+	}
+}
+
+func receiveWSRuntimeAttempt(t *testing.T, attempts <-chan int) int {
+	t.Helper()
+	select {
+	case attempt := <-attempts:
+		return attempt
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for websocket connection attempt")
+		return 0
 	}
 }
 

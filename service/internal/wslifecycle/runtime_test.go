@@ -119,7 +119,9 @@ func TestRuntimeInitialConnectionPublishesClientAndClosesOwnedWork(t *testing.T)
 		},
 	})
 
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
 	if call := <-factory.called; call != 1 {
 		t.Fatalf("factory call = %d, want 1", call)
 	}
@@ -169,7 +171,9 @@ func TestRuntimeRetriesInitialFailureAndReportsReconnect(t *testing.T) {
 		}
 	}
 
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
 	<-factory.called
 	if outcome := <-outcomes; outcome != OutcomeConnectFailed {
 		t.Fatalf("outcome = %v, want connect failed", outcome)
@@ -184,6 +188,70 @@ func TestRuntimeRetriesInitialFailureAndReportsReconnect(t *testing.T) {
 	}
 	if outcome := <-outcomes; outcome != OutcomeReconnected {
 		t.Fatalf("outcome = %v, want reconnected", outcome)
+	}
+
+	runtime.Close()
+}
+
+func TestRuntimeRecoversAfterMultipleReconnectFailures(t *testing.T) {
+	initialClient := newContractClient()
+	recoveredClient := newContractClient()
+	factory := &contractFactory{
+		results: []factoryResult{
+			{client: initialClient},
+			{err: errors.New("first reconnect failed")},
+			{err: errors.New("second reconnect failed")},
+			{client: recoveredClient},
+		},
+		called: make(chan int, 4),
+	}
+	outcomes := make(chan Outcome, 8)
+	backoffEntered := make(chan struct{}, 3)
+	backoffRelease := make(chan struct{}, 3)
+	runtime := New(Config{
+		Factory: factory.connect,
+		HandleOutcome: func(outcome Outcome) {
+			outcomes <- outcome
+		},
+	})
+	runtime.sleep = func(ctx context.Context, _ time.Duration) bool {
+		backoffEntered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-backoffRelease:
+			return true
+		}
+	}
+
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
+	expectContractCall(t, factory.called, 1)
+	expectContractOutcome(t, outcomes, OutcomeConnected)
+
+	initialClient.errs <- errors.New("connection lost")
+	expectContractOutcome(t, outcomes, OutcomeDisconnected)
+	releaseContractBackoff(t, backoffEntered, backoffRelease)
+
+	expectContractCall(t, factory.called, 2)
+	expectContractOutcome(t, outcomes, OutcomeConnectFailed)
+	releaseContractBackoff(t, backoffEntered, backoffRelease)
+
+	expectContractCall(t, factory.called, 3)
+	expectContractOutcome(t, outcomes, OutcomeConnectFailed)
+	releaseContractBackoff(t, backoffEntered, backoffRelease)
+
+	expectContractCall(t, factory.called, 4)
+	expectContractOutcome(t, outcomes, OutcomeConnected)
+	expectContractOutcome(t, outcomes, OutcomeReconnected)
+	if runtime.Current() != recoveredClient {
+		t.Fatal("recovered client was not published")
+	}
+	select {
+	case outcome := <-outcomes:
+		t.Fatalf("unexpected duplicate recovery outcome %v", outcome)
+	default:
 	}
 
 	runtime.Close()
@@ -264,7 +332,9 @@ func TestRuntimeTerminalOutcomeHasSingleOwner(t *testing.T) {
 		return false
 	}
 
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
 	<-factory.called
 	if outcome := <-outcomes; outcome != OutcomeConnected {
 		t.Fatalf("outcome = %v, want connected", outcome)
@@ -364,7 +434,9 @@ func TestRuntimeCloseRejectsClientReturnedAfterConnectCancellation(t *testing.T)
 		},
 	})
 
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
 	<-connectEntered
 	closeDone := make(chan struct{})
 	go func() {
@@ -386,6 +458,40 @@ func TestRuntimeCloseRejectsClientReturnedAfterConnectCancellation(t *testing.T)
 		t.Fatalf("cancelled connect emitted outcome %v", outcome)
 	default:
 	}
+}
+
+func expectContractCall(t *testing.T, calls <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-calls:
+		if got != want {
+			t.Fatalf("factory call = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for factory call %d", want)
+	}
+}
+
+func expectContractOutcome(t *testing.T, outcomes <-chan Outcome, want Outcome) {
+	t.Helper()
+	select {
+	case got := <-outcomes:
+		if got != want {
+			t.Fatalf("outcome = %v, want %v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for outcome %v", want)
+	}
+}
+
+func releaseContractBackoff(t *testing.T, entered <-chan struct{}, release chan<- struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for reconnect backoff")
+	}
+	release <- struct{}{}
 }
 
 func TestRuntimeConcurrentAndRepeatedCloseJoinOneOwner(t *testing.T) {
@@ -457,15 +563,21 @@ func TestRuntimeRepeatedStartAndCloseUsesFreshOwnership(t *testing.T) {
 		},
 	})
 
-	runtime.Start()
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("initial Start was not accepted")
+	}
+	if runtime.Start() {
+		t.Fatal("repeated Start unexpectedly acquired new ownership")
+	}
 	<-factory.called
 	<-connected
 	firstDone := runtime.Done()
 	runtime.Close()
 	<-firstDone
 
-	runtime.Start()
+	if !runtime.Start() {
+		t.Fatal("restart after Close was not accepted")
+	}
 	<-factory.called
 	<-connected
 	secondDone := runtime.Done()

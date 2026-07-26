@@ -75,11 +75,11 @@ func New(config Config) *Runtime {
 	}
 }
 
-func (r *Runtime) Start() {
+func (r *Runtime) Start() bool {
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
-		return
+		return false
 	}
 	if r.done == nil || doneClosed(r.done) {
 		r.done = make(chan struct{})
@@ -94,6 +94,7 @@ func (r *Runtime) Start() {
 	r.mu.Unlock()
 
 	go r.run(ctx, done)
+	return true
 }
 
 func (r *Runtime) Close() {
