@@ -13,14 +13,22 @@ import (
 )
 
 type reloadTestRuntime struct {
-	name     string
-	events   *[]string
-	startErr error
-	closeErr error
+	name         string
+	events       *[]string
+	startErr     error
+	closeErr     error
+	startEntered chan struct{}
+	startRelease <-chan struct{}
 }
 
 func (r *reloadTestRuntime) Start() error {
 	*r.events = append(*r.events, r.name+".start")
+	if r.startEntered != nil {
+		close(r.startEntered)
+	}
+	if r.startRelease != nil {
+		<-r.startRelease
+	}
 	return r.startErr
 }
 
@@ -201,11 +209,11 @@ func TestPanelReloadModulePreservesSuccessfulReloadOrder(t *testing.T) {
 	}
 	wantEvents := []string{
 		"load:changed.yml:config.yml",
+		"build",
 		"initial.close",
 		"gc",
-		"apply-process",
-		"build",
 		"candidate.start",
+		"apply-process",
 	}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
@@ -218,13 +226,14 @@ func TestPanelReloadModulePreservesSuccessfulReloadOrder(t *testing.T) {
 	}
 }
 
-func TestPanelReloadModuleReportsCloseErrorAfterSuccessfulReplacement(t *testing.T) {
+func TestPanelReloadModuleReportsCloseErrorAfterRestoringOldRuntime(t *testing.T) {
 	closeErr := errors.New("close initial")
 	initialTime := time.Unix(350, 0)
-	times := []time.Time{initialTime.Add(4 * time.Second), initialTime.Add(5 * time.Second)}
 	events := make([]string, 0, 3)
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events, closeErr: closeErr}
 	candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events}
+	restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
+	buildCalls := 0
 
 	module := newPanelReloadModule(reloadTestPanelConfig("initial"), initialRuntime, panelReloadOptions{
 		lastAppliedAt: initialTime,
@@ -232,14 +241,16 @@ func TestPanelReloadModuleReportsCloseErrorAfterSuccessfulReplacement(t *testing
 			return reloadTestPanelConfig("candidate"), nil
 		},
 		buildRuntime: func(*panel.Config) panelRuntime {
-			return candidateRuntime
+			buildCalls++
+			if buildCalls == 1 {
+				return candidateRuntime
+			}
+			return restoredRuntime
 		},
 		applyProcessConfig: func(*panel.Config) {},
 		collectGarbage:     func() {},
 		now: func() time.Time {
-			next := times[0]
-			times = times[1:]
-			return next
+			return initialTime.Add(4 * time.Second)
 		},
 	})
 
@@ -247,10 +258,10 @@ func TestPanelReloadModuleReportsCloseErrorAfterSuccessfulReplacement(t *testing
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("Reload() error = %v, want wrapped close error", err)
 	}
-	if module.applied.runtime != candidateRuntime {
-		t.Fatal("successful replacement did not publish candidate after old Close error")
+	if module.applied.runtime != restoredRuntime {
+		t.Fatal("old Close error did not publish restored runtime")
 	}
-	if got, want := events, []string{"initial.close", "candidate.start"}; !reflect.DeepEqual(got, want) {
+	if got, want := events, []string{"initial.close", "candidate.close", "restored.start"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
@@ -296,6 +307,8 @@ func TestPanelReloadModuleDoesNotAdvanceDebounceAfterStartFailure(t *testing.T) 
 	events := make([]string, 0, 2)
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
 	candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events, startErr: startErr}
+	restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
+	buildCalls := 0
 
 	module := newPanelReloadModule(reloadTestPanelConfig("initial"), initialRuntime, panelReloadOptions{
 		lastAppliedAt: initialTime,
@@ -303,7 +316,11 @@ func TestPanelReloadModuleDoesNotAdvanceDebounceAfterStartFailure(t *testing.T) 
 			return reloadTestPanelConfig("candidate"), nil
 		},
 		buildRuntime: func(*panel.Config) panelRuntime {
-			return candidateRuntime
+			buildCalls++
+			if buildCalls == 1 {
+				return candidateRuntime
+			}
+			return restoredRuntime
 		},
 		applyProcessConfig: func(*panel.Config) {},
 		collectGarbage:     func() {},

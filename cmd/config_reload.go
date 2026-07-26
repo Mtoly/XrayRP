@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ import (
 var (
 	errPanelReloadNilCandidate = errors.New("panel reload candidate is nil")
 	errPanelReloadEmptyNodes   = errors.New("panel reload candidate contains no nodes")
+	errPanelReloadClosed       = errors.New("panel reload module is closed")
 )
 
 type panelRuntime interface {
@@ -23,9 +25,35 @@ type panelRuntime interface {
 	Close() error
 }
 
+type panelReloadOperation uint8
+
+const (
+	panelReloadOperationReload panelReloadOperation = iota
+	panelReloadOperationClose
+)
+
+type panelReloadOperationPhase uint8
+
+const (
+	panelReloadOperationAttempted panelReloadOperationPhase = iota
+	panelReloadOperationEntered
+	panelReloadOperationExited
+)
+
+type panelReloadStatus uint8
+
+const (
+	panelReloadStatusReady panelReloadStatus = iota
+	panelReloadStatusReloading
+	panelReloadStatusFailed
+	panelReloadStatusClosed
+)
+
 type panelReloadState struct {
 	config  *panel.Config
 	runtime panelRuntime
+	status  panelReloadStatus
+	failure error
 }
 
 type panelReloadOptions struct {
@@ -37,9 +65,12 @@ type panelReloadOptions struct {
 	applyProcessConfig func(*panel.Config)
 	collectGarbage     func()
 	now                func() time.Time
+	observeOperation   func(panelReloadOperation, panelReloadOperationPhase)
 }
 
 type panelReloadModule struct {
+	operationMu   sync.Mutex
+	stateMu       sync.RWMutex
 	applied       panelReloadState
 	configFile    string
 	lastAppliedAt time.Time
@@ -49,6 +80,7 @@ type panelReloadModule struct {
 	applyProcess  func(*panel.Config)
 	collect       func()
 	now           func() time.Time
+	observeOp     func(panelReloadOperation, panelReloadOperationPhase)
 }
 
 func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRuntime, options panelReloadOptions) *panelReloadModule {
@@ -80,6 +112,7 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		applied: panelReloadState{
 			config:  initialConfig,
 			runtime: initialRuntime,
+			status:  panelReloadStatusReady,
 		},
 		configFile:    options.configFile,
 		lastAppliedAt: options.lastAppliedAt,
@@ -89,10 +122,18 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		applyProcess:  options.applyProcessConfig,
 		collect:       options.collectGarbage,
 		now:           options.now,
+		observeOp:     options.observeOperation,
 	}
 }
 
 func (m *panelReloadModule) Reload(eventName string) error {
+	m.beginOperation(panelReloadOperationReload)
+	defer m.endOperation(panelReloadOperationReload)
+
+	current := m.stateSnapshot()
+	if current.status == panelReloadStatusClosed {
+		return errPanelReloadClosed
+	}
 	if !m.now().After(m.lastAppliedAt.Add(m.debounce)) {
 		return nil
 	}
@@ -111,40 +152,142 @@ func (m *panelReloadModule) Reload(eventName string) error {
 		log.Warnf("Hot reload: new config file %s contains no Nodes; ignoring reload to avoid stopping running services", eventName)
 		return fmt.Errorf("%w: %s", errPanelReloadEmptyNodes, eventName)
 	}
+	candidateRuntime := m.buildRuntime(candidateConfig)
+	if candidateRuntime == nil {
+		err := errors.New("build new panel: nil runtime")
+		log.Error("Hot reload: failed to build new panel")
+		return err
+	}
+
+	m.publishState(panelReloadState{
+		config:  current.config,
+		runtime: current.runtime,
+		status:  panelReloadStatusReloading,
+	})
 
 	var errs []error
-	if err := m.applied.runtime.Close(); err != nil {
-		log.Error("Hot reload: failed to close old panel")
-		errs = append(errs, fmt.Errorf("close old panel: %w", err))
+	if current.runtime != nil {
+		if err := current.runtime.Close(); err != nil {
+			log.Error("Hot reload: failed to close old panel")
+			errs = append(errs, fmt.Errorf("close old panel: %w", err))
+			if cleanupErr := candidateRuntime.Close(); cleanupErr != nil {
+				log.Error("Hot reload: failed to clean candidate panel")
+				errs = append(errs, fmt.Errorf("clean candidate panel after old close failure: %w", cleanupErr))
+			}
+			return m.restoreLastKnownGood(current, errs)
+		}
 	}
 	m.collect()
 
-	m.applyProcess(candidateConfig)
-	candidateRuntime := m.buildRuntime(candidateConfig)
-	m.applied = panelReloadState{
-		config:  candidateConfig,
-		runtime: candidateRuntime,
-	}
-	if candidateRuntime == nil {
-		errs = append(errs, errors.New("start new panel: nil runtime"))
-		log.Error("Hot reload: failed to start new panel")
-		return errors.Join(errs...)
-	}
 	if err := candidateRuntime.Start(); err != nil {
 		log.Error("Hot reload: failed to start new panel")
 		errs = append(errs, fmt.Errorf("start new panel: %w", err))
-		return errors.Join(errs...)
+		if cleanupErr := candidateRuntime.Close(); cleanupErr != nil {
+			log.Error("Hot reload: failed to clean candidate panel")
+			errs = append(errs, fmt.Errorf("clean failed candidate panel: %w", cleanupErr))
+		}
+		return m.restoreLastKnownGood(current, errs)
 	}
 
+	m.applyProcess(candidateConfig)
+	m.publishState(panelReloadState{
+		config:  candidateConfig,
+		runtime: candidateRuntime,
+		status:  panelReloadStatusReady,
+	})
 	m.lastAppliedAt = m.now()
-	return errors.Join(errs...)
+	return nil
 }
 
 func (m *panelReloadModule) Close() error {
-	if m == nil || m.applied.runtime == nil {
+	if m == nil {
 		return nil
 	}
-	return m.applied.runtime.Close()
+
+	m.beginOperation(panelReloadOperationClose)
+	defer m.endOperation(panelReloadOperationClose)
+
+	current := m.stateSnapshot()
+	if current.status == panelReloadStatusClosed {
+		return nil
+	}
+
+	var closeErr error
+	if current.runtime != nil {
+		closeErr = current.runtime.Close()
+	}
+	m.publishState(panelReloadState{
+		config:  current.config,
+		status:  panelReloadStatusClosed,
+		failure: closeErr,
+	})
+	return closeErr
+}
+
+func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs []error) error {
+	restoredRuntime := m.buildRuntime(previous.config)
+	if restoredRuntime == nil {
+		errs = append(errs, errors.New("restore old panel: nil runtime"))
+		joined := errors.Join(errs...)
+		m.publishState(panelReloadState{
+			config:  previous.config,
+			status:  panelReloadStatusFailed,
+			failure: joined,
+		})
+		log.Error("Hot reload: failed to restore old panel")
+		return joined
+	}
+
+	if err := restoredRuntime.Start(); err != nil {
+		errs = append(errs, fmt.Errorf("restore old panel: %w", err))
+		if cleanupErr := restoredRuntime.Close(); cleanupErr != nil {
+			errs = append(errs, fmt.Errorf("clean failed restored panel: %w", cleanupErr))
+		}
+		joined := errors.Join(errs...)
+		m.publishState(panelReloadState{
+			config:  previous.config,
+			status:  panelReloadStatusFailed,
+			failure: joined,
+		})
+		log.Error("Hot reload: failed to restore old panel")
+		return joined
+	}
+
+	m.publishState(panelReloadState{
+		config:  previous.config,
+		runtime: restoredRuntime,
+		status:  panelReloadStatusReady,
+	})
+	return errors.Join(errs...)
+}
+
+func (m *panelReloadModule) beginOperation(operation panelReloadOperation) {
+	if m.observeOp != nil {
+		m.observeOp(operation, panelReloadOperationAttempted)
+	}
+	m.operationMu.Lock()
+	if m.observeOp != nil {
+		m.observeOp(operation, panelReloadOperationEntered)
+	}
+}
+
+func (m *panelReloadModule) endOperation(operation panelReloadOperation) {
+	if m.observeOp != nil {
+		m.observeOp(operation, panelReloadOperationExited)
+	}
+	m.operationMu.Unlock()
+}
+
+func (m *panelReloadModule) stateSnapshot() panelReloadState {
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
+	return m.applied
+}
+
+func (m *panelReloadModule) publishState(state panelReloadState) {
+	m.stateMu.Lock()
+	m.applied = state
+	m.stateMu.Unlock()
 }
 
 func loadPanelReloadCandidate(eventName, configuredFile string) (*panel.Config, error) {
