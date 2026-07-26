@@ -426,9 +426,8 @@ func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 	if value, ok := l.InboundInfo.Load(tag); ok {
 		inboundInfo := value.(*InboundInfo)
-		now := time.Now().Unix()
 
-		// Build a map of panel IPs for quick lookup
+		// Build a complete authoritative panel snapshot for quick lookup.
 		panelIPs := make(map[string]map[string]bool)
 		for uid, ips := range aliveList {
 			uidStr := fmt.Sprintf("%d", uid)
@@ -439,9 +438,26 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 		}
 
 		// Sync local tracking with panel data
+		processedUserKeys := make(map[string]struct{})
+		syncEntry := func(entry *userOnlineEntry, uid int, admitted map[string]bool) {
+			entry.mu.Lock()
+			defer entry.mu.Unlock()
+
+			entry.ips.Range(func(ip, val interface{}) bool {
+				ipStr := ip.(string)
+				if !admitted[ipStr] {
+					entry.deleteIP(ip)
+				}
+				return true
+			})
+			for ip := range admitted {
+				entry.touchIP(ip, uid)
+			}
+		}
 		inboundInfo.UserOnlineIP.Range(func(userKey, value interface{}) bool {
 			entry := value.(*userOnlineEntry)
 			userKeyStr := userKey.(string)
+			processedUserKeys[userKeyStr] = struct{}{}
 
 			// Extract UID from userKey (format: "tag|email|uid")
 			parts := strings.Split(userKeyStr, "|")
@@ -450,31 +466,35 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 			}
 			uidStr := parts[2]
 
-			if uidStr != "" && panelIPs[uidStr] != nil {
-				// Parse UID to int for connIP struct
-				uidInt, err := strconv.Atoi(uidStr)
-				if err != nil {
-					return true // Skip if UID is not a valid integer
-				}
-
-				entry.mu.Lock()
-				// Remove IPs not in panel list
-				entry.ips.Range(func(ip, val interface{}) bool {
-					ipStr := ip.(string)
-					if !panelIPs[uidStr][ipStr] {
-						entry.deleteIP(ip)
-					}
-					return true
-				})
-
-				// Add IPs from panel that are missing locally
-				for ip := range panelIPs[uidStr] {
-					if _, loaded := entry.ips.LoadOrStore(ip, connIP{UID: uidInt, LastSeen: now}); !loaded {
-						atomic.AddInt32(&entry.count, 1)
-					}
-				}
-				entry.mu.Unlock()
+			if uidStr == "" {
+				return true
 			}
+			uidInt, err := strconv.Atoi(uidStr)
+			if err != nil {
+				return true // Skip if UID is not a valid integer
+			}
+
+			syncEntry(entry, uidInt, panelIPs[uidStr])
+			return true
+		})
+
+		// Seed panel-confirmed devices for known users even if this process has
+		// not observed a local connection for them yet.
+		inboundInfo.UserInfo.Range(func(userKey, value interface{}) bool {
+			userKeyStr := userKey.(string)
+			if _, processed := processedUserKeys[userKeyStr]; processed {
+				return true
+			}
+			user := value.(UserInfo)
+			admitted, present := panelIPs[strconv.Itoa(user.UID)]
+			if !present {
+				return true
+			}
+			entry := newUserOnlineEntry()
+			if existing, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
+				entry = existing.(*userOnlineEntry)
+			}
+			syncEntry(entry, user.UID, admitted)
 			return true
 		})
 

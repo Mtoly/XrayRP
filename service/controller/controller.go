@@ -36,14 +36,6 @@ type PanelClient interface {
 	ReportIllegal(*[]api.DetectResult) error
 }
 
-type certConfigProvider interface {
-	GetXrayRCertConfig() (*api.XrayRCertConfig, error)
-}
-
-type aliveListProvider interface {
-	GetAliveList() (map[int][]string, error)
-}
-
 type LimitInfo struct {
 	end               int64
 	currentSpeedLimit int
@@ -958,14 +950,7 @@ func (c *Controller) userInfoMonitor() (err error) {
 		c.reportOnlineDevices(currentTag, onlineDevice)
 	}
 
-	// Sync alive list from panel for device limit accuracy
-	if provider, ok := c.apiClient.(aliveListProvider); ok {
-		if aliveList, err := provider.GetAliveList(); err == nil && aliveList != nil && len(aliveList) > 0 {
-			if err := c.dispatcher.Limiter.SyncAliveList(currentTag, aliveList); err != nil {
-				c.logger.Print(err)
-			}
-		}
-	}
+	c.syncAliveListFromPanel(currentTag)
 
 	// Report Illegal user
 	if detectResult, err := c.GetDetectResult(currentTag); err != nil {
@@ -976,6 +961,26 @@ func (c *Controller) userInfoMonitor() (err error) {
 		}
 	}
 	return nil
+}
+
+func (c *Controller) syncAliveListFromPanel(tag string) {
+	provider, ok := c.apiClient.(api.AliveListProvider)
+	if !ok {
+		return
+	}
+	aliveList, err := provider.GetAliveList()
+	if err != nil {
+		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+			c.logger.Print(err)
+		}
+		return
+	}
+	if aliveList == nil {
+		return
+	}
+	if err := c.SyncAliveList(tag, aliveList); err != nil {
+		c.logger.Print(err)
+	}
 }
 
 func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {

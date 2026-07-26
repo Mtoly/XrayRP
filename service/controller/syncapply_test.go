@@ -664,10 +664,10 @@ func TestSyncApply_MissingCertCapabilityIsNoOp(t *testing.T) {
 	}
 }
 
-func TestSyncApply_ClearFetchedCertConfig(t *testing.T) {
+func TestSyncApply_SupportedAbsentCertConfigClearsWithoutPanelTypeKnowledge(t *testing.T) {
 	fakeAPI := &fakeSyncApplyAPI{}
 	controller, _ := newTestSyncApplyController(fakeAPI)
-	controller.panelType = "SSPanel"
+	controller.panelType = "FuturePanel"
 	controller.config.CertConfig = &mylego.CertConfig{
 		CertMode: "dns",
 		Provider: "cloudflare",

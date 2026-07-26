@@ -1,9 +1,11 @@
 package panel
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	log "github.com/sirupsen/logrus"
@@ -114,8 +116,11 @@ func TestMaterializeRuntimeCertConfigWarnsAndKeepsLocalOnFetchError(t *testing.T
 	localCert := &mylego.CertConfig{CertMode: "file", CertFile: "/local.crt", KeyFile: "/local.key"}
 	controllerConfig := &controller.Config{CertConfig: localCert}
 	client := &runtimeCertConfigAPI{certErr: errors.New("panel unavailable")}
+	var output bytes.Buffer
+	logger := log.New()
+	logger.SetOutput(&output)
 
-	materializeRuntimeCertConfig(client, controllerConfig, discardTestLogger())
+	materializeRuntimeCertConfig(client, controllerConfig, log.NewEntry(logger))
 
 	if client.certCalls != 1 {
 		t.Fatalf("expected one panel cert fetch, got %d", client.certCalls)
@@ -125,6 +130,32 @@ func TestMaterializeRuntimeCertConfigWarnsAndKeepsLocalOnFetchError(t *testing.T
 	}
 	if controllerConfig.CertConfig.CertMode != "file" || controllerConfig.CertConfig.CertFile != "/local.crt" || controllerConfig.CertConfig.KeyFile != "/local.key" {
 		t.Fatalf("expected local cert config to remain unchanged, got %#v", controllerConfig.CertConfig)
+	}
+	if !strings.Contains(output.String(), "panel unavailable") {
+		t.Fatalf("expected real fetch error to be logged, got %q", output.String())
+	}
+}
+
+func TestMaterializeRuntimeCertConfigIgnoresUnsupportedCapability(t *testing.T) {
+	localCert := &mylego.CertConfig{CertMode: "file", CertFile: "/local.crt", KeyFile: "/local.key"}
+	controllerConfig := &controller.Config{CertConfig: localCert}
+	client := &runtimeCertConfigAPI{
+		certErr: errors.Join(errors.New("wrapped capability outcome"), api.ErrUnsupportedPanelFeature),
+	}
+	var output bytes.Buffer
+	logger := log.New()
+	logger.SetOutput(&output)
+
+	materializeRuntimeCertConfig(client, controllerConfig, log.NewEntry(logger))
+
+	if client.certCalls != 1 {
+		t.Fatalf("expected one panel cert fetch, got %d", client.certCalls)
+	}
+	if controllerConfig.CertConfig != localCert {
+		t.Fatal("expected local cert config to be preserved for unsupported capability")
+	}
+	if strings.Contains(output.String(), api.ErrUnsupportedPanelFeature.Error()) {
+		t.Fatalf("unsupported capability should not be logged as a failure, got %q", output.String())
 	}
 }
 

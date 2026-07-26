@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"errors"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -10,17 +11,15 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
-type certConfigProvider interface {
-	GetXrayRCertConfig() (*api.XrayRCertConfig, error)
-}
-
 func materializeRuntimeCertConfig(apiClient any, controllerConfig *controller.Config, logger *log.Entry) {
-	provider, ok := apiClient.(certConfigProvider)
+	provider, ok := apiClient.(api.CertConfigProvider)
 	if !ok {
 		return
 	}
 	if panelCert, err := provider.GetXrayRCertConfig(); err != nil {
-		logger.Warnf("Failed to get XrayR cert config from panel: %v", err)
+		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+			logger.Warnf("Failed to get XrayR cert config from panel: %v", err)
+		}
 	} else if err := mergeRuntimePanelCertConfig(controllerConfig, panelCert); err != nil {
 		logger.Warnf("Failed to apply XrayR cert config from panel: %v", err)
 	}

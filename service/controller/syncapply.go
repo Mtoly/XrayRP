@@ -157,7 +157,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchCert {
-		provider, ok := c.apiClient.(certConfigProvider)
+		provider, ok := c.apiClient.(api.CertConfigProvider)
 		if !ok {
 			return snapshot, nil
 		}
@@ -168,7 +168,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 			}
 		} else {
 			snapshot.CertConfig = certConfig
-			snapshot.CertConfigFetched = c.shouldApplyFetchedCertConfig(certConfig)
+			snapshot.CertConfigFetched = true
 		}
 	}
 
@@ -614,22 +614,6 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 		hooks.updateRule = c.UpdateRule
 	}
 	return hooks
-}
-
-func (c *Controller) shouldApplyFetchedCertConfig(certConfig *api.XrayRCertConfig) bool {
-	if certConfig != nil {
-		return true
-	}
-	return panelCertConfigMayBeCleared(c.panelType)
-}
-
-func panelCertConfigMayBeCleared(panelType string) bool {
-	switch strings.ToLower(panelType) {
-	case "sspanel", "newv2board", "v2board":
-		return true
-	default:
-		return false
-	}
 }
 
 func detectRuleListsEqual(current, next []api.DetectRule) bool {

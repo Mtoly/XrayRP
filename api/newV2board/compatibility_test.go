@@ -86,6 +86,94 @@ func TestGetAliveListNormalizesAliveIPs(t *testing.T) {
 	}
 }
 
+func TestGetAliveListDistinguishesAbsentEmptyAndMalformedSnapshots(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		wantNil   bool
+		wantEmpty bool
+		wantErr   bool
+	}{
+		{
+			name:    "absent snapshot",
+			payload: `{}`,
+			wantNil: true,
+		},
+		{
+			name:      "authoritative empty snapshot",
+			payload:   `{"alive":{}}`,
+			wantEmpty: true,
+		},
+		{
+			name:    "alive is not an object",
+			payload: `{"alive":[]}`,
+			wantErr: true,
+		},
+		{
+			name:    "uid is malformed",
+			payload: `{"alive":{"not-a-uid":["192.0.2.1_1"]}}`,
+			wantErr: true,
+		},
+		{
+			name:    "uid is zero",
+			payload: `{"alive":{"0":["192.0.2.1_1"]}}`,
+			wantErr: true,
+		},
+		{
+			name:    "uid is negative",
+			payload: `{"alive":{"-1":["192.0.2.1_1"]}}`,
+			wantErr: true,
+		},
+		{
+			name:    "valid and invalid uids are not partially accepted",
+			payload: `{"alive":{"1":["192.0.2.1_1"],"0":[]}}`,
+			wantErr: true,
+		},
+		{
+			name:    "ip list is malformed",
+			payload: `{"alive":{"1":"192.0.2.1_1"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "ip entry is malformed",
+			payload: `{"alive":{"1":[42]}}`,
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.payload))
+			}))
+			defer server.Close()
+
+			client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
+			alive, err := client.GetAliveList()
+
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("GetAliveList error = nil, alive = %#v", alive)
+				}
+				if alive != nil {
+					t.Fatalf("GetAliveList returned partial snapshot %#v with error %v", alive, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetAliveList returned error: %v", err)
+			}
+			if test.wantNil && alive != nil {
+				t.Fatalf("alive = %#v, want nil", alive)
+			}
+			if test.wantEmpty && (alive == nil || len(alive) != 0) {
+				t.Fatalf("alive = %#v, want non-nil empty snapshot", alive)
+			}
+		})
+	}
+}
+
 func TestParseV2rayNodeResponsePreservesRealityAndVlessFlow(t *testing.T) {
 	cfg := &serverConfig{}
 	cfg.ServerPort = 443

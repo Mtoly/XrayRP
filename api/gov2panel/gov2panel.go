@@ -176,9 +176,9 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return
 }
 
-// GetAliveList returns no panel-managed alive list for this adapter.
+// GetAliveList is not supported by GoV2Panel.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 func (c *APIClient) ReportNodeOnlineUsers(onlineUser *[]api.OnlineUser) (err error) {
@@ -210,9 +210,9 @@ func (c *APIClient) Describe() api.ClientInfo {
 	return api.ClientInfo{APIHost: c.APIHost, NodeID: c.NodeID, Key: "", NodeType: c.NodeType}
 }
 
-// GetXrayRCertConfig is not provided by GoV2Panel; return nil to indicate absence.
+// GetXrayRCertConfig is not provided by GoV2Panel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // GetNodeRule implements the API interface

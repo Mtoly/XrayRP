@@ -2,6 +2,7 @@ package pmpanel_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -298,10 +299,10 @@ func TestContractNoOpCapabilities(t *testing.T) {
 	if err := client.ReportIllegal(&results); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := client.GetXrayRCertConfig(); err != nil || cfg != nil {
+	if cfg, err := client.GetXrayRCertConfig(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || cfg != nil {
 		t.Fatalf("cert = %#v, err = %v", cfg, err)
 	}
-	if alive, err := client.GetAliveList(); err != nil || alive != nil {
+	if alive, err := client.GetAliveList(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || alive != nil {
 		t.Fatalf("alive = %#v, err = %v", alive, err)
 	}
 	if calls.Load() != 0 {

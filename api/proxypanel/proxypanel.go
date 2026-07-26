@@ -65,9 +65,9 @@ func (c *APIClient) Describe() api.ClientInfo {
 	return api.ClientInfo{APIHost: c.APIHost, NodeID: c.NodeID, Key: "", NodeType: c.NodeType}
 }
 
-// GetXrayRCertConfig is not provided by ProxyPanel; return nil to indicate absence.
+// GetXrayRCertConfig is not provided by ProxyPanel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // Debug set the client debug for client
@@ -252,9 +252,9 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 	return nil
 }
 
-// GetAliveList implements the API interface (not supported by ProxyPanel)
+// GetAliveList is not supported by ProxyPanel.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // ReportUserTraffic reports the user traffic

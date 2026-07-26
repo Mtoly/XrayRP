@@ -2,6 +2,7 @@ package proxypanel_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -382,10 +383,10 @@ func TestContractAbsentCapabilities(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer server.Close()
 	client := newContractClient(server, "V2ray")
-	if cfg, err := client.GetXrayRCertConfig(); err != nil || cfg != nil {
+	if cfg, err := client.GetXrayRCertConfig(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || cfg != nil {
 		t.Fatalf("cert = %#v, err = %v", cfg, err)
 	}
-	if alive, err := client.GetAliveList(); err != nil || alive != nil {
+	if alive, err := client.GetAliveList(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || alive != nil {
 		t.Fatalf("alive = %#v, err = %v", alive, err)
 	}
 	if calls.Load() != 0 {

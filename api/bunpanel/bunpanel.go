@@ -45,9 +45,9 @@ func (*APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	return nil
 }
 
-// GetXrayRCertConfig is not supported by BunPanel; return nil to indicate absence.
+// GetXrayRCertConfig is not supported by BunPanel.
 func (*APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // GetNodeRule returns the configured local detection rules.
@@ -222,9 +222,9 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 	return nil
 }
 
-// GetAliveList implements the API interface (not supported by BunPanel)
+// GetAliveList is not supported by BunPanel.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {

@@ -294,9 +294,9 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 	return nil
 }
 
-// GetAliveList implements the API interface (not supported by SSPanel)
+// GetAliveList is not supported by SSPanel.
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
-	return nil, nil
+	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // ReportUserTraffic reports the user traffic

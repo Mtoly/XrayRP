@@ -260,26 +260,37 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 		return nil, err
 	}
 
-	aliveData := make(map[int][]string)
-	if alive := aliveResp.Get("alive"); alive != nil {
-		aliveMap, _ := alive.Map()
-		for uidStr, ips := range aliveMap {
-			var uidInt int
-			if _, err := fmt.Sscanf(uidStr, "%d", &uidInt); err == nil {
-				if ipList, ok := ips.([]interface{}); ok {
-					strIPs := make([]string, 0, len(ipList))
-					for _, ip := range ipList {
-						if ipStr, ok := ip.(string); ok {
-							if host, _, found := strings.Cut(ipStr, "_"); found {
-								ipStr = host
-							}
-							strIPs = append(strIPs, ipStr)
-						}
-					}
-					aliveData[uidInt] = strIPs
-				}
-			}
+	alive, ok := aliveResp.CheckGet("alive")
+	if !ok {
+		return nil, nil
+	}
+	aliveMap, err := alive.Map()
+	if err != nil {
+		return nil, fmt.Errorf("parse alive list from %s: alive must be an object", c.assembleURL(path))
+	}
+
+	aliveData := make(map[int][]string, len(aliveMap))
+	for uidStr, ips := range aliveMap {
+		uidInt, err := strconv.Atoi(uidStr)
+		if err != nil || uidInt <= 0 {
+			return nil, fmt.Errorf("parse alive list from %s: invalid uid %q", c.assembleURL(path), uidStr)
 		}
+		ipList, ok := ips.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("parse alive list from %s: uid %d IPs must be an array", c.assembleURL(path), uidInt)
+		}
+		strIPs := make([]string, 0, len(ipList))
+		for index, ip := range ipList {
+			ipStr, ok := ip.(string)
+			if !ok {
+				return nil, fmt.Errorf("parse alive list from %s: uid %d IP %d must be a string", c.assembleURL(path), uidInt, index)
+			}
+			if host, _, found := strings.Cut(ipStr, "_"); found {
+				ipStr = host
+			}
+			strIPs = append(strIPs, ipStr)
+		}
+		aliveData[uidInt] = strIPs
 	}
 
 	return aliveData, nil

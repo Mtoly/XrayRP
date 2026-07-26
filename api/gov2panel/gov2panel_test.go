@@ -2,6 +2,7 @@ package gov2panel_test
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -248,10 +249,10 @@ func TestContractNoOpAndAbsentCapabilitiesDoNotRequest(t *testing.T) {
 	if err := client.ReportIllegal(&illegal); err != nil {
 		t.Fatal(err)
 	}
-	if alive, err := client.GetAliveList(); err != nil || alive != nil {
+	if alive, err := client.GetAliveList(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || alive != nil {
 		t.Fatalf("alive = %#v, err = %v", alive, err)
 	}
-	if cert, err := client.GetXrayRCertConfig(); err != nil || cert != nil {
+	if cert, err := client.GetXrayRCertConfig(); !errors.Is(err, api.ErrUnsupportedPanelFeature) || cert != nil {
 		t.Fatalf("cert = %#v, err = %v", cert, err)
 	}
 	if calls.Load() != 0 {

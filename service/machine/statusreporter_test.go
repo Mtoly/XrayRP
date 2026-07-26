@@ -2,6 +2,7 @@ package machine
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -10,8 +11,52 @@ import (
 type statusReporterPanelClientStub struct {
 	reportStatusCalls int
 	reportStatusErr   error
-	wsConfig          *api.WSConfig
-	wsEndpoint        string
+}
+
+type statusReporterAllCapableStub struct {
+	*statusReporterCertAliveCapableStub
+	wsConfig   *api.WSConfig
+	wsEndpoint string
+	baseConfig *api.BaseConfig
+}
+
+type statusReporterWSCapableStub struct {
+	*statusReporterPanelClientStub
+	wsConfig *api.WSConfig
+}
+
+func (c *statusReporterWSCapableStub) GetWSConfig() *api.WSConfig {
+	return c.wsConfig
+}
+
+type statusReporterWSEndpointStub struct {
+	*statusReporterPanelClientStub
+	wsEndpoint string
+}
+
+func (c *statusReporterWSEndpointStub) DiscoverWSEndpoint() (string, error) {
+	return c.wsEndpoint, nil
+}
+
+type statusReporterBaseConfigStub struct {
+	*statusReporterPanelClientStub
+	baseConfig *api.BaseConfig
+}
+
+func (c *statusReporterBaseConfigStub) GetBaseConfig() *api.BaseConfig {
+	return c.baseConfig
+}
+
+func (c *statusReporterAllCapableStub) GetWSConfig() *api.WSConfig {
+	return c.wsConfig
+}
+
+func (c *statusReporterAllCapableStub) DiscoverWSEndpoint() (string, error) {
+	return c.wsEndpoint, nil
+}
+
+func (c *statusReporterAllCapableStub) GetBaseConfig() *api.BaseConfig {
+	return c.baseConfig
 }
 
 type statusReporterCertCapableStub struct {
@@ -65,10 +110,6 @@ func (*statusReporterPanelClientStub) ReportNodeOnlineUsers(*[]api.OnlineUser) e
 }
 func (*statusReporterPanelClientStub) ReportUserTraffic(*[]api.UserTraffic) error { return nil }
 func (*statusReporterPanelClientStub) ReportIllegal(*[]api.DetectResult) error    { return nil }
-func (c *statusReporterPanelClientStub) GetWSConfig() *api.WSConfig               { return c.wsConfig }
-func (c *statusReporterPanelClientStub) DiscoverWSEndpoint() (string, error) {
-	return c.wsEndpoint, nil
-}
 
 type statusReporterStub struct {
 	nodeID      int
@@ -138,9 +179,14 @@ func TestReportingAPIDeviceReportingAndReadiness(t *testing.T) {
 
 func TestReportingAPIForwardsWSCapabilities(t *testing.T) {
 	wsConfig := &api.WSConfig{NodeID: 9}
-	wrapped := WrapAPIWithReporter(&statusReporterPanelClientStub{
+	baseConfig := &api.BaseConfig{PushInterval: 15, PullInterval: 45}
+	wrapped := WrapAPIWithReporter(&statusReporterAllCapableStub{
+		statusReporterCertAliveCapableStub: &statusReporterCertAliveCapableStub{
+			statusReporterPanelClientStub: &statusReporterPanelClientStub{},
+		},
 		wsConfig:   wsConfig,
 		wsEndpoint: "wss://panel.example.com/ws",
+		baseConfig: baseConfig,
 	}, 9, &statusReporterStub{})
 
 	capable, ok := wrapped.(api.WSCapable)
@@ -155,6 +201,64 @@ func TestReportingAPIForwardsWSCapabilities(t *testing.T) {
 	if err != nil || endpoint != "wss://panel.example.com/ws" {
 		t.Fatalf("unexpected websocket endpoint: endpoint=%q err=%v", endpoint, err)
 	}
+	baseProvider, ok := wrapped.(api.BaseConfigProvider)
+	if !ok || baseProvider.GetBaseConfig() != baseConfig {
+		t.Fatal("expected base-config capability to be forwarded")
+	}
+}
+
+func TestReportingAPIPreservesIndependentPanelCapabilities(t *testing.T) {
+	wsConfig := &api.WSConfig{NodeID: 9}
+	wsOnly := WrapAPIWithReporter(&statusReporterWSCapableStub{
+		statusReporterPanelClientStub: &statusReporterPanelClientStub{},
+		wsConfig:                      wsConfig,
+	}, 9, &statusReporterStub{})
+	wsProvider, ok := wsOnly.(api.WSCapable)
+	if !ok || wsProvider.GetWSConfig() != wsConfig {
+		t.Fatal("expected standalone websocket config capability to be preserved")
+	}
+	if _, ok := wsOnly.(api.WSEndpointDiscoverer); ok {
+		t.Fatal("did not expect websocket endpoint capability")
+	}
+	if _, ok := wsOnly.(api.BaseConfigProvider); ok {
+		t.Fatal("did not expect base-config capability")
+	}
+
+	endpoint := "wss://panel.example.com/ws"
+	endpointOnly := WrapAPIWithReporter(&statusReporterWSEndpointStub{
+		statusReporterPanelClientStub: &statusReporterPanelClientStub{},
+		wsEndpoint:                    endpoint,
+	}, 9, &statusReporterStub{})
+	endpointProvider, ok := endpointOnly.(api.WSEndpointDiscoverer)
+	if !ok {
+		t.Fatal("expected standalone websocket endpoint capability to be preserved")
+	}
+	gotEndpoint, err := endpointProvider.DiscoverWSEndpoint()
+	if err != nil || gotEndpoint != endpoint {
+		t.Fatalf("unexpected websocket endpoint: endpoint=%q err=%v", gotEndpoint, err)
+	}
+	if _, ok := endpointOnly.(api.WSCapable); ok {
+		t.Fatal("did not expect websocket config capability")
+	}
+	if _, ok := endpointOnly.(api.BaseConfigProvider); ok {
+		t.Fatal("did not expect base-config capability")
+	}
+
+	baseConfig := &api.BaseConfig{PushInterval: 15, PullInterval: 45}
+	baseOnly := WrapAPIWithReporter(&statusReporterBaseConfigStub{
+		statusReporterPanelClientStub: &statusReporterPanelClientStub{},
+		baseConfig:                    baseConfig,
+	}, 9, &statusReporterStub{})
+	baseProvider, ok := baseOnly.(api.BaseConfigProvider)
+	if !ok || baseProvider.GetBaseConfig() != baseConfig {
+		t.Fatal("expected standalone base-config capability to be preserved")
+	}
+	if _, ok := baseOnly.(api.WSCapable); ok {
+		t.Fatal("did not expect websocket config capability")
+	}
+	if _, ok := baseOnly.(api.WSEndpointDiscoverer); ok {
+		t.Fatal("did not expect websocket endpoint capability")
+	}
 }
 
 func TestReportingAPIPreservesCertAndAliveCapabilities(t *testing.T) {
@@ -166,7 +270,7 @@ func TestReportingAPIPreservesCertAndAliveCapabilities(t *testing.T) {
 		aliveList:                     alive,
 	}, 9, &statusReporterStub{})
 
-	certProvider, ok := wrapped.(certConfigProvider)
+	certProvider, ok := wrapped.(api.CertConfigProvider)
 	if !ok {
 		t.Fatal("expected certificate capability to be preserved")
 	}
@@ -175,7 +279,7 @@ func TestReportingAPIPreservesCertAndAliveCapabilities(t *testing.T) {
 		t.Fatalf("unexpected certificate forwarding: cert=%p err=%v", gotCert, err)
 	}
 
-	aliveProvider, ok := wrapped.(aliveListProvider)
+	aliveProvider, ok := wrapped.(api.AliveListProvider)
 	if !ok {
 		t.Fatal("expected alive-list capability to be preserved")
 	}
@@ -189,28 +293,81 @@ func TestReportingAPIPreservesOnlyCapabilitiesProvidedByClient(t *testing.T) {
 	certOnly := WrapAPIWithReporter(&statusReporterCertCapableStub{
 		statusReporterPanelClientStub: &statusReporterPanelClientStub{},
 	}, 9, &statusReporterStub{})
-	if _, ok := certOnly.(certConfigProvider); !ok {
+	if _, ok := certOnly.(api.CertConfigProvider); !ok {
 		t.Fatal("expected certificate capability to be preserved")
 	}
-	if _, ok := certOnly.(aliveListProvider); ok {
+	if _, ok := certOnly.(api.AliveListProvider); ok {
 		t.Fatal("did not expect alive-list capability to be exposed")
 	}
 
 	aliveOnly := WrapAPIWithReporter(&statusReporterAliveCapableStub{
 		statusReporterPanelClientStub: &statusReporterPanelClientStub{},
 	}, 9, &statusReporterStub{})
-	if _, ok := aliveOnly.(certConfigProvider); ok {
+	if _, ok := aliveOnly.(api.CertConfigProvider); ok {
 		t.Fatal("did not expect certificate capability to be exposed")
 	}
-	if _, ok := aliveOnly.(aliveListProvider); !ok {
+	if _, ok := aliveOnly.(api.AliveListProvider); !ok {
 		t.Fatal("expected alive-list capability to be preserved")
 	}
 
 	baseOnly := WrapAPIWithReporter(&statusReporterPanelClientStub{}, 9, &statusReporterStub{})
-	if _, ok := baseOnly.(certConfigProvider); ok {
+	if _, ok := baseOnly.(api.CertConfigProvider); ok {
 		t.Fatal("did not expect certificate capability to be exposed")
 	}
-	if _, ok := baseOnly.(aliveListProvider); ok {
+	if _, ok := baseOnly.(api.AliveListProvider); ok {
 		t.Fatal("did not expect alive-list capability to be exposed")
+	}
+	if _, ok := baseOnly.(api.WSCapable); ok {
+		t.Fatal("did not expect websocket capability to be exposed")
+	}
+	if _, ok := baseOnly.(api.WSEndpointDiscoverer); ok {
+		t.Fatal("did not expect websocket discovery capability to be exposed")
+	}
+	if _, ok := baseOnly.(api.BaseConfigProvider); ok {
+		t.Fatal("did not expect base-config capability to be exposed")
+	}
+}
+
+func TestReportingAPIExhaustivelyPreservesCapabilityMethodSets(t *testing.T) {
+	source := &statusReporterAllCapableStub{
+		statusReporterCertAliveCapableStub: &statusReporterCertAliveCapableStub{
+			statusReporterPanelClientStub: &statusReporterPanelClientStub{},
+		},
+	}
+	allCapabilities := panelCapabilities{
+		wsConfig:   source,
+		wsEndpoint: source,
+		baseConfig: source,
+		certConfig: source,
+		aliveList:  source,
+	}
+
+	for mask := 0; mask < 1<<5; mask++ {
+		t.Run(fmt.Sprintf("mask_%02d", mask), func(t *testing.T) {
+			capabilities := allCapabilities
+			capabilities.mask = mask
+			wrapped := wrapReportingAPIWithCapabilities(
+				&reportingAPI{PanelClient: &statusReporterPanelClientStub{}},
+				capabilities,
+			)
+
+			assertCapability := func(name string, capabilityMask int, present bool) {
+				t.Helper()
+				want := mask&capabilityMask != 0
+				if present != want {
+					t.Fatalf("%s presence = %t, want %t for mask %05b", name, present, want, mask)
+				}
+			}
+			_, hasWSConfig := wrapped.(api.WSCapable)
+			assertCapability("websocket config", hasWSConfigCapability, hasWSConfig)
+			_, hasWSEndpoint := wrapped.(api.WSEndpointDiscoverer)
+			assertCapability("websocket endpoint", hasWSEndpointCapability, hasWSEndpoint)
+			_, hasBaseConfig := wrapped.(api.BaseConfigProvider)
+			assertCapability("base config", hasBaseConfigCapability, hasBaseConfig)
+			_, hasCertConfig := wrapped.(api.CertConfigProvider)
+			assertCapability("certificate config", hasCertConfigCapability, hasCertConfig)
+			_, hasAliveList := wrapped.(api.AliveListProvider)
+			assertCapability("alive list", hasAliveListCapability, hasAliveList)
+		})
 	}
 }
