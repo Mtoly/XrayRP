@@ -118,6 +118,12 @@ func (p *Panel) Start() error {
 	}
 	p.publishState(panelStateStarting, nil, nil)
 
+	plan, err := ops.buildRuntimePlan(p.panelConfig)
+	if err != nil {
+		p.publishState(panelStateStopped, nil, nil)
+		return err
+	}
+
 	server, err := ops.loadCore(p.panelConfig)
 	if err != nil {
 		p.publishState(panelStateStopped, nil, nil)
@@ -142,11 +148,6 @@ func (p *Panel) Start() error {
 	}
 	if err := ops.startCore(server); err != nil {
 		return rollback(fmt.Errorf("failed to start instance: %w", err))
-	}
-
-	plan, err := ops.buildRuntimePlan(p.panelConfig)
-	if err != nil {
-		return rollback(err)
 	}
 
 	var services []service.Service

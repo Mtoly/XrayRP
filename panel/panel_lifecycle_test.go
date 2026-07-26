@@ -34,28 +34,19 @@ func (s *lifecycleTestService) Close() error {
 	return s.closeErr
 }
 
-func TestPanelStartClosesCoreWhenRuntimePlanFails(t *testing.T) {
+func TestPanelStartRejectsRuntimePlanBeforeConstructingCore(t *testing.T) {
 	planErr := errors.New("runtime plan failed")
-	server := &core.Instance{}
-	coreStarts := 0
-	coreCloses := 0
-
 	p := New(&Config{})
 	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) {
-		return server, nil
+		t.Fatal("core must not be constructed when runtime plan validation fails")
+		return nil, nil
 	}
-	p.lifecycle.startCore = func(got *core.Instance) error {
-		if got != server {
-			t.Fatalf("startCore received unexpected server: %p", got)
-		}
-		coreStarts++
+	p.lifecycle.startCore = func(*core.Instance) error {
+		t.Fatal("core must not be started when runtime plan validation fails")
 		return nil
 	}
-	p.lifecycle.closeCore = func(got *core.Instance) error {
-		if got != server {
-			t.Fatalf("closeCore received unexpected server: %p", got)
-		}
-		coreCloses++
+	p.lifecycle.closeCore = func(*core.Instance) error {
+		t.Fatal("core must not be closed when runtime plan validation fails")
 		return nil
 	}
 	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
@@ -65,12 +56,6 @@ func TestPanelStartClosesCoreWhenRuntimePlanFails(t *testing.T) {
 	err := p.Start()
 	if !errors.Is(err, planErr) {
 		t.Fatalf("Start() error = %v, want errors.Is(..., planErr)", err)
-	}
-	if coreStarts != 1 {
-		t.Fatalf("core start calls = %d, want 1", coreStarts)
-	}
-	if coreCloses != 1 {
-		t.Fatalf("core close calls = %d, want 1", coreCloses)
 	}
 	assertPanelUnpublished(t, p)
 }
@@ -96,7 +81,6 @@ func TestPanelStartClosesCoreWhenCoreStartFails(t *testing.T) {
 		return nil
 	}
 	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) {
-		t.Fatal("runtime plan must not be built after core start failure")
 		return runtimeConfigPlan{}, nil
 	}
 
@@ -299,10 +283,10 @@ func TestPanelStartCanRetryAfterFailedStartup(t *testing.T) {
 	if err := p.Start(); err != nil {
 		t.Fatalf("second Start() error = %v", err)
 	}
-	if !p.Running || p.Server != servers[1] || len(p.Service) != 1 || p.Service[0] != module {
+	if !p.Running || p.Server != servers[0] || len(p.Service) != 1 || p.Service[0] != module {
 		t.Fatalf("successful retry published unexpected state: Running=%v Server=%p Service=%#v", p.Running, p.Server, p.Service)
 	}
-	wantEvents := []string{"core:start", "core:close", "core:start", "service:start"}
+	wantEvents := []string{"core:start", "service:start"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
 	}
