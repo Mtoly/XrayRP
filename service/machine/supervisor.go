@@ -57,6 +57,8 @@ type Supervisor struct {
 	discoverer NodeDiscoverer
 	factory    NodeServiceFactory
 
+	operationMu       sync.Mutex
+	observeOperation  func(supervisorOperation, supervisorOperationPhase)
 	mu                sync.Mutex
 	running           map[int]*nodeRuntime
 	cancel            context.CancelFunc
@@ -66,8 +68,26 @@ type Supervisor struct {
 	discoveryInterval time.Duration
 	statusInterval    time.Duration
 	started           bool
+	closing           bool
+	closeDone         chan struct{}
 	closed            bool
 }
+
+type supervisorOperation uint8
+
+const (
+	supervisorOperationInitial supervisorOperation = iota
+	supervisorOperationReconcile
+	supervisorOperationClose
+)
+
+type supervisorOperationPhase uint8
+
+const (
+	supervisorOperationAttempted supervisorOperationPhase = iota
+	supervisorOperationEntered
+	supervisorOperationExited
+)
 
 type nodeRuntime struct {
 	binding      NodeBinding
@@ -115,7 +135,7 @@ func (s *Supervisor) Start() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cancel != nil || s.closed {
+	if s.cancel != nil || s.closed || s.closing {
 		return nil
 	}
 
@@ -129,7 +149,23 @@ func (s *Supervisor) Start() error {
 }
 
 func (s *Supervisor) Close() error {
+	s.notifyOperation(supervisorOperationClose, supervisorOperationAttempted)
+
 	s.mu.Lock()
+	if s.closing {
+		done := s.closeDone
+		s.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return nil
+	}
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closing = true
+	s.closeDone = make(chan struct{})
 	cancel := s.cancel
 	done := s.done
 	statusCancel := s.statusCancel
@@ -153,8 +189,10 @@ func (s *Supervisor) Close() error {
 		<-statusDone
 	}
 
+	s.operationMu.Lock()
+	s.notifyOperation(supervisorOperationClose, supervisorOperationEntered)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	var errs []error
 	for nodeID, runtime := range s.running {
@@ -165,18 +203,34 @@ func (s *Supervisor) Close() error {
 	}
 	s.started = false
 	s.closed = true
+	closeDone := s.closeDone
+	s.mu.Unlock()
+
+	s.notifyOperation(supervisorOperationClose, supervisorOperationExited)
+	s.operationMu.Unlock()
+
+	s.mu.Lock()
+	s.closing = false
+	s.closeDone = nil
+	if closeDone != nil {
+		close(closeDone)
+	}
+	s.mu.Unlock()
 	return errors.Join(errs...)
 }
 
 func (s *Supervisor) startInitial() error {
+	s.beginOperation(supervisorOperationInitial)
+	defer s.endOperation(supervisorOperationInitial)
+
 	s.mu.Lock()
+	if s.closed || s.closing {
+		s.mu.Unlock()
+		return fmt.Errorf("machine supervisor is closed")
+	}
 	if s.started {
 		s.mu.Unlock()
 		return nil
-	}
-	if s.closed {
-		s.mu.Unlock()
-		return fmt.Errorf("machine supervisor is closed")
 	}
 	s.mu.Unlock()
 
@@ -206,7 +260,7 @@ func (s *Supervisor) startInitial() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.closing {
 		s.closeRuntimesBestEffort(started)
 		return fmt.Errorf("machine supervisor is closed")
 	}
@@ -217,6 +271,16 @@ func (s *Supervisor) startInitial() error {
 }
 
 func (s *Supervisor) reconcilePeriodic() error {
+	s.beginOperation(supervisorOperationReconcile)
+	defer s.endOperation(supervisorOperationReconcile)
+
+	s.mu.Lock()
+	unavailable := s.closed || s.closing
+	s.mu.Unlock()
+	if unavailable {
+		return nil
+	}
+
 	snapshot, err := s.discoverSnapshot()
 	if err != nil {
 		s.logWarning(err)
@@ -225,7 +289,7 @@ func (s *Supervisor) reconcilePeriodic() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.closing {
 		return nil
 	}
 
@@ -623,6 +687,23 @@ func (s *Supervisor) logWarning(err error) {
 
 func (s *Supervisor) showErrorDetails() bool {
 	return common.ShowErrorDetails() || s != nil && s.config.ShowErrorDetails
+}
+
+func (s *Supervisor) beginOperation(operation supervisorOperation) {
+	s.notifyOperation(operation, supervisorOperationAttempted)
+	s.operationMu.Lock()
+	s.notifyOperation(operation, supervisorOperationEntered)
+}
+
+func (s *Supervisor) endOperation(operation supervisorOperation) {
+	s.notifyOperation(operation, supervisorOperationExited)
+	s.operationMu.Unlock()
+}
+
+func (s *Supervisor) notifyOperation(operation supervisorOperation, phase supervisorOperationPhase) {
+	if s.observeOperation != nil {
+		s.observeOperation(operation, phase)
+	}
 }
 
 func normalizeDiscoveryInterval(interval, min time.Duration) time.Duration {
