@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,7 +145,7 @@ func TestSharedWSRuntimeSyncNodesTriggersRediscover(t *testing.T) {
 func TestSharedWSRuntimeReportsNodeStatusThroughCurrentClient(t *testing.T) {
 	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
 	client := newRecordingSharedWSClient()
-	runtime.setClient(client)
+	startSharedWSRuntimeWithClient(t, runtime, client)
 
 	status := &api.NodeStatus{CPU: 1, Mem: 2, Disk: 3, Uptime: 4}
 	if err := runtime.ReportNodeStatus(7, status); err != nil {
@@ -193,7 +194,7 @@ func TestSupervisorReconcileNowDiscoversImmediately(t *testing.T) {
 func TestSharedWSRuntimeReportsNodeDevicesThroughCurrentClient(t *testing.T) {
 	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
 	client := newRecordingSharedWSClient()
-	runtime.setClient(client)
+	startSharedWSRuntimeWithClient(t, runtime, client)
 
 	if !runtime.DeviceReporterReady() {
 		t.Fatal("expected device reporter to be ready with current client")
@@ -212,6 +213,68 @@ func TestSharedWSRuntimeReportsNodeDevicesThroughCurrentClient(t *testing.T) {
 	want := map[int][]string{1: []string{"192.0.2.1"}}
 	if !reflect.DeepEqual(call.devices, want) {
 		t.Fatalf("unexpected devices: got %#v want %#v", call.devices, want)
+	}
+}
+
+func TestSharedWSRuntimePreservesMailboxOutcomesAcrossReconnect(t *testing.T) {
+	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{ResyncOnReconnect: true})
+	submitter := newRecordingWSEventSubmitter()
+	mailbox, err := runtime.NewNodeRuntimeFactory(1)(submitter)
+	if err != nil {
+		t.Fatalf("build mailbox: %v", err)
+	}
+	mailbox.Start()
+	defer mailbox.Stop()
+
+	first := newRecordingSharedWSClient()
+	second := newRecordingSharedWSClient()
+	clients := []sharedWSClient{first, second}
+	factoryCalls := make(chan int, len(clients))
+	runtime.factory = func(context.Context) (sharedWSClient, error) {
+		call := len(factoryCalls)
+		factoryCalls <- call + 1
+		if call >= len(clients) {
+			return nil, errors.New("unexpected extra websocket connection")
+		}
+		return clients[call], nil
+	}
+
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+	waitForSignal(t, first.consumeEntered, "first client consume")
+
+	first.errs <- newV2board.ErrWSClientParse
+	waitForSignal(t, submitter.parseErrors, "parse-error broadcast")
+	if runtime.lifecycle.Current() != first {
+		t.Fatal("parse error disconnected the current client")
+	}
+
+	first.errs <- errors.New("terminal websocket error")
+	waitForSignal(t, submitter.disconnects, "disconnect broadcast")
+	waitForSignal(t, second.consumeEntered, "second client consume")
+	waitForSignal(t, submitter.reconnects, "reconnect broadcast")
+
+	select {
+	case call := <-factoryCalls:
+		if call != 1 {
+			t.Fatalf("first factory call = %d, want 1", call)
+		}
+	default:
+		t.Fatal("missing first factory call")
+	}
+	select {
+	case call := <-factoryCalls:
+		if call != 2 {
+			t.Fatalf("second factory call = %d, want 2", call)
+		}
+	default:
+		t.Fatal("missing second factory call")
 	}
 }
 
@@ -275,29 +338,40 @@ type deviceCall struct {
 }
 
 type recordingSharedWSClient struct {
-	events      chan *newV2board.WSEvent
-	errs        chan error
-	done        chan struct{}
-	statusCalls chan statusCall
-	deviceCalls chan deviceCall
+	events         chan *newV2board.WSEvent
+	errs           chan error
+	done           chan struct{}
+	consumeEntered chan struct{}
+	statusCalls    chan statusCall
+	deviceCalls    chan deviceCall
+
+	consumeOnce sync.Once
+	closeOnce   sync.Once
 }
 
 func newRecordingSharedWSClient() *recordingSharedWSClient {
 	return &recordingSharedWSClient{
-		events:      make(chan *newV2board.WSEvent),
-		errs:        make(chan error),
-		done:        make(chan struct{}),
-		statusCalls: make(chan statusCall, 4),
-		deviceCalls: make(chan deviceCall, 4),
+		events:         make(chan *newV2board.WSEvent),
+		errs:           make(chan error),
+		done:           make(chan struct{}),
+		consumeEntered: make(chan struct{}),
+		statusCalls:    make(chan statusCall, 4),
+		deviceCalls:    make(chan deviceCall, 4),
 	}
 }
 
-func (c *recordingSharedWSClient) Events() <-chan *newV2board.WSEvent { return c.events }
-func (c *recordingSharedWSClient) Errors() <-chan error               { return c.errs }
-func (c *recordingSharedWSClient) Done() <-chan struct{}              { return c.done }
-func (c *recordingSharedWSClient) KeepAlive() error                   { return nil }
-func (c *recordingSharedWSClient) Pong() error                        { return nil }
-func (c *recordingSharedWSClient) Close() error                       { close(c.done); return nil }
+func (c *recordingSharedWSClient) Events() <-chan *newV2board.WSEvent {
+	c.consumeOnce.Do(func() { close(c.consumeEntered) })
+	return c.events
+}
+func (c *recordingSharedWSClient) Errors() <-chan error  { return c.errs }
+func (c *recordingSharedWSClient) Done() <-chan struct{} { return c.done }
+func (c *recordingSharedWSClient) KeepAlive() error      { return nil }
+func (c *recordingSharedWSClient) Pong() error           { return nil }
+func (c *recordingSharedWSClient) Close() error {
+	c.closeOnce.Do(func() { close(c.done) })
+	return nil
+}
 func (c *recordingSharedWSClient) SendDeviceReport(devices map[int][]string) error {
 	c.deviceCalls <- deviceCall{devices: cloneDeviceReport(devices)}
 	return nil
@@ -399,6 +473,35 @@ func receiveDeviceCall(t *testing.T, ch <-chan deviceCall) deviceCall {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for device call")
 		return deviceCall{}
+	}
+}
+
+func startSharedWSRuntimeWithClient(t *testing.T, runtime *SharedWSRuntime, client sharedWSClient) {
+	t.Helper()
+	runtime.factory = func(context.Context) (sharedWSClient, error) {
+		return client, nil
+	}
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+	recording, ok := client.(*recordingSharedWSClient)
+	if !ok {
+		t.Fatal("test client does not expose consume synchronization")
+	}
+	waitForSignal(t, recording.consumeEntered, "client consume")
+}
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for %s", name)
 	}
 }
 

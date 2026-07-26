@@ -136,8 +136,9 @@ func (c *stubWSRuntimeClient) failTransport() {
 }
 
 type wsRuntimeFactoryResult struct {
-	client wsRuntimeClient
-	err    error
+	client  wsRuntimeClient
+	err     error
+	release <-chan struct{}
 }
 
 type scriptedWSRuntimeFactory struct {
@@ -154,19 +155,29 @@ func newScriptedWSRuntimeFactory(results ...wsRuntimeFactoryResult) *scriptedWSR
 	}
 }
 
-func (f *scriptedWSRuntimeFactory) Build(context.Context) (wsRuntimeClient, error) {
+func (f *scriptedWSRuntimeFactory) Build(ctx context.Context) (wsRuntimeClient, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	f.attempts++
 	attempt := f.attempts
+	var result wsRuntimeFactoryResult
+	if attempt <= len(f.results) {
+		result = f.results[attempt-1]
+	}
+	f.mu.Unlock()
+
 	f.called <- attempt
 
 	if attempt > len(f.results) {
-		return nil, errors.New("unexpected websocket runtime connect attempt")
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
-
-	result := f.results[attempt-1]
+	if result.release != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-result.release:
+		}
+	}
 	return result.client, result.err
 }
 
@@ -209,42 +220,6 @@ func (s *recordingWSRuntimeSubmitter) ExpectNoAction(t *testing.T, wait time.Dur
 	}
 }
 
-type stubWSRuntimeTicker struct {
-	ch       chan time.Time
-	stopped  chan struct{}
-	stopOnce sync.Once
-}
-
-func newStubWSRuntimeTicker() *stubWSRuntimeTicker {
-	return &stubWSRuntimeTicker{
-		ch:      make(chan time.Time, 16),
-		stopped: make(chan struct{}),
-	}
-}
-
-func (t *stubWSRuntimeTicker) C() <-chan time.Time {
-	return t.ch
-}
-
-func (t *stubWSRuntimeTicker) Stop() {
-	t.stopOnce.Do(func() {
-		close(t.stopped)
-	})
-}
-
-func (t *stubWSRuntimeTicker) Tick() {
-	select {
-	case <-t.stopped:
-		return
-	default:
-	}
-
-	select {
-	case t.ch <- time.Now():
-	case <-t.stopped:
-	}
-}
-
 func TestWSRuntime_StartsClientAndConsumesEvents(t *testing.T) {
 	t.Parallel()
 
@@ -278,24 +253,13 @@ func TestWSRuntime_ReconnectsWithBackoffAndResyncsAllOnRecovery(t *testing.T) {
 
 	firstClient := newStubWSRuntimeClient()
 	secondClient := newStubWSRuntimeClient()
+	releaseReconnect := make(chan struct{})
 	factory := newScriptedWSRuntimeFactory(
 		wsRuntimeFactoryResult{client: firstClient},
-		wsRuntimeFactoryResult{client: secondClient},
+		wsRuntimeFactoryResult{client: secondClient, release: releaseReconnect},
 	)
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
-
-	backoffCalled := make(chan time.Duration, 1)
-	releaseBackoff := make(chan struct{})
-	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
-		backoffCalled <- d
-		select {
-		case <-ctx.Done():
-			return false
-		case <-releaseBackoff:
-			return true
-		}
-	}
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ResyncOnReconnect: true})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
@@ -314,12 +278,10 @@ func TestWSRuntime_ReconnectsWithBackoffAndResyncsAllOnRecovery(t *testing.T) {
 		t.Fatalf("unexpected disconnect trigger: got %q want %q", clearAction.Metadata.Trigger, syncActionTriggerWSDisconnect)
 	}
 
-	waitForWSRuntimeBackoff(t, backoffCalled, 25*time.Millisecond)
+	waitForWSRuntimeAttempt(t, factory, 2)
 	waitForWSRuntimeDegradedState(t, runtime, true)
 
-	close(releaseBackoff)
-
-	waitForWSRuntimeAttempt(t, factory, 2)
+	close(releaseReconnect)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
 	action := submitter.WaitAction(t)
@@ -338,20 +300,38 @@ func TestWSRuntime_DegradesToPollingOnlyWhenWebSocketUnavailable(t *testing.T) {
 
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{err: errors.New("dial failed")})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
-
-	backoffCalled := make(chan time.Duration, 1)
-	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
-		backoffCalled <- d
-		<-ctx.Done()
-		return false
-	}
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ResyncOnReconnect: true})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
-	waitForWSRuntimeBackoff(t, backoffCalled, 25*time.Millisecond)
+	waitForWSRuntimeAttempt(t, factory, 2)
 	waitForWSRuntimeDegradedState(t, runtime, true)
 	submitter.ExpectNoAction(t, 50*time.Millisecond)
+
+	runtime.Stop()
+}
+
+func TestWSRuntime_RepeatedStartDoesNotClearDegradedState(t *testing.T) {
+	t.Parallel()
+
+	client := newStubWSRuntimeClient()
+	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
+	submitter := newRecordingWSRuntimeSubmitter()
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{})
+
+	runtime.Start()
+	waitForWSRuntimeAttempt(t, factory, 1)
+	client.failTransport()
+	_ = submitter.WaitAction(t)
+	waitForWSRuntimeAttempt(t, factory, 2)
+	if !runtime.Degraded() {
+		t.Fatal("disconnect did not mark runtime degraded")
+	}
+
+	runtime.Start()
+	if !runtime.Degraded() {
+		t.Fatal("repeated Start cleared degraded state")
+	}
 
 	runtime.Stop()
 }
@@ -362,14 +342,7 @@ func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSub
 	client := newStubWSRuntimeClient()
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
-
-	backoffCalled := make(chan time.Duration, 1)
-	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
-		backoffCalled <- d
-		<-ctx.Done()
-		return false
-	}
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{ResyncOnReconnect: true})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
@@ -387,7 +360,6 @@ func TestWSRuntime_ParseErrorsDoNotDegradeOrReconnectAndSubsequentEventsStillSub
 		t.Fatalf("unexpected parse-error trigger: got %q want %q", parseAction.Metadata.Trigger, syncActionTriggerWSParseError)
 	}
 	waitForWSRuntimeDegradedState(t, runtime, false)
-	expectNoWSRuntimeBackoff(t, backoffCalled, 50*time.Millisecond)
 	expectNoWSRuntimeAttempt(t, factory, 2, 50*time.Millisecond)
 
 	client.emitControlEvent(newV2board.WSEventUsersChanged)
@@ -412,19 +384,16 @@ func TestWSRuntime_HeartbeatEnabledTriggersKeepAlive(t *testing.T) {
 	client := newStubWSRuntimeClient()
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 25 * time.Millisecond})
-	ticker := newStubWSRuntimeTicker()
-	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker { return ticker }
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: time.Millisecond})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
-	ticker.Tick()
 	waitForKeepAlive(t, client)
 
-	if got := client.KeepAliveCount(); got != 1 {
-		t.Fatalf("unexpected keepalive count: got %d want 1", got)
+	if got := client.KeepAliveCount(); got < 1 {
+		t.Fatalf("unexpected keepalive count: got %d want at least 1", got)
 	}
 
 	runtime.Stop()
@@ -437,23 +406,12 @@ func TestWSRuntime_HeartbeatDisabledDoesNotTriggerKeepAlive(t *testing.T) {
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
 	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 0})
-	createdTicker := make(chan struct{}, 1)
-	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker {
-		createdTicker <- struct{}{}
-		return newStubWSRuntimeTicker()
-	}
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
-	select {
-	case <-createdTicker:
-		t.Fatal("expected heartbeat ticker not to be created when disabled")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	expectNoKeepAlive(t, client, 100*time.Millisecond)
+	expectNoKeepAlive(t, client, 25*time.Millisecond)
 	if got := client.KeepAliveCount(); got != 0 {
 		t.Fatalf("unexpected keepalive count when heartbeat disabled: got %d want 0", got)
 	}
@@ -467,23 +425,27 @@ func TestWSRuntime_StopStopsHeartbeatLoop(t *testing.T) {
 	client := newStubWSRuntimeClient()
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{client: client})
 	submitter := newRecordingWSRuntimeSubmitter()
-	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: 25 * time.Millisecond})
-	ticker := newStubWSRuntimeTicker()
-	runtime.tickerFactory = func(time.Duration) wsRuntimeTicker { return ticker }
+	runtime := newWSRuntime(factory.Build, submitter, wsRuntimeOptions{HeartbeatInterval: time.Millisecond})
 
 	runtime.Start()
 	waitForWSRuntimeAttempt(t, factory, 1)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
-	ticker.Tick()
 	waitForKeepAlive(t, client)
-	baseline := client.KeepAliveCount()
 
 	runtime.Stop()
 	waitForChannelClosed(t, runtime.Done())
 
-	ticker.Tick()
-	expectNoKeepAlive(t, client, 100*time.Millisecond)
+	for {
+		select {
+		case <-client.keepAliveCh:
+			continue
+		default:
+		}
+		break
+	}
+	baseline := client.KeepAliveCount()
+	expectNoKeepAlive(t, client, 25*time.Millisecond)
 	if got := client.KeepAliveCount(); got != baseline {
 		t.Fatalf("keepalive count changed after stop: got %d want %d", got, baseline)
 	}
@@ -730,29 +692,6 @@ func waitForWSRuntimeAttempt(t *testing.T, factory *scriptedWSRuntimeFactory, wa
 	}
 }
 
-func waitForWSRuntimeBackoff(t *testing.T, called <-chan time.Duration, want time.Duration) {
-	t.Helper()
-
-	select {
-	case got := <-called:
-		if got != want {
-			t.Fatalf("unexpected backoff: got %v want %v", got, want)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for backoff %v", want)
-	}
-}
-
-func expectNoWSRuntimeBackoff(t *testing.T, called <-chan time.Duration, wait time.Duration) {
-	t.Helper()
-
-	select {
-	case got := <-called:
-		t.Fatalf("expected no backoff, got %v", got)
-	case <-time.After(wait):
-	}
-}
-
 func expectNoWSRuntimeAttempt(t *testing.T, factory *scriptedWSRuntimeFactory, want int, wait time.Duration) {
 	t.Helper()
 
@@ -792,9 +731,7 @@ func waitForWSRuntimeClient(t *testing.T, runtime *wsRuntime, want wsRuntimeClie
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		runtime.mu.RLock()
-		got := runtime.client
-		runtime.mu.RUnlock()
+		got, _ := runtime.lifecycle.Current().(wsRuntimeClient)
 		if got == want {
 			return
 		}

@@ -13,6 +13,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/Mtoly/XrayRP/service/internal/wslifecycle"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -43,34 +44,30 @@ var maxIntValue = int64(^uint(0) >> 1)
 type SharedWSRuntime struct {
 	config     SharedWSRuntimeConfig
 	factory    sharedWSClientFactory
+	lifecycle  *wslifecycle.Runtime
 	rediscover func() error
-	sleep      func(context.Context, time.Duration) bool
 
 	mu        sync.RWMutex
-	started   bool
-	cancel    context.CancelFunc
-	done      chan struct{}
-	client    sharedWSClient
 	mailboxes map[int]*SharedWSMailbox
 }
 
 func NewSharedWSRuntime(config SharedWSRuntimeConfig) *SharedWSRuntime {
-	if config.ReconnectBackoff < 0 {
-		config.ReconnectBackoff = 0
-	}
-	if config.HeartbeatInterval < 0 {
-		config.HeartbeatInterval = 0
-	}
-
 	runtime := &SharedWSRuntime{
 		config:    config,
-		sleep:     sleepWithContext,
-		done:      make(chan struct{}),
 		mailboxes: make(map[int]*SharedWSMailbox),
 	}
 	runtime.factory = func(ctx context.Context) (sharedWSClient, error) {
 		return newV2board.NewWSClientContext(ctx, config.Endpoint)
 	}
+	runtime.lifecycle = wslifecycle.New(wslifecycle.Config{
+		Factory: func(ctx context.Context) (wslifecycle.Client, error) {
+			return runtime.factory(ctx)
+		},
+		HandleEvent:       runtime.handleEvent,
+		HandleOutcome:     runtime.handleOutcome,
+		ReconnectBackoff:  config.ReconnectBackoff,
+		HeartbeatInterval: config.HeartbeatInterval,
+	})
 	return runtime
 }
 
@@ -97,179 +94,45 @@ func (r *SharedWSRuntime) NewNodeRuntimeFactory(nodeID int) controller.WSEventRu
 }
 
 func (r *SharedWSRuntime) Start() error {
-	r.mu.Lock()
-	if r.started {
-		r.mu.Unlock()
-		return nil
-	}
-	if r.done == nil || doneClosed(r.done) {
-		r.done = make(chan struct{})
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := r.done
-	r.started = true
-	r.cancel = cancel
-	r.client = nil
-	r.mu.Unlock()
-
-	go r.run(ctx, done)
+	r.lifecycle.Start()
 	return nil
 }
 
 func (r *SharedWSRuntime) Close() error {
-	r.mu.RLock()
-	if !r.started {
-		r.mu.RUnlock()
-		return nil
-	}
-	cancel := r.cancel
-	client := r.client
-	done := r.done
-	r.mu.RUnlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if client != nil {
-		_ = client.Close()
-	}
-	if done != nil {
-		<-done
-	}
+	r.lifecycle.Close()
 	return nil
 }
 
 func (r *SharedWSRuntime) DeviceReporterReady() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.client != nil
+	_, ok := r.lifecycle.Current().(sharedWSClient)
+	return ok
 }
 
 func (r *SharedWSRuntime) ReportNodeDevices(nodeID int, devices map[int][]string) error {
-	r.mu.RLock()
-	client := r.client
-	r.mu.RUnlock()
-	if client == nil {
+	client, ok := r.lifecycle.Current().(sharedWSClient)
+	if !ok {
 		return nil
 	}
 	return client.SendNodeDeviceReport(nodeID, devices)
 }
 
 func (r *SharedWSRuntime) ReportNodeStatus(nodeID int, nodeStatus *api.NodeStatus) error {
-	r.mu.RLock()
-	client := r.client
-	r.mu.RUnlock()
-	if client == nil {
+	client, ok := r.lifecycle.Current().(sharedWSClient)
+	if !ok {
 		return nil
 	}
 	return client.SendNodeStatusReport(nodeID, nodeStatus)
 }
 
-func (r *SharedWSRuntime) run(ctx context.Context, done chan struct{}) {
-	defer func() {
-		r.mu.Lock()
-		if r.done == done {
-			close(done)
-			r.started = false
-			r.cancel = nil
-			r.client = nil
-		}
-		r.mu.Unlock()
-	}()
-
-	needsResyncOnConnect := false
-	for {
-		client, err := r.connect(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			needsResyncOnConnect = true
-			if !r.sleep(ctx, r.config.ReconnectBackoff) {
-				return
-			}
-			continue
-		}
-
-		r.setClient(client)
-		if needsResyncOnConnect {
-			r.broadcastReconnect()
-			needsResyncOnConnect = false
-		}
-
-		disconnected := r.consumeClient(ctx, client)
-		r.clearClient(client)
-		_ = client.Close()
-
-		if ctx.Err() != nil || !disconnected {
-			return
-		}
-
-		r.broadcastDisconnect()
-		needsResyncOnConnect = true
-		if !r.sleep(ctx, r.config.ReconnectBackoff) {
-			return
-		}
-	}
-}
-
-func (r *SharedWSRuntime) connect(ctx context.Context) (sharedWSClient, error) {
-	client, err := r.factory(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if client == nil {
-		return nil, errors.New("machine websocket factory returned nil client")
-	}
-	return client, nil
-}
-
-func (r *SharedWSRuntime) consumeClient(ctx context.Context, client sharedWSClient) bool {
-	var heartbeat <-chan time.Time
-	var ticker *time.Ticker
-	if r.config.HeartbeatInterval > 0 {
-		ticker = time.NewTicker(r.config.HeartbeatInterval)
-		heartbeat = ticker.C
-		defer ticker.Stop()
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-heartbeat:
-			if err := client.KeepAlive(); err != nil {
-				return true
-			}
-		case event, ok := <-client.Events():
-			if !ok {
-				return true
-			}
-			r.handleEvent(client, event)
-		case err, ok := <-client.Errors():
-			if !ok {
-				return true
-			}
-			if r.handleError(err) {
-				continue
-			}
-			return true
-		case <-client.Done():
-			return true
-		}
-	}
-}
-
-func (r *SharedWSRuntime) handleEvent(client sharedWSClient, event *newV2board.WSEvent) {
+func (r *SharedWSRuntime) handleEvent(client wslifecycle.Client, event *newV2board.WSEvent) {
 	if event == nil {
 		return
 	}
 
 	switch event.Event {
 	case newV2board.WSEventPing:
-		if client != nil {
-			_ = client.Pong()
+		if ponger, ok := client.(interface{ Pong() error }); ok {
+			_ = ponger.Pong()
 		}
 		return
 	case newV2board.WSEventPong,
@@ -290,15 +153,15 @@ func (r *SharedWSRuntime) handleEvent(client sharedWSClient, event *newV2board.W
 	}
 }
 
-func (r *SharedWSRuntime) handleError(err error) bool {
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, newV2board.ErrWSClientParse) {
+func (r *SharedWSRuntime) handleOutcome(outcome wslifecycle.Outcome) {
+	switch outcome {
+	case wslifecycle.OutcomeParseError:
 		r.broadcastParseError()
-		return true
+	case wslifecycle.OutcomeDisconnected:
+		r.broadcastDisconnect()
+	case wslifecycle.OutcomeReconnected:
+		r.broadcastReconnect()
 	}
-	return false
 }
 
 func (r *SharedWSRuntime) triggerRediscover() {
@@ -371,20 +234,6 @@ func (r *SharedWSRuntime) mailboxSnapshot() []*SharedWSMailbox {
 		mailboxes = append(mailboxes, mailbox)
 	}
 	return mailboxes
-}
-
-func (r *SharedWSRuntime) setClient(client sharedWSClient) {
-	r.mu.Lock()
-	r.client = client
-	r.mu.Unlock()
-}
-
-func (r *SharedWSRuntime) clearClient(client sharedWSClient) {
-	r.mu.Lock()
-	if r.client == client {
-		r.client = nil
-	}
-	r.mu.Unlock()
 }
 
 type SharedWSMailbox struct {
@@ -501,34 +350,4 @@ func positiveNodeID(nodeID int) (int, bool) {
 		return 0, false
 	}
 	return nodeID, true
-}
-
-func doneClosed(done <-chan struct{}) bool {
-	select {
-	case <-done:
-		return true
-	default:
-		return false
-	}
-}
-
-func sleepWithContext(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}
-
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }

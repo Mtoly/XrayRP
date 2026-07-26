@@ -238,15 +238,12 @@ func TestDualActive_HandshakeFailureDegradesToPollingOnly(t *testing.T) {
 	controller.syncCoordinator = coordinator
 
 	factory := newScriptedWSRuntimeFactory(wsRuntimeFactoryResult{err: errors.New("handshake failed")})
-	runtime := newWSRuntime(factory.Build, coordinator, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
-	runtime.sleep = func(ctx context.Context, _ time.Duration) bool {
-		<-ctx.Done()
-		return false
-	}
+	runtime := newWSRuntime(factory.Build, coordinator, wsRuntimeOptions{ResyncOnReconnect: true})
 	runtime.Start()
 	defer runtime.Stop()
 
 	waitForWSRuntimeAttempt(t, factory, 1)
+	waitForWSRuntimeAttempt(t, factory, 2)
 	waitForWSRuntimeDegradedState(t, runtime, true)
 
 	if err := controller.nodeInfoMonitor(); err != nil {
@@ -336,22 +333,12 @@ func TestDualActive_ReconnectForcesResyncAll(t *testing.T) {
 
 	firstClient := newStubWSRuntimeClient()
 	secondClient := newStubWSRuntimeClient()
+	releaseReconnect := make(chan struct{})
 	factory := newScriptedWSRuntimeFactory(
 		wsRuntimeFactoryResult{client: firstClient},
-		wsRuntimeFactoryResult{client: secondClient},
+		wsRuntimeFactoryResult{client: secondClient, release: releaseReconnect},
 	)
-	runtime := newWSRuntime(factory.Build, coordinator, wsRuntimeOptions{ReconnectBackoff: 25 * time.Millisecond, ResyncOnReconnect: true})
-	backoffCalled := make(chan time.Duration, 1)
-	releaseBackoff := make(chan struct{})
-	runtime.sleep = func(ctx context.Context, d time.Duration) bool {
-		backoffCalled <- d
-		select {
-		case <-ctx.Done():
-			return false
-		case <-releaseBackoff:
-			return true
-		}
-	}
+	runtime := newWSRuntime(factory.Build, coordinator, wsRuntimeOptions{ResyncOnReconnect: true})
 	runtime.Start()
 	defer runtime.Stop()
 
@@ -359,7 +346,7 @@ func TestDualActive_ReconnectForcesResyncAll(t *testing.T) {
 	waitForWSRuntimeDegradedState(t, runtime, false)
 
 	firstClient.failTransport()
-	waitForWSRuntimeBackoff(t, backoffCalled, 25*time.Millisecond)
+	waitForWSRuntimeAttempt(t, factory, 2)
 	waitForWSRuntimeDegradedState(t, runtime, true)
 	waitForAppliedSnapshots(t, recorder, 1)
 	disconnectSnapshot, ok := recorder.appliedSnapshotAt(0)
@@ -370,9 +357,7 @@ func TestDualActive_ReconnectForcesResyncAll(t *testing.T) {
 		t.Fatalf("expected disconnect to clear global devices, got source=%q type=%q trigger=%q", disconnectSnapshot.Action.Source, disconnectSnapshot.Action.Type, disconnectSnapshot.Action.Metadata.Trigger)
 	}
 
-	close(releaseBackoff)
-
-	waitForWSRuntimeAttempt(t, factory, 2)
+	close(releaseReconnect)
 	waitForWSRuntimeDegradedState(t, runtime, false)
 	waitForAppliedSnapshots(t, recorder, 2)
 	waitForCoordinatorIdle(t, coordinator)

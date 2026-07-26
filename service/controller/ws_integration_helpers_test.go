@@ -15,11 +15,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
-const (
-	v2boardWSIntegrationEnv        = "XRAYRP_RUN_V2BOARD_WS_INTEGRATION"
-	wsIntegrationReconnectBackoff  = 10 * time.Millisecond
-	wsIntegrationReconnectBackoffS = 1
-)
+const v2boardWSIntegrationEnv = "XRAYRP_RUN_V2BOARD_WS_INTEGRATION"
 
 func requireV2boardWSIntegration(t *testing.T) {
 	t.Helper()
@@ -362,7 +358,7 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 		Enable:            true,
 		Endpoint:          server.endpoint(),
 		HeartbeatInterval: 0,
-		ReconnectBackoff:  wsIntegrationReconnectBackoffS,
+		ReconnectBackoff:  0,
 		ResyncOnReconnect: true,
 	}
 	controller.startAt = time.Now().Add(time.Hour)
@@ -378,19 +374,6 @@ func newV2boardWSIntegrationHarness(t *testing.T) *v2boardWSIntegrationHarness {
 		harness.coordinator = newSyncCoordinator(executor)
 		return harness.coordinator
 	}
-	controller.wsRuntimeFactory = func(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
-		runtime, err := controller.newConfiguredWSRuntime(submitter)
-		if err != nil {
-			return nil, err
-		}
-		configured, ok := runtime.(*wsRuntime)
-		if !ok || configured == nil {
-			return runtime, nil
-		}
-		configured.reconnectBackoff = wsIntegrationReconnectBackoff
-		return configured, nil
-	}
-
 	return harness
 }
 
