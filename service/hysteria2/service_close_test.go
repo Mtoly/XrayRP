@@ -108,14 +108,22 @@ func TestCloseAfterStartIsSequentiallyIdempotent(t *testing.T) {
 }
 
 func TestStartOwnsPortHopRuleInstallationBeforePublishingRunning(t *testing.T) {
-	originalApply := applyPortHopRules
-	defer func() { applyPortHopRules = originalApply }()
+	originalApply, originalDelete := applyPortHopRules, deletePortHopRules
+	t.Cleanup(func() {
+		applyPortHopRules = originalApply
+		deletePortHopRules = originalDelete
+	})
 
 	applyEntered := make(chan struct{})
 	releaseApply := make(chan struct{})
 	applyPortHopRules = func([]portHopRule, *log.Entry) error {
 		close(applyEntered)
 		<-releaseApply
+		return nil
+	}
+	deleted := make(chan []portHopRule, 1)
+	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+		deleted <- append([]portHopRule(nil), rules...)
 		return nil
 	}
 
@@ -153,6 +161,9 @@ func TestStartOwnsPortHopRuleInstallationBeforePublishingRunning(t *testing.T) {
 	}
 	if err := service.Close(); err != nil {
 		t.Fatalf("Close() after Start error = %v", err)
+	}
+	if got, want := <-deleted, buildPortHopRulesFromNode(nodeInfo); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Close() deleted rules = %v, want %v", got, want)
 	}
 }
 
