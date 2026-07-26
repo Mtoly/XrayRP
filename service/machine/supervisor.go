@@ -67,6 +67,8 @@ type Supervisor struct {
 	done               chan struct{}
 	statusCancel       context.CancelFunc
 	statusDone         chan struct{}
+	retiredLoops       map[chan struct{}]machineLoopOwner
+	waitLoop           func(<-chan struct{})
 	discoveryInterval  time.Duration
 	statusInterval     time.Duration
 	started            bool
@@ -108,6 +110,26 @@ type machineTopologySnapshot struct {
 	failure    error
 }
 
+type machineLoopOwner struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type machineLoopKind uint8
+
+const (
+	machineDiscoveryLoop machineLoopKind = iota
+	machineStatusLoop
+)
+
+type machineLoopHandoff struct {
+	kind        machineLoopKind
+	interval    time.Duration
+	ctx         context.Context
+	retired     machineLoopOwner
+	replacement machineLoopOwner
+}
+
 func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory NodeServiceFactory) (*Supervisor, error) {
 	if discoverer == nil {
 		return nil, fmt.Errorf("node discoverer must not be nil")
@@ -131,6 +153,7 @@ func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory N
 		discoverer:        discoverer,
 		factory:           factory,
 		running:           make(map[int]*nodeRuntime),
+		retiredLoops:      make(map[chan struct{}]machineLoopOwner),
 		discoveryInterval: config.DiscoveryInterval,
 		statusInterval:    config.MachineStatus.StatusInterval,
 	}, nil
@@ -174,27 +197,26 @@ func (s *Supervisor) Close() error {
 	}
 	s.closing = true
 	s.closeDone = make(chan struct{})
-	cancel := s.cancel
-	done := s.done
-	statusCancel := s.statusCancel
-	statusDone := s.statusDone
+	loops := make([]machineLoopOwner, 0, 2+len(s.retiredLoops))
+	loops = appendMachineLoopOwner(loops, machineLoopOwner{cancel: s.cancel, done: s.done})
+	loops = appendMachineLoopOwner(loops, machineLoopOwner{cancel: s.statusCancel, done: s.statusDone})
+	for _, loop := range s.retiredLoops {
+		loops = appendMachineLoopOwner(loops, loop)
+	}
 	s.cancel = nil
 	s.done = nil
 	s.statusCancel = nil
 	s.statusDone = nil
+	s.retiredLoops = make(map[chan struct{}]machineLoopOwner)
 	s.mu.Unlock()
 
-	if cancel != nil {
-		cancel()
+	for _, loop := range loops {
+		if loop.cancel != nil {
+			loop.cancel()
+		}
 	}
-	if statusCancel != nil {
-		statusCancel()
-	}
-	if done != nil {
-		<-done
-	}
-	if statusDone != nil {
-		<-statusDone
+	for _, loop := range loops {
+		s.waitForLoop(loop.done)
 	}
 
 	s.operationMu.Lock()
@@ -238,7 +260,11 @@ func (s *Supervisor) Close() error {
 
 func (s *Supervisor) startInitial() error {
 	s.beginOperation(supervisorOperationInitial)
-	defer s.endOperation(supervisorOperationInitial)
+	var loopHandoffs []machineLoopHandoff
+	defer func() {
+		s.endOperation(supervisorOperationInitial)
+		s.joinLoopHandoffs(loopHandoffs, nil)
+	}()
 
 	s.mu.Lock()
 	if s.closed || s.closing {
@@ -293,9 +319,10 @@ func (s *Supervisor) startInitial() error {
 		s.topologyFailure = failure
 		s.topologyGeneration++
 		s.started = true
-		s.applyBaseConfigLocked(snapshot.baseConfig)
+		loopHandoffs = s.applyBaseConfigLocked(snapshot.baseConfig)
 	}
 	s.mu.Unlock()
+	s.activateLoopHandoffs(loopHandoffs)
 
 	if commitErr != nil {
 		return errors.Join(commitErr, s.closeRuntimes(started))
@@ -307,11 +334,19 @@ func (s *Supervisor) startInitial() error {
 }
 
 func (s *Supervisor) reconcilePeriodic() error {
+	return s.reconcilePeriodicFrom(nil)
+}
+
+func (s *Supervisor) reconcilePeriodicFrom(ownerDone chan struct{}) error {
 	s.beginOperation(supervisorOperationReconcile)
-	defer s.endOperation(supervisorOperationReconcile)
+	var loopHandoffs []machineLoopHandoff
+	defer func() {
+		s.endOperation(supervisorOperationReconcile)
+		s.joinLoopHandoffs(loopHandoffs, ownerDone)
+	}()
 
 	s.mu.Lock()
-	unavailable := s.closed || s.closing
+	unavailable := s.closed || s.closing || ownerDone != nil && s.done != ownerDone
 	s.mu.Unlock()
 	if unavailable {
 		return nil
@@ -324,13 +359,14 @@ func (s *Supervisor) reconcilePeriodic() error {
 	}
 
 	s.mu.Lock()
-	if s.closed || s.closing {
+	if s.closed || s.closing || ownerDone != nil && s.done != ownerDone {
 		s.mu.Unlock()
 		return nil
 	}
 
-	s.applyBaseConfigLocked(snapshot.baseConfig)
+	loopHandoffs = s.applyBaseConfigLocked(snapshot.baseConfig)
 	s.mu.Unlock()
+	s.activateLoopHandoffs(loopHandoffs)
 	return s.reconcile(snapshot.bindings)
 }
 
@@ -358,34 +394,114 @@ func materializeDiscoverySnapshot(response *newV2board.MachineNodesResponse) (di
 	return discoverySnapshot{bindings: bindings, baseConfig: response.BaseConfig}, nil
 }
 
-func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) {
+func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) []machineLoopHandoff {
 	schedule := materializeMachineRuntimeSchedule(baseConfig, machineRuntimeScheduleOptions{
 		currentDiscoveryInterval: s.discoveryInterval,
 		minDiscoveryInterval:     s.config.MinDiscoveryInterval,
 		currentStatusInterval:    s.statusInterval,
 		minStatusInterval:        s.config.MachineStatus.MinStatusInterval,
 	})
+	var handoffs []machineLoopHandoff
 	if schedule.updateDiscovery {
 		nextInterval := schedule.discoveryInterval
 		s.discoveryInterval = nextInterval
 
-		if s.cancel != nil && !s.closed {
-			oldCancel := s.cancel
+		if (s.cancel != nil || s.done != nil) && !s.closed && !s.closing {
 			if s.config.Logger != nil {
 				s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
+			retired := machineLoopOwner{cancel: s.cancel, done: s.done}
+			replacement := machineLoopOwner{cancel: cancel, done: done}
 			s.cancel = cancel
 			s.done = done
-			oldCancel()
-			go s.run(ctx, done, nextInterval)
+			s.retireLoopLocked(retired)
+			handoffs = append(handoffs, machineLoopHandoff{
+				kind:        machineDiscoveryLoop,
+				interval:    nextInterval,
+				ctx:         ctx,
+				retired:     retired,
+				replacement: replacement,
+			})
 		}
 	}
 
 	if schedule.updateStatus {
-		s.replaceStatusIntervalLocked(schedule.statusInterval)
+		if handoff, ok := s.replaceStatusIntervalLocked(schedule.statusInterval); ok {
+			handoffs = append(handoffs, handoff)
+		}
 	}
+	return handoffs
+}
+
+func (s *Supervisor) retireLoopLocked(loop machineLoopOwner) {
+	if loop.done == nil {
+		return
+	}
+	if s.retiredLoops == nil {
+		s.retiredLoops = make(map[chan struct{}]machineLoopOwner)
+	}
+	s.retiredLoops[loop.done] = loop
+}
+
+func (s *Supervisor) activateLoopHandoffs(handoffs []machineLoopHandoff) {
+	for _, handoff := range handoffs {
+		if handoff.retired.cancel != nil {
+			handoff.retired.cancel()
+		}
+		switch handoff.kind {
+		case machineDiscoveryLoop:
+			go s.run(handoff.ctx, handoff.replacement.done, handoff.interval)
+		case machineStatusLoop:
+			go s.runStatus(handoff.ctx, handoff.replacement.done, handoff.interval)
+		}
+	}
+}
+
+func (s *Supervisor) joinLoopHandoffs(handoffs []machineLoopHandoff, ownerDone chan struct{}) {
+	for _, handoff := range handoffs {
+		done := handoff.retired.done
+		if done == nil || done == ownerDone {
+			continue
+		}
+		s.waitForLoop(done)
+		s.forgetRetiredLoop(done)
+	}
+}
+
+func (s *Supervisor) waitForLoop(done <-chan struct{}) {
+	if done == nil {
+		return
+	}
+	if s.waitLoop != nil {
+		s.waitLoop(done)
+		return
+	}
+	<-done
+}
+
+func (s *Supervisor) forgetRetiredLoop(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.retiredLoops, done)
+	s.mu.Unlock()
+}
+
+func appendMachineLoopOwner(loops []machineLoopOwner, candidate machineLoopOwner) []machineLoopOwner {
+	if candidate.cancel == nil && candidate.done == nil {
+		return loops
+	}
+	if candidate.done != nil {
+		for _, loop := range loops {
+			if loop.done == candidate.done {
+				return loops
+			}
+		}
+	}
+	return append(loops, candidate)
 }
 
 type machineRuntimeScheduleOptions struct {
@@ -724,7 +840,10 @@ func (s *Supervisor) closeRuntimes(runtimes []*nodeRuntime) error {
 }
 
 func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.Duration) {
-	defer close(done)
+	defer func() {
+		close(done)
+		s.forgetRetiredLoop(done)
+	}()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -734,7 +853,7 @@ func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.reconcilePeriodic(); err != nil {
+			if err := s.reconcilePeriodicFrom(done); err != nil {
 				s.logWarning(err)
 			}
 		}
@@ -752,28 +871,38 @@ func (s *Supervisor) startStatusLoopLocked(interval time.Duration) {
 	go s.runStatus(ctx, done, interval)
 }
 
-func (s *Supervisor) replaceStatusIntervalLocked(interval time.Duration) {
+func (s *Supervisor) replaceStatusIntervalLocked(interval time.Duration) (machineLoopHandoff, bool) {
 	if interval <= 0 || interval == s.statusInterval {
-		return
+		return machineLoopHandoff{}, false
 	}
 	s.statusInterval = interval
-	if s.statusCancel == nil || s.closed || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
-		return
+	if (s.statusCancel == nil && s.statusDone == nil) || s.closed || s.closing || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
+		return machineLoopHandoff{}, false
 	}
-	oldCancel := s.statusCancel
 	if s.config.Logger != nil {
 		s.config.Logger.Infof("Update machine status interval to %s", interval)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	retired := machineLoopOwner{cancel: s.statusCancel, done: s.statusDone}
+	replacement := machineLoopOwner{cancel: cancel, done: done}
 	s.statusCancel = cancel
 	s.statusDone = done
-	oldCancel()
-	go s.runStatus(ctx, done, interval)
+	s.retireLoopLocked(retired)
+	return machineLoopHandoff{
+		kind:        machineStatusLoop,
+		interval:    interval,
+		ctx:         ctx,
+		retired:     retired,
+		replacement: replacement,
+	}, true
 }
 
 func (s *Supervisor) runStatus(ctx context.Context, done chan struct{}, interval time.Duration) {
-	defer close(done)
+	defer func() {
+		close(done)
+		s.forgetRetiredLoop(done)
+	}()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

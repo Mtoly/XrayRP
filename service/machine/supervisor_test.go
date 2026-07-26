@@ -1466,3 +1466,324 @@ func TestSupervisorPeriodicAppliesBaseConfigPullInterval(t *testing.T) {
 		t.Fatalf("expected clamped discovery interval, got %s", supervisor.discoveryInterval)
 	}
 }
+
+func TestSupervisorDiscoveryIntervalReplacementCancelsAndJoinsOldLoopWithoutLocks(t *testing.T) {
+	oldDone := make(chan struct{})
+	cancelLockAvailable := make(chan bool, 1)
+	waitEntered := make(chan (<-chan struct{}), 1)
+	waitRelease := make(chan struct{})
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{DiscoveryInterval: 60 * time.Second}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	supervisor.cancel = func() {
+		available := supervisor.mu.TryLock()
+		if available {
+			supervisor.mu.Unlock()
+		}
+		cancelLockAvailable <- available
+	}
+	supervisor.done = oldDone
+	supervisor.waitLoop = func(done <-chan struct{}) {
+		waitEntered <- done
+		<-waitRelease
+		<-done
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.ReconcileNow()
+	}()
+
+	if available := <-cancelLockAvailable; !available {
+		t.Fatal("discovery loop cancellation ran while holding Supervisor.mu")
+	}
+	if gotDone := <-waitEntered; gotDone != oldDone {
+		t.Fatal("discovery replacement joined the wrong loop")
+	}
+	if !supervisor.mu.TryLock() {
+		t.Fatal("discovery loop join held Supervisor.mu")
+	}
+	replacementDone := supervisor.done
+	supervisor.mu.Unlock()
+	if replacementDone == nil || replacementDone == oldDone {
+		t.Fatal("discovery replacement did not publish one new current loop")
+	}
+	if !supervisor.operationMu.TryLock() {
+		t.Fatal("discovery loop join held operationMu")
+	}
+	supervisor.operationMu.Unlock()
+
+	close(oldDone)
+	close(waitRelease)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("ReconcileNow returned error: %v", err)
+	}
+	supervisor.mu.Lock()
+	retiredCount := len(supervisor.retiredLoops)
+	supervisor.mu.Unlock()
+	if retiredCount != 0 {
+		t.Fatalf("joined discovery loop remained retired: %d", retiredCount)
+	}
+}
+
+func TestSupervisorStatusIntervalReplacementCancelsAndJoinsOldLoopWithoutLocks(t *testing.T) {
+	oldDone := make(chan struct{})
+	cancelLockAvailable := make(chan bool, 1)
+	waitEntered := make(chan (<-chan struct{}), 1)
+	waitRelease := make(chan struct{})
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PushInterval: 15}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter:       &fakeMachineStatusReporter{},
+			Collector:      func() (api.MachineStatus, error) { return api.MachineStatus{}, nil },
+			StatusInterval: 60 * time.Second,
+		},
+	}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	supervisor.statusCancel = func() {
+		available := supervisor.mu.TryLock()
+		if available {
+			supervisor.mu.Unlock()
+		}
+		cancelLockAvailable <- available
+	}
+	supervisor.statusDone = oldDone
+	supervisor.waitLoop = func(done <-chan struct{}) {
+		waitEntered <- done
+		<-waitRelease
+		<-done
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.ReconcileNow()
+	}()
+
+	if available := <-cancelLockAvailable; !available {
+		t.Fatal("status loop cancellation ran while holding Supervisor.mu")
+	}
+	if gotDone := <-waitEntered; gotDone != oldDone {
+		t.Fatal("status replacement joined the wrong loop")
+	}
+	if !supervisor.mu.TryLock() {
+		t.Fatal("status loop join held Supervisor.mu")
+	}
+	replacementDone := supervisor.statusDone
+	supervisor.mu.Unlock()
+	if replacementDone == nil || replacementDone == oldDone {
+		t.Fatal("status replacement did not publish one new current loop")
+	}
+	if !supervisor.operationMu.TryLock() {
+		t.Fatal("status loop join held operationMu")
+	}
+	supervisor.operationMu.Unlock()
+
+	close(oldDone)
+	close(waitRelease)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("ReconcileNow returned error: %v", err)
+	}
+	supervisor.mu.Lock()
+	retiredCount := len(supervisor.retiredLoops)
+	supervisor.mu.Unlock()
+	if retiredCount != 0 {
+		t.Fatalf("joined status loop remained retired: %d", retiredCount)
+	}
+}
+
+func TestSupervisorDiscoveryLoopCanRetireItselfWithoutWaitingOnOwnDone(t *testing.T) {
+	oldDone := make(chan struct{})
+	cancelled := make(chan struct{}, 1)
+	waitedOnSelf := make(chan struct{}, 1)
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{DiscoveryInterval: 60 * time.Second}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	supervisor.cancel = func() { cancelled <- struct{}{} }
+	supervisor.done = oldDone
+	supervisor.waitLoop = func(done <-chan struct{}) {
+		if done == oldDone {
+			waitedOnSelf <- struct{}{}
+			return
+		}
+		<-done
+	}
+
+	if err := supervisor.reconcilePeriodicFrom(oldDone); err != nil {
+		t.Fatalf("reconcilePeriodicFrom returned error: %v", err)
+	}
+	<-cancelled
+	select {
+	case <-waitedOnSelf:
+		t.Fatal("discovery loop waited for its own done channel")
+	default:
+	}
+	supervisor.mu.Lock()
+	retiredCount := len(supervisor.retiredLoops)
+	supervisor.mu.Unlock()
+	if retiredCount != 1 {
+		t.Fatalf("self-retired loop ownership = %d, want 1 until run exits", retiredCount)
+	}
+
+	close(oldDone)
+	supervisor.forgetRetiredLoop(oldDone)
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+func TestSupervisorRapidDiscoveryIntervalReplacementsRetainOneCurrentLoop(t *testing.T) {
+	oldDone := make(chan struct{})
+	oldCancelled := make(chan struct{}, 1)
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 50}),
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 45}),
+		machineNodesResponseWithBaseConfig(api.BaseConfig{PullInterval: 40}),
+	}}
+	supervisor, err := NewSupervisor(SupervisorConfig{DiscoveryInterval: 60 * time.Second}, discoverer, newFakeFactory().build)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	supervisor.cancel = func() { oldCancelled <- struct{}{} }
+	supervisor.done = oldDone
+	t.Cleanup(func() { _ = supervisor.Close() })
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- supervisor.ReconcileNow()
+	}()
+	<-oldCancelled
+	close(oldDone)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first ReconcileNow returned error: %v", err)
+	}
+
+	previousDone := oldDone
+	for replacement := 1; replacement <= 3; replacement++ {
+		supervisor.mu.Lock()
+		currentDone := supervisor.done
+		retiredCount := len(supervisor.retiredLoops)
+		supervisor.mu.Unlock()
+		if currentDone == nil || currentDone == previousDone {
+			t.Fatalf("replacement %d did not publish a new current loop", replacement)
+		}
+		if retiredCount != 0 {
+			t.Fatalf("replacement %d retained %d joined loops", replacement, retiredCount)
+		}
+		previousDone = currentDone
+		if replacement < 3 {
+			if err := supervisor.ReconcileNow(); err != nil {
+				t.Fatalf("replacement %d ReconcileNow returned error: %v", replacement+1, err)
+			}
+		}
+	}
+}
+
+func TestSupervisorCloseJoinsCurrentAndRetiredLoopsWithoutStateLock(t *testing.T) {
+	discoveryDone := make(chan struct{})
+	statusDone := make(chan struct{})
+	retiredDone := make(chan struct{})
+	discoveryCancelled := make(chan struct{}, 1)
+	statusCancelled := make(chan struct{}, 1)
+	retiredCancelled := make(chan struct{}, 1)
+	supervisor := &Supervisor{
+		running: make(map[int]*nodeRuntime),
+		cancel:  func() { discoveryCancelled <- struct{}{} },
+		done:    discoveryDone,
+		statusCancel: func() {
+			statusCancelled <- struct{}{}
+		},
+		statusDone: statusDone,
+		retiredLoops: map[chan struct{}]machineLoopOwner{
+			retiredDone: {
+				cancel: func() { retiredCancelled <- struct{}{} },
+				done:   retiredDone,
+			},
+		},
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- supervisor.Close()
+	}()
+	<-discoveryCancelled
+	<-statusCancelled
+	<-retiredCancelled
+
+	if !supervisor.mu.TryLock() {
+		t.Fatal("Close held Supervisor.mu while joining loops")
+	}
+	supervisor.mu.Unlock()
+	close(discoveryDone)
+	close(statusDone)
+	close(retiredDone)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+func TestSupervisorReconcileErrorStillJoinsRetiredLoop(t *testing.T) {
+	startErr := errors.New("candidate start failed")
+	oldDone := make(chan struct{})
+	oldCancelled := make(chan struct{}, 1)
+	waitEntered := make(chan (<-chan struct{}), 1)
+	waitRelease := make(chan struct{})
+	candidate := &fakeService{startErr: startErr}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponseWithBaseConfig(
+			api.BaseConfig{PullInterval: 45},
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "candidate"},
+		),
+	}}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{DiscoveryInterval: 60 * time.Second},
+		discoverer,
+		func(NodeBinding) (service.Service, error) { return candidate, nil },
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor returned error: %v", err)
+	}
+	supervisor.cancel = func() { oldCancelled <- struct{}{} }
+	supervisor.done = oldDone
+	supervisor.waitLoop = func(done <-chan struct{}) {
+		waitEntered <- done
+		<-waitRelease
+		<-done
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.ReconcileNow()
+	}()
+	<-oldCancelled
+	if gotDone := <-waitEntered; gotDone != oldDone {
+		t.Fatal("reconcile error path joined the wrong loop")
+	}
+	close(oldDone)
+	close(waitRelease)
+
+	reconcileErr := <-reconcileDone
+	if !errors.Is(reconcileErr, startErr) {
+		t.Fatalf("ReconcileNow error = %v, want %v", reconcileErr, startErr)
+	}
+	supervisor.mu.Lock()
+	retiredCount := len(supervisor.retiredLoops)
+	supervisor.mu.Unlock()
+	if retiredCount != 0 {
+		t.Fatalf("reconcile error leaked %d retired loops", retiredCount)
+	}
+}
