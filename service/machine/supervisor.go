@@ -57,20 +57,22 @@ type Supervisor struct {
 	discoverer NodeDiscoverer
 	factory    NodeServiceFactory
 
-	operationMu       sync.Mutex
-	observeOperation  func(supervisorOperation, supervisorOperationPhase)
-	mu                sync.Mutex
-	running           map[int]*nodeRuntime
-	cancel            context.CancelFunc
-	done              chan struct{}
-	statusCancel      context.CancelFunc
-	statusDone        chan struct{}
-	discoveryInterval time.Duration
-	statusInterval    time.Duration
-	started           bool
-	closing           bool
-	closeDone         chan struct{}
-	closed            bool
+	operationMu        sync.Mutex
+	observeOperation   func(supervisorOperation, supervisorOperationPhase)
+	mu                 sync.Mutex
+	running            map[int]*nodeRuntime
+	topologyGeneration uint64
+	topologyFailure    error
+	cancel             context.CancelFunc
+	done               chan struct{}
+	statusCancel       context.CancelFunc
+	statusDone         chan struct{}
+	discoveryInterval  time.Duration
+	statusInterval     time.Duration
+	started            bool
+	closing            bool
+	closeDone          chan struct{}
+	closed             bool
 }
 
 type supervisorOperation uint8
@@ -98,6 +100,12 @@ type nodeRuntime struct {
 type discoverySnapshot struct {
 	bindings   []NodeBinding
 	baseConfig api.BaseConfig
+}
+
+type machineTopologySnapshot struct {
+	generation uint64
+	running    map[int]*nodeRuntime
+	failure    error
 }
 
 func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory NodeServiceFactory) (*Supervisor, error) {
@@ -193,14 +201,23 @@ func (s *Supervisor) Close() error {
 	s.notifyOperation(supervisorOperationClose, supervisorOperationEntered)
 
 	s.mu.Lock()
+	runtimes := make([]*nodeRuntime, 0, len(s.running))
+	for _, runtime := range s.running {
+		runtimes = append(runtimes, runtime)
+	}
+	s.mu.Unlock()
 
 	var errs []error
-	for nodeID, runtime := range s.running {
+	for _, runtime := range runtimes {
 		if err := s.closeRuntime(runtime); err != nil {
 			errs = append(errs, err)
 		}
-		delete(s.running, nodeID)
 	}
+
+	s.mu.Lock()
+	s.running = make(map[int]*nodeRuntime)
+	s.topologyGeneration++
+	s.topologyFailure = errors.Join(errs...)
 	s.started = false
 	s.closed = true
 	closeDone := s.closeDone
@@ -232,6 +249,7 @@ func (s *Supervisor) startInitial() error {
 		s.mu.Unlock()
 		return nil
 	}
+	generation := s.topologyGeneration
 	s.mu.Unlock()
 
 	snapshot, err := s.discoverSnapshot()
@@ -254,19 +272,37 @@ func (s *Supervisor) startInitial() error {
 		started = append(started, runtime)
 	}
 
-	if len(bindings) > 0 && len(runtimes) == 0 {
-		return errors.Join(errs...)
-	}
+	failure := errors.Join(errs...)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.closing {
-		s.closeRuntimesBestEffort(started)
-		return fmt.Errorf("machine supervisor is closed")
+	var commitErr error
+	switch {
+	case s.closed || s.closing:
+		commitErr = fmt.Errorf("machine supervisor is closed")
+	case s.topologyGeneration != generation:
+		commitErr = fmt.Errorf(
+			"machine topology generation changed during initial start: got %d, want %d",
+			s.topologyGeneration,
+			generation,
+		)
+	case len(bindings) > 0 && len(runtimes) == 0:
+		s.topologyFailure = failure
+		s.topologyGeneration++
+	default:
+		s.running = runtimes
+		s.topologyFailure = failure
+		s.topologyGeneration++
+		s.started = true
+		s.applyBaseConfigLocked(snapshot.baseConfig)
 	}
-	s.running = runtimes
-	s.started = true
-	s.applyBaseConfigLocked(snapshot.baseConfig)
+	s.mu.Unlock()
+
+	if commitErr != nil {
+		return errors.Join(commitErr, s.closeRuntimes(started))
+	}
+	if len(bindings) > 0 && len(runtimes) == 0 {
+		return failure
+	}
 	return nil
 }
 
@@ -288,12 +324,13 @@ func (s *Supervisor) reconcilePeriodic() error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.closing {
+		s.mu.Unlock()
 		return nil
 	}
 
 	s.applyBaseConfigLocked(snapshot.baseConfig)
+	s.mu.Unlock()
 	return s.reconcile(snapshot.bindings)
 }
 
@@ -411,6 +448,19 @@ type machineBindingDecision struct {
 	runtime *nodeRuntime
 }
 
+type machineReconcileTransaction struct {
+	generation uint64
+	running    map[int]*nodeRuntime
+	plan       machineReconcilePlan
+}
+
+type machineReconcileResult struct {
+	generation uint64
+	running    map[int]*nodeRuntime
+	started    []*nodeRuntime
+	failure    error
+}
+
 func materializeMachineReconcilePlan(running map[int]*nodeRuntime, bindings []NodeBinding) machineReconcilePlan {
 	newByID := make(map[int]NodeBinding, len(bindings))
 	for _, binding := range bindings {
@@ -453,10 +503,36 @@ func materializeMachineReconcilePlan(running map[int]*nodeRuntime, bindings []No
 }
 
 func (s *Supervisor) reconcile(bindings []NodeBinding) error {
-	plan := materializeMachineReconcilePlan(s.running, bindings)
+	transaction, ok := s.planReconcile(bindings)
+	if !ok {
+		return nil
+	}
+	result := s.executeReconcile(transaction)
+	if err := s.commitReconcile(result); err != nil {
+		return errors.Join(result.failure, err, s.closeRuntimes(result.started))
+	}
+	return result.failure
+}
 
+func (s *Supervisor) planReconcile(bindings []NodeBinding) (machineReconcileTransaction, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.closing {
+		return machineReconcileTransaction{}, false
+	}
+
+	running := cloneMachineTopology(s.running)
+	return machineReconcileTransaction{
+		generation: s.topologyGeneration,
+		running:    running,
+		plan:       materializeMachineReconcilePlan(running, bindings),
+	}, true
+}
+
+func (s *Supervisor) executeReconcile(transaction machineReconcileTransaction) machineReconcileResult {
+	started := make([]*nodeRuntime, 0, len(transaction.plan.bindings))
 	var errs []error
-	for _, decision := range plan.missing {
+	for _, decision := range transaction.plan.missing {
 		decision.runtime.missingCount = decision.nextMissingCount
 		if !decision.remove {
 			continue
@@ -466,10 +542,10 @@ func (s *Supervisor) reconcile(bindings []NodeBinding) error {
 			s.logWarning(err)
 			errs = append(errs, err)
 		}
-		delete(s.running, decision.nodeID)
+		delete(transaction.running, decision.nodeID)
 	}
 
-	for _, decision := range plan.bindings {
+	for _, decision := range transaction.plan.bindings {
 		switch decision.action {
 		case machineReconcileStart:
 			nextRuntime, err := s.startRuntime(decision.binding)
@@ -478,16 +554,20 @@ func (s *Supervisor) reconcile(bindings []NodeBinding) error {
 				errs = append(errs, err)
 				continue
 			}
-			s.running[decision.binding.NodeID] = nextRuntime
+			transaction.running[decision.binding.NodeID] = nextRuntime
+			started = append(started, nextRuntime)
 		case machineReconcileKeep:
 			decision.runtime.binding = decision.binding
 			decision.runtime.missingCount = 0
 		case machineReconcileRestart:
 			nextRuntime, err := s.restartRuntime(decision.runtime, decision.binding)
 			if nextRuntime != nil {
-				s.running[decision.binding.NodeID] = nextRuntime
+				transaction.running[decision.binding.NodeID] = nextRuntime
+				if nextRuntime != decision.runtime {
+					started = append(started, nextRuntime)
+				}
 			} else {
-				delete(s.running, decision.binding.NodeID)
+				delete(transaction.running, decision.binding.NodeID)
 			}
 			if err != nil {
 				s.logWarning(err)
@@ -496,7 +576,56 @@ func (s *Supervisor) reconcile(bindings []NodeBinding) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return machineReconcileResult{
+		generation: transaction.generation,
+		running:    transaction.running,
+		started:    started,
+		failure:    errors.Join(errs...),
+	}
+}
+
+func (s *Supervisor) commitReconcile(result machineReconcileResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Close waits for operationMu, so an in-flight reconcile may hand it the final topology while closing.
+	if s.closed {
+		return fmt.Errorf("machine supervisor is closed")
+	}
+	if s.topologyGeneration != result.generation {
+		return fmt.Errorf(
+			"machine topology generation changed during reconcile: got %d, want %d",
+			s.topologyGeneration,
+			result.generation,
+		)
+	}
+
+	s.running = result.running
+	s.topologyFailure = result.failure
+	s.topologyGeneration++
+	return nil
+}
+
+func (s *Supervisor) topologySnapshot() machineTopologySnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return machineTopologySnapshot{
+		generation: s.topologyGeneration,
+		running:    cloneMachineTopology(s.running),
+		failure:    s.topologyFailure,
+	}
+}
+
+func cloneMachineTopology(running map[int]*nodeRuntime) map[int]*nodeRuntime {
+	cloned := make(map[int]*nodeRuntime, len(running))
+	for nodeID, runtime := range running {
+		if runtime == nil {
+			cloned[nodeID] = nil
+			continue
+		}
+		runtimeValue := *runtime
+		cloned[nodeID] = &runtimeValue
+	}
+	return cloned
 }
 
 func (s *Supervisor) startRuntime(binding NodeBinding) (*nodeRuntime, error) {
@@ -508,7 +637,9 @@ func (s *Supervisor) startRuntime(binding NodeBinding) (*nodeRuntime, error) {
 		return nil, fmt.Errorf("build service for machine node %d: nil service", binding.NodeID)
 	}
 	if err := nodeService.Start(); err != nil {
-		return nil, fmt.Errorf("start service for machine node %d: %w", binding.NodeID, err)
+		startErr := fmt.Errorf("start service for machine node %d: %w", binding.NodeID, err)
+		cleanupErr := s.closeRuntime(&nodeRuntime{binding: binding, service: nodeService})
+		return nil, errors.Join(startErr, cleanupErr)
 	}
 
 	return &nodeRuntime{
@@ -527,8 +658,11 @@ func (s *Supervisor) restartRuntime(oldRuntime *nodeRuntime, nextBinding NodeBin
 	}
 
 	if err := s.closeRuntime(oldRuntime); err != nil {
-		_ = nextService.Close()
-		return oldRuntime, fmt.Errorf("close old service for machine node %d before restart: %w", oldRuntime.binding.NodeID, err)
+		cleanupErr := s.closeRuntime(&nodeRuntime{binding: nextBinding, service: nextService})
+		return oldRuntime, errors.Join(
+			fmt.Errorf("close old service for machine node %d before restart: %w", oldRuntime.binding.NodeID, err),
+			cleanupErr,
+		)
 	}
 
 	if err := nextService.Start(); err == nil {
@@ -537,13 +671,15 @@ func (s *Supervisor) restartRuntime(oldRuntime *nodeRuntime, nextBinding NodeBin
 			service: nextService,
 		}, nil
 	} else {
-		_ = nextService.Close()
+		startErr := fmt.Errorf("start replacement service for machine node %d: %w", nextBinding.NodeID, err)
+		cleanupErr := s.closeRuntime(&nodeRuntime{binding: nextBinding, service: nextService})
 		rollbackRuntime, rollbackErr := s.rollbackRuntime(oldRuntime)
 		if rollbackErr == nil {
-			return rollbackRuntime, fmt.Errorf("start replacement service for machine node %d: %w", nextBinding.NodeID, err)
+			return rollbackRuntime, errors.Join(startErr, cleanupErr)
 		}
 		return nil, errors.Join(
-			fmt.Errorf("start replacement service for machine node %d: %w", nextBinding.NodeID, err),
+			startErr,
+			cleanupErr,
 			fmt.Errorf("rollback old service for machine node %d: %w", oldRuntime.binding.NodeID, rollbackErr),
 		)
 	}
@@ -558,7 +694,8 @@ func (s *Supervisor) rollbackRuntime(oldRuntime *nodeRuntime) (*nodeRuntime, err
 		return nil, fmt.Errorf("nil rollback service")
 	}
 	if err := rollbackService.Start(); err != nil {
-		return nil, err
+		cleanupErr := s.closeRuntime(&nodeRuntime{binding: oldRuntime.binding, service: rollbackService})
+		return nil, errors.Join(err, cleanupErr)
 	}
 	return &nodeRuntime{
 		binding: oldRuntime.binding,
@@ -576,10 +713,14 @@ func (s *Supervisor) closeRuntime(runtime *nodeRuntime) error {
 	return nil
 }
 
-func (s *Supervisor) closeRuntimesBestEffort(runtimes []*nodeRuntime) {
+func (s *Supervisor) closeRuntimes(runtimes []*nodeRuntime) error {
+	var errs []error
 	for i := len(runtimes) - 1; i >= 0; i-- {
-		_ = s.closeRuntime(runtimes[i])
+		if err := s.closeRuntime(runtimes[i]); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }
 
 func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.Duration) {

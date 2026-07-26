@@ -182,8 +182,8 @@ func TestSupervisorStartSkipsFailedNodeAndKeepsHealthyServices(t *testing.T) {
 	if first.starts != 1 || first.closes != 0 {
 		t.Fatalf("expected first service start=1 close=0, got start=%d close=%d", first.starts, first.closes)
 	}
-	if second.starts != 1 || second.closes != 0 {
-		t.Fatalf("expected failed service start=1 close=0, got start=%d close=%d", second.starts, second.closes)
+	if second.starts != 1 || second.closes != 1 {
+		t.Fatalf("expected failed service start=1 close=1, got start=%d close=%d", second.starts, second.closes)
 	}
 	if third.starts != 1 || third.closes != 0 {
 		t.Fatalf("expected third service start=1 close=0, got start=%d close=%d", third.starts, third.closes)
@@ -210,8 +210,8 @@ func TestSupervisorStartFailsWhenAllDiscoveredNodesFail(t *testing.T) {
 	if !errors.Is(err, startErr) {
 		t.Fatalf("expected start error, got %v", err)
 	}
-	if service.starts != 1 || service.closes != 0 {
-		t.Fatalf("expected failed service start=1 close=0, got start=%d close=%d", service.starts, service.closes)
+	if service.starts != 1 || service.closes != 1 {
+		t.Fatalf("expected failed service start=1 close=1, got start=%d close=%d", service.starts, service.closes)
 	}
 	if len(supervisor.running) != 0 {
 		t.Fatalf("expected no running services after all nodes fail, got %d", len(supervisor.running))
@@ -573,8 +573,8 @@ func TestSupervisorPeriodicAddedNodeStartFailureKeepsExistingServices(t *testing
 	if first.starts != 1 || first.closes != 0 {
 		t.Fatalf("expected existing service unchanged, start=%d close=%d", first.starts, first.closes)
 	}
-	if second.starts != 1 || second.closes != 0 {
-		t.Fatalf("expected failing service start once and not close, start=%d close=%d", second.starts, second.closes)
+	if second.starts != 1 || second.closes != 1 {
+		t.Fatalf("expected failing service start and cleanup once, start=%d close=%d", second.starts, second.closes)
 	}
 	if _, exists := supervisor.running[2]; exists {
 		t.Fatal("expected failed added node to stay absent from running map")
@@ -832,8 +832,8 @@ func TestSupervisorStartRuntimeContracts(t *testing.T) {
 		if !errors.Is(err, startErr) {
 			t.Fatalf("expected start error, got %v", err)
 		}
-		if serviceInstance.starts != 1 || serviceInstance.closes != 0 {
-			t.Fatalf("expected service start=1 close=0, got start=%d close=%d", serviceInstance.starts, serviceInstance.closes)
+		if serviceInstance.starts != 1 || serviceInstance.closes != 1 {
+			t.Fatalf("expected service start=1 close=1, got start=%d close=%d", serviceInstance.starts, serviceInstance.closes)
 		}
 	})
 }
@@ -906,8 +906,9 @@ func TestSupervisorRestartRuntimeContracts(t *testing.T) {
 
 	t.Run("old close error closes replacement and keeps old runtime", func(t *testing.T) {
 		closeErr := errors.New("close failed")
+		cleanupErr := errors.New("candidate cleanup failed")
 		oldService := &fakeService{closeErr: closeErr}
-		nextService := &fakeService{}
+		nextService := &fakeService{closeErr: cleanupErr}
 		oldRuntime := &nodeRuntime{binding: oldBinding, service: oldService}
 		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
 			return nextService, nil
@@ -917,8 +918,8 @@ func TestSupervisorRestartRuntimeContracts(t *testing.T) {
 		if nextRuntime != oldRuntime {
 			t.Fatalf("expected old runtime to be preserved, got %#v", nextRuntime)
 		}
-		if !errors.Is(err, closeErr) {
-			t.Fatalf("expected close error, got %v", err)
+		if !errors.Is(err, closeErr) || !errors.Is(err, cleanupErr) {
+			t.Fatalf("expected close and candidate cleanup errors, got %v", err)
 		}
 		if oldService.closes != 1 || nextService.starts != 0 || nextService.closes != 1 {
 			t.Fatalf("unexpected service lifecycle: old close=%d next start=%d close=%d", oldService.closes, nextService.starts, nextService.closes)
@@ -1033,7 +1034,8 @@ func TestSupervisorRollbackRuntimeContracts(t *testing.T) {
 
 	t.Run("start error is returned", func(t *testing.T) {
 		startErr := errors.New("rollback start failed")
-		rollbackService := &fakeService{startErr: startErr}
+		cleanupErr := errors.New("rollback cleanup failed")
+		rollbackService := &fakeService{startErr: startErr, closeErr: cleanupErr}
 		supervisor := &Supervisor{factory: func(NodeBinding) (service.Service, error) {
 			return rollbackService, nil
 		}}
@@ -1042,11 +1044,11 @@ func TestSupervisorRollbackRuntimeContracts(t *testing.T) {
 		if runtime != nil {
 			t.Fatalf("expected no rollback runtime, got %#v", runtime)
 		}
-		if !errors.Is(err, startErr) {
-			t.Fatalf("expected start error, got %v", err)
+		if !errors.Is(err, startErr) || !errors.Is(err, cleanupErr) {
+			t.Fatalf("expected start and cleanup errors, got %v", err)
 		}
-		if rollbackService.starts != 1 || rollbackService.closes != 0 {
-			t.Fatalf("expected rollback service start=1 close=0, got start=%d close=%d", rollbackService.starts, rollbackService.closes)
+		if rollbackService.starts != 1 || rollbackService.closes != 1 {
+			t.Fatalf("expected rollback service start=1 close=1, got start=%d close=%d", rollbackService.starts, rollbackService.closes)
 		}
 	})
 }

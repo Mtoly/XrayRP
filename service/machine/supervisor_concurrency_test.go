@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,6 +198,98 @@ func TestSupervisorReconcileAndCloseOwnStartedRuntimeExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestSupervisorReconcileCandidateStartPublishesAtomicallyWithoutStateLock(t *testing.T) {
+	startEntered := make(chan struct{}, 1)
+	startRelease := make(chan struct{})
+	candidate := &gatedMachineService{
+		startEntered: startEntered,
+		startRelease: startRelease,
+	}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{},
+		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "candidate"}),
+		}},
+		func(NodeBinding) (service.Service, error) {
+			return candidate, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.ReconcileNow()
+	}()
+	<-startEntered
+
+	stateLockAvailable := supervisor.mu.TryLock()
+	candidatePublishedEarly := false
+	if stateLockAvailable {
+		_, candidatePublishedEarly = supervisor.running[1]
+		supervisor.mu.Unlock()
+	}
+	close(startRelease)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("ReconcileNow() error = %v", err)
+	}
+
+	if !stateLockAvailable {
+		t.Fatal("candidate Start executed while holding Supervisor.mu")
+	}
+	if candidatePublishedEarly {
+		t.Fatal("candidate runtime was published before Start completed")
+	}
+	if supervisor.running[1] == nil {
+		t.Fatal("started candidate runtime was not published at commit")
+	}
+}
+
+func TestSupervisorReconcileRejectsStaleGenerationAndCleansCandidate(t *testing.T) {
+	startEntered := make(chan struct{}, 1)
+	startRelease := make(chan struct{})
+	candidate := &gatedMachineService{
+		startEntered: startEntered,
+		startRelease: startRelease,
+	}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{},
+		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "candidate"}),
+		}},
+		func(NodeBinding) (service.Service, error) {
+			return candidate, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.ReconcileNow()
+	}()
+	<-startEntered
+
+	supervisor.mu.Lock()
+	supervisor.topologyGeneration++
+	supervisor.mu.Unlock()
+	close(startRelease)
+
+	reconcileErr := <-reconcileDone
+	if reconcileErr == nil || !strings.Contains(reconcileErr.Error(), "topology generation changed") {
+		t.Fatalf("ReconcileNow() error = %v, want stale generation error", reconcileErr)
+	}
+	if starts, closes := candidate.counts(); starts != 1 || closes != 1 {
+		t.Fatalf("candidate lifecycle = start %d close %d, want 1/1", starts, closes)
+	}
+	state := supervisor.topologySnapshot()
+	if state.generation != 1 || len(state.running) != 0 {
+		t.Fatalf("stale transaction changed topology: generation=%d running=%#v", state.generation, state.running)
+	}
+}
+
 func TestSupervisorStartDuringCloseCannotPublishReplacementLoop(t *testing.T) {
 	oldCancelCalled := make(chan struct{})
 	oldDone := make(chan struct{})
@@ -271,7 +364,18 @@ func TestSupervisorBlockedRuntimeCloseKeepsPublishedTopologyUntilOwnershipResolv
 	}()
 	<-closeEntered
 
-	if supervisor.running[1] != runtime {
+	stateLockAvailable := supervisor.mu.TryLock()
+	runtimePublished := false
+	if stateLockAvailable {
+		runtimePublished = supervisor.running[1] == runtime
+		supervisor.mu.Unlock()
+	}
+	if !stateLockAvailable {
+		close(closeRelease)
+		<-reconcileDone
+		t.Fatal("runtime Close executed while holding Supervisor.mu")
+	}
+	if !runtimePublished {
 		t.Fatal("runtime was unpublished before its blocking Close resolved")
 	}
 	close(closeRelease)
@@ -283,6 +387,96 @@ func TestSupervisorBlockedRuntimeCloseKeepsPublishedTopologyUntilOwnershipResolv
 	}
 	if _, closes := runtimeService.counts(); closes != 1 {
 		t.Fatalf("runtime Close calls = %d, want 1", closes)
+	}
+}
+
+func TestSupervisorReconcileRestorationFailurePublishesJoinedFailure(t *testing.T) {
+	replacementStartErr := errors.New("replacement start failed")
+	replacementCleanupErr := errors.New("replacement cleanup failed")
+	restoreStartErr := errors.New("restore start failed")
+	restoreCleanupErr := errors.New("restore cleanup failed")
+	oldService := &fakeService{}
+	replacementService := &fakeService{startErr: replacementStartErr, closeErr: replacementCleanupErr}
+	restoreService := &fakeService{startErr: restoreStartErr, closeErr: restoreCleanupErr}
+	services := []service.Service{replacementService, restoreService}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{},
+		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "trojan", Name: "replacement"}),
+		}},
+		func(NodeBinding) (service.Service, error) {
+			next := services[0]
+			services = services[1:]
+			return next, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	supervisor.running[1] = &nodeRuntime{
+		binding: NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"},
+		service: oldService,
+	}
+
+	reconcileErr := supervisor.ReconcileNow()
+
+	for _, wantErr := range []error{
+		replacementStartErr,
+		replacementCleanupErr,
+		restoreStartErr,
+		restoreCleanupErr,
+	} {
+		if !errors.Is(reconcileErr, wantErr) {
+			t.Fatalf("ReconcileNow() error = %v, want joined %v", reconcileErr, wantErr)
+		}
+	}
+	state := supervisor.topologySnapshot()
+	if state.running[1] != nil {
+		t.Fatal("restoration failure published a running runtime")
+	}
+	for _, wantErr := range []error{
+		replacementStartErr,
+		replacementCleanupErr,
+		restoreStartErr,
+		restoreCleanupErr,
+	} {
+		if !errors.Is(state.failure, wantErr) {
+			t.Fatalf("published failure = %v, want joined %v", state.failure, wantErr)
+		}
+	}
+}
+
+func TestSupervisorReconcileStartFailureCleansCandidateAndPublishesJoinedFailure(t *testing.T) {
+	startErr := errors.New("candidate start failed")
+	cleanupErr := errors.New("candidate cleanup failed")
+	candidate := &fakeService{startErr: startErr, closeErr: cleanupErr}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{},
+		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "candidate"}),
+		}},
+		func(NodeBinding) (service.Service, error) {
+			return candidate, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+
+	reconcileErr := supervisor.ReconcileNow()
+
+	if !errors.Is(reconcileErr, startErr) || !errors.Is(reconcileErr, cleanupErr) {
+		t.Fatalf("ReconcileNow() error = %v, want start and cleanup errors", reconcileErr)
+	}
+	if candidate.starts != 1 || candidate.closes != 1 {
+		t.Fatalf("candidate lifecycle = start %d close %d, want 1/1", candidate.starts, candidate.closes)
+	}
+	state := supervisor.topologySnapshot()
+	if state.running[1] != nil {
+		t.Fatal("failed candidate was published")
+	}
+	if !errors.Is(state.failure, startErr) || !errors.Is(state.failure, cleanupErr) {
+		t.Fatalf("published failure = %v, want start and cleanup errors", state.failure)
 	}
 }
 
