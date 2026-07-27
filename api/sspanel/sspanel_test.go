@@ -372,14 +372,58 @@ func TestContractETagNotModified(t *testing.T) {
 			if err := tc.run(client); err != nil {
 				t.Fatalf("initial fetch: %v", err)
 			}
-			if client.eTags[tc.etagKey] != `"fixture-v1"` {
-				t.Fatalf("cached ETag = %q", client.eTags[tc.etagKey])
+			if client.eTags.Get(tc.etagKey) != `"fixture-v1"` {
+				t.Fatalf("cached ETag = %q", client.eTags.Get(tc.etagKey))
 			}
 			if err := tc.run(client); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("304 error = %v, want %v", err, tc.wantErr)
 			}
 			if calls != 2 {
 				t.Fatalf("calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
+func TestFetchKeepsETagAfterInvalidPayload(t *testing.T) {
+	tests := []struct {
+		name, path, etagKey string
+		wantNodeID          bool
+		data                any
+		run                 func(*APIClient) error
+	}{
+		{"node", "/mod_mu/nodes/23/info", "node", false, map[string]any{"server": "n;invalid;0;tcp;;", "version": "2024.1"}, func(c *APIClient) error { _, err := c.GetNodeInfo(); return err }},
+		{"users", "/mod_mu/users", "users", true, "invalid", func(c *APIClient) error { _, err := c.GetUserList(); return err }},
+		{"rules", "/mod_mu/func/detect_rules", "rules", false, "invalid", func(c *APIClient) error { _, err := c.GetNodeRule(); return err }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tc.path)
+				}
+				assertAuthentication(t, r, tc.wantNodeID)
+				if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+					t.Errorf("If-None-Match = %q, want old-etag", got)
+				}
+				w.Header().Set("ETag", "invalid-etag")
+				writeResponse(t, w, tc.data)
+			}))
+			defer server.Close()
+
+			client := newContractClient(server)
+			client.eTags.Publish(tc.etagKey, "old-etag")
+			client.version = "last-known-good"
+
+			if err := tc.run(client); err == nil {
+				t.Fatal("invalid payload returned nil error")
+			}
+			if tc.etagKey == "node" && client.version != "last-known-good" {
+				t.Fatalf("version after invalid payload = %q, want last-known-good", client.version)
+			}
+			if got := client.eTags.Get(tc.etagKey); got != "old-etag" {
+				t.Fatalf("etag after invalid payload = %q, want old-etag", got)
 			}
 		})
 	}

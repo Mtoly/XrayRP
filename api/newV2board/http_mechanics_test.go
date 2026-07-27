@@ -3,6 +3,7 @@ package newV2board
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -64,6 +65,50 @@ func TestPostXboardReportTransportFailureRedactsToken(t *testing.T) {
 
 	err := client.postXboardReport(map[string]any{"type": "status"})
 	assertSafeTransportError(t, err, sentinel, secret)
+}
+
+func TestGetUserListRejectsInvalidUsersWithoutPublishingETag(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid field type", body: `{"users":[{"id":1,"uuid":"valid"},{"id":"invalid","uuid":"partial"}]}`},
+		{name: "null user", body: `{"users":[null]}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+					t.Errorf("If-None-Match = %q, want old-etag", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Etag", "invalid-etag")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client := New(&api.Config{
+				APIHost:  server.URL,
+				Key:      "secret",
+				NodeID:   17,
+				NodeType: "V2ray",
+			})
+			client.eTags.Publish("users", "old-etag")
+
+			users, err := client.GetUserList()
+
+			if err == nil {
+				t.Fatalf("users = %#v, want invalid payload error", users)
+			}
+			if users != nil {
+				t.Fatalf("invalid payload returned partial users: %#v", users)
+			}
+			if got := client.eTags.Get("users"); got != "old-etag" {
+				t.Fatalf("etag after invalid payload = %q, want old-etag", got)
+			}
+		})
+	}
 }
 
 func newHTTPMechanicsClient(secret string) *APIClient {

@@ -517,7 +517,7 @@ func TestFetchUniProxySnapshotWithoutETagDoesNotSendOrStoreETag(t *testing.T) {
 	if gotIfNoneMatch != "" {
 		t.Fatalf("expected fetch without ETag to omit If-None-Match, got %q", gotIfNoneMatch)
 	}
-	if got := client.eTags["node"]; got != "" {
+	if got := client.eTags.Get("node"); got != "" {
 		t.Fatalf("expected fetch without ETag to leave node etag empty, got %q", got)
 	}
 	cached, ok := client.cachedUniProxySnapshot()
@@ -543,7 +543,7 @@ func TestFetchUniProxySnapshotWithETagSendsAndUpdatesETag(t *testing.T) {
 	defer server.Close()
 
 	client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
-	client.eTags["node"] = "old-etag"
+	client.eTags.Publish("node", "old-etag")
 
 	snapshot, err := client.fetchUniProxySnapshot(true)
 	if err != nil {
@@ -555,7 +555,7 @@ func TestFetchUniProxySnapshotWithETagSendsAndUpdatesETag(t *testing.T) {
 	if gotIfNoneMatch != "old-etag" {
 		t.Fatalf("expected If-None-Match old-etag, got %q", gotIfNoneMatch)
 	}
-	if got := client.eTags["node"]; got != "new-etag" {
+	if got := client.eTags.Get("node"); got != "new-etag" {
 		t.Fatalf("expected updated node etag new-etag, got %q", got)
 	}
 	cached, ok := client.cachedUniProxySnapshot()
@@ -570,6 +570,46 @@ func TestFetchUniProxySnapshotWithETagSendsAndUpdatesETag(t *testing.T) {
 	}
 }
 
+func TestFetchUniProxySnapshotKeepsETagAfterMalformedResponse(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+			t.Errorf("request %d If-None-Match = %q, want old-etag", requests, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.Header().Set("Etag", "malformed-etag")
+			_, _ = w.Write([]byte(`{`))
+			return
+		}
+		w.Header().Set("Etag", "valid-etag")
+		_, _ = w.Write([]byte(`{"server_port":8443,"network":"tcp"}`))
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
+	client.eTags.Publish("node", "old-etag")
+
+	if _, err := client.fetchUniProxySnapshot(true); err == nil {
+		t.Fatal("malformed response returned nil error")
+	}
+	if got := client.eTags.Get("node"); got != "old-etag" {
+		t.Fatalf("etag after malformed response = %q, want old-etag", got)
+	}
+
+	snapshot, err := client.fetchUniProxySnapshot(true)
+	if err != nil {
+		t.Fatalf("valid retry failed: %v", err)
+	}
+	if snapshot.ServerPort != 8443 {
+		t.Fatalf("valid retry snapshot port = %d, want 8443", snapshot.ServerPort)
+	}
+	if got := client.eTags.Get("node"); got != "valid-etag" {
+		t.Fatalf("etag after valid retry = %q, want valid-etag", got)
+	}
+}
+
 func TestFetchUniProxySnapshotWithETagReturnsNodeNotModified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("If-None-Match"); got != "old-etag" {
@@ -580,7 +620,7 @@ func TestFetchUniProxySnapshotWithETagReturnsNodeNotModified(t *testing.T) {
 	defer server.Close()
 
 	client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
-	client.eTags["node"] = "old-etag"
+	client.eTags.Publish("node", "old-etag")
 
 	_, err := client.fetchUniProxySnapshot(true)
 	if err == nil || !errors.Is(err, api.ErrNodeNotModified) {

@@ -1,6 +1,7 @@
 package panelhttp
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -42,8 +43,17 @@ func NewClient(config ClientConfig) (*resty.Client, Policy) {
 	client := resty.New().
 		SetRetryCount(retryCount).
 		SetTimeout(timeout).
+		SetResponseBodyLimit(MaxResponseBodyBytes).
 		SetDebugBodyLimit(0).
 		SetLogger(logger)
+	client.SetHeader("Accept-Encoding", "gzip")
+	client.SetTransport(responseLimitTransport{
+		base:  client.GetClient().Transport,
+		limit: MaxResponseBodyBytes,
+	})
+	client.AddRetryCondition(func(response *resty.Response, err error) bool {
+		return err != nil && response != nil && response.RawResponse == nil
+	})
 	client.OnRequestLog(func(entry *resty.RequestLog) error {
 		redactHeaders(entry.Header, policy.redactor)
 		return nil
@@ -61,6 +71,20 @@ func NewClient(config ClientConfig) (*resty.Client, Policy) {
 
 func (p Policy) CheckResponse(res *resty.Response, path string, err error) error {
 	requestURL := p.redactor.redact(p.baseURL + path)
+	if err != nil && (errors.Is(err, resty.ErrResponseBodyTooLarge) || errors.Is(err, ErrResponseBodyTooLarge)) {
+		cause := err
+		if !errors.Is(err, ErrResponseBodyTooLarge) {
+			cause = errors.Join(ErrResponseBodyTooLarge, cause)
+		}
+		message := fmt.Sprintf("request %s failed: %s", requestURL, ErrResponseBodyTooLarge)
+		if res != nil && res.RawResponse != nil && res.StatusCode() >= 400 {
+			message = fmt.Sprintf("request %s failed: status %d", requestURL, res.StatusCode())
+		}
+		return &requestError{
+			message: message,
+			cause:   cause,
+		}
+	}
 	if err != nil {
 		return &requestError{
 			message: fmt.Sprintf("request %s failed: %s", requestURL, p.redactor.redact(err.Error())),

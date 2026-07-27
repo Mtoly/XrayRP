@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -54,5 +55,62 @@ func TestParseResponseRejectsWrongTypedResultWithoutPanic(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "invalid typed result") {
 		t.Fatalf("error = %v, want safe typed-result failure", err)
+	}
+}
+
+func TestFetchKeepsETagAfterInvalidPayload(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		etagKey string
+		body    string
+		run     func(*APIClient) error
+	}{
+		{
+			name:    "node",
+			path:    "/v2/server/17/get",
+			etagKey: "node",
+			body:    `{"statusCode":200,"datas":{"serverPort":8443,"network":"ws","wsSettings":"invalid"}}`,
+			run:     func(client *APIClient) error { _, err := client.GetNodeInfo(); return err },
+		},
+		{
+			name:    "users",
+			path:    "/v2/user/get",
+			etagKey: "users",
+			body:    `{"statusCode":200,"datas":"invalid"}`,
+			run:     func(client *APIClient) error { _, err := client.GetUserList(); return err },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != test.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, test.path)
+				}
+				if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+					t.Errorf("If-None-Match = %q, want old-etag", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("ETag", "invalid-etag")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			client := New(&api.Config{
+				APIHost:  server.URL,
+				Key:      "secret",
+				NodeID:   17,
+				NodeType: "V2ray",
+			})
+			client.eTags.Publish(test.etagKey, "old-etag")
+
+			if err := test.run(client); err == nil {
+				t.Fatal("invalid payload returned nil error")
+			}
+			if got := client.eTags.Get(test.etagKey); got != "old-etag" {
+				t.Fatalf("etag after invalid payload = %q, want old-etag", got)
+			}
+		})
 	}
 }

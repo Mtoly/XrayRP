@@ -36,7 +36,7 @@ type APIClient struct {
 	LocalRuleList []api.DetectRule
 	ConfigResp    *simplejson.Json
 	access        sync.Mutex
-	eTags         map[string]string
+	eTags         panelhttp.ETagState
 }
 
 // New create an api instance
@@ -70,7 +70,6 @@ func New(apiConfig *api.Config) *APIClient {
 		SpeedLimit:    apiConfig.SpeedLimit,
 		DeviceLimit:   apiConfig.DeviceLimit,
 		LocalRuleList: localRuleList,
-		eTags:         make(map[string]string),
 	}
 	return apiClient
 }
@@ -116,8 +115,9 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
+	configETag := c.eTags.Get("config")
 	res, err := c.client.R().
-		SetHeader("If-None-Match", c.eTags["config"]).
+		SetHeader("If-None-Match", configETag).
 		SetQueryParams(map[string]string{
 			"act":       "config",
 			"node_type": nodeType,
@@ -132,15 +132,9 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	if res.StatusCode() == 304 {
 		return nil, api.ErrNodeNotModified
 	}
-	// update etag
-	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["config"] {
-		c.eTags["config"] = res.Header().Get("Etag")
-	}
+	candidateETag := res.Header().Get("Etag")
 
 	response, err := c.parseResponse(res, "", err)
-	c.access.Lock()
-	defer c.access.Unlock()
-	c.ConfigResp = response
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +154,10 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("parse node info failed: %v", err)
 	}
 
+	c.access.Lock()
+	c.ConfigResp = response
+	c.eTags.Publish("config", candidateETag)
+	c.access.Unlock()
 	return nodeInfo, nil
 }
 
@@ -172,8 +170,9 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
+	userETag := c.eTags.Get("user")
 	res, err := c.client.R().
-		SetHeader("If-None-Match", c.eTags["user"]).
+		SetHeader("If-None-Match", userETag).
 		SetQueryParams(map[string]string{
 			"act":       "user",
 			"node_type": nodeType,
@@ -188,16 +187,22 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	if res.StatusCode() == 304 {
 		return nil, api.ErrUserNotModified
 	}
-	// update etag
-	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["user"] {
-		c.eTags["user"] = res.Header().Get("Etag")
-	}
+	candidateETag := res.Header().Get("Etag")
 
 	response, err := c.parseResponse(res, "", err)
 	if err != nil {
 		return nil, err
 	}
-	numOfUsers := len(response.Get("data").MustArray())
+	users, err := response.Get("data").Array()
+	if err != nil {
+		return nil, fmt.Errorf("parse user list failed: invalid data")
+	}
+	for i, item := range users {
+		if _, ok := item.(map[string]interface{}); !ok {
+			return nil, fmt.Errorf("parse user list failed: invalid user at index %d", i)
+		}
+	}
+	numOfUsers := len(users)
 	userList := make([]api.UserInfo, numOfUsers)
 	for i := 0; i < numOfUsers; i++ {
 		user := api.UserInfo{}
@@ -230,6 +235,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 
 		userList[i] = user
 	}
+	c.eTags.Publish("user", candidateETag)
 	return &userList, nil
 }
 

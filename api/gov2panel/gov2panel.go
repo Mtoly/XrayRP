@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
 	"github.com/gogf/gf/v2/encoding/gjson"
@@ -281,6 +282,7 @@ func (c *APIClient) sendRequest(headerM map[string]string, method string, url st
 
 	client.SetHeaderMap(headerM)
 	client.SetHeader("Content-Type", "application/json")
+	client.SetHeader("Accept-Encoding", "gzip")
 
 	data["token"] = c.Key
 	data["node_id"] = c.NodeID
@@ -304,7 +306,11 @@ func (c *APIClient) sendRequest(headerM map[string]string, method string, url st
 		err = fmt.Errorf("request %s failed: status %d", url, gResponse.StatusCode)
 		return
 	}
-	body := gResponse.ReadAll()
+	body, err := panelhttp.ReadEncodedResponseBody(gResponse.Body, gResponse.Header.Get("Content-Encoding"))
+	if err != nil {
+		err = fmt.Errorf("http response read failed: %w", err)
+		return
+	}
 	if !json.Valid(body) {
 		err = fmt.Errorf("http response is not valid JSON")
 		return

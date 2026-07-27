@@ -252,10 +252,11 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 	path := c.configPath()
 	req := c.client.R().ForceContentType("application/json")
 	if useETag {
-		req.SetHeader("If-None-Match", c.eTags["node"])
+		req.SetHeader("If-None-Match", c.eTags.Get("node"))
 	}
 
 	res, err := req.Get(path)
+	var candidateETag string
 	if useETag {
 		if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
 			return nil, err
@@ -263,9 +264,7 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 		if res.StatusCode() == 304 {
 			return nil, api.ErrNodeNotModified
 		}
-		if etag := res.Header().Get("Etag"); etag != "" && etag != c.eTags["node"] {
-			c.eTags["node"] = etag
-		}
+		candidateETag = res.Header().Get("Etag")
 	}
 
 	cfgResp, err := c.parseResponse(res, path, err)
@@ -281,6 +280,9 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 
 	if err := c.storeUniProxySnapshot(snapshot); err != nil {
 		return nil, err
+	}
+	if useETag {
+		c.eTags.Publish("node", candidateETag)
 	}
 	return snapshot, nil
 }

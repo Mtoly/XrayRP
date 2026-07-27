@@ -32,7 +32,7 @@ type APIClient struct {
 	LocalRuleList    []api.DetectRule
 	LastReportOnline map[int]int
 	access           sync.Mutex
-	eTags            map[string]string
+	eTags            panelhttp.ETagState
 }
 
 // ReportIllegal accepts illegal-access reports for this adapter.
@@ -85,7 +85,6 @@ func New(apiConfig *api.Config) *APIClient {
 		SpeedLimit:    apiConfig.SpeedLimit,
 		DeviceLimit:   apiConfig.DeviceLimit,
 		LocalRuleList: localRuleList,
-		eTags:         make(map[string]string),
 	}
 	return apiClient
 }
@@ -120,7 +119,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	path := fmt.Sprintf("/v2/server/%d/get", c.NodeID)
 	res, err := c.client.R().
 		SetResult(&Response{}).
-		SetHeader("If-None-Match", c.eTags["node"]).
+		SetHeader("If-None-Match", c.eTags.Get("node")).
 		ForceContentType("application/json").
 		Get(path)
 	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
@@ -130,10 +129,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	if res.StatusCode() == 304 {
 		return nil, api.ErrNodeNotModified
 	}
-
-	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["node"] {
-		c.eTags["node"] = res.Header().Get("ETag")
-	}
+	candidateETag := res.Header().Get("ETag")
 
 	response, err := c.parseResponse(res, path, err)
 	if err != nil {
@@ -152,6 +148,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s, \nPlease check the doc of custom_config for help: https://xrayr-project.github.io/XrayR-doc/dui-jie-sspanel/sspanel/sspanel_custom_config", string(res), err)
 	}
 
+	c.eTags.Publish("node", candidateETag)
 	return nodeInfo, nil
 }
 
@@ -159,7 +156,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	path := "/v2/user/get"
 	res, err := c.client.R().
 		SetQueryParam("serverId", strconv.Itoa(c.NodeID)).
-		SetHeader("If-None-Match", c.eTags["users"]).
+		SetHeader("If-None-Match", c.eTags.Get("users")).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
@@ -170,10 +167,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	if res.StatusCode() == 304 {
 		return nil, api.ErrUserNotModified
 	}
-
-	if res.Header().Get("ETag") != "" && res.Header().Get("ETag") != c.eTags["users"] {
-		c.eTags["users"] = res.Header().Get("ETag")
-	}
+	candidateETag := res.Header().Get("ETag")
 
 	response, err := c.parseResponse(res, path, err)
 	if err != nil {
@@ -190,6 +184,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		res, _ := json.Marshal(userListResponse)
 		return nil, fmt.Errorf("parse user list failed: %s", string(res))
 	}
+	c.eTags.Publish("users", candidateETag)
 	return userList, nil
 }
 

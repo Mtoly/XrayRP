@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bitly/go-simplejson"
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -127,6 +128,78 @@ func TestGetNodeInfoTransportFailurePreservesCauseAndRedactsToken(t *testing.T) 
 		if strings.Contains(err.Error(), forbidden) {
 			t.Fatalf("error contains credential %q: %v", forbidden, err)
 		}
+	}
+}
+
+func TestGetNodeInfoKeepsAppliedConfigAndETagAfterInvalidPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+			t.Errorf("If-None-Match = %q, want old-etag", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Etag", "invalid-etag")
+		_, _ = w.Write([]byte(`{"inbounds":[]}`))
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{
+		APIHost:  server.URL,
+		Key:      "secret",
+		NodeID:   17,
+		NodeType: "V2ray",
+	})
+	appliedConfig, err := simplejson.NewJson([]byte(`{"marker":"last-known-good"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.eTags.Publish("config", "old-etag")
+	client.ConfigResp = appliedConfig
+
+	node, err := client.GetNodeInfo()
+
+	if err == nil {
+		t.Fatalf("node = %#v, want invalid payload error", node)
+	}
+	if node != nil {
+		t.Fatalf("invalid payload returned partial node: %#v", node)
+	}
+	if client.ConfigResp != appliedConfig {
+		t.Fatal("invalid payload replaced the last-known-good config response")
+	}
+	if got := client.eTags.Get("config"); got != "old-etag" {
+		t.Fatalf("etag after invalid payload = %q, want old-etag", got)
+	}
+}
+
+func TestGetUserListRejectsInvalidShapeWithoutPublishingETag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("If-None-Match"); got != "old-etag" {
+			t.Errorf("If-None-Match = %q, want old-etag", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Etag", "invalid-etag")
+		_, _ = w.Write([]byte(`{"data":"invalid"}`))
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{
+		APIHost:  server.URL,
+		Key:      "secret",
+		NodeID:   17,
+		NodeType: "V2ray",
+	})
+	client.eTags.Publish("user", "old-etag")
+
+	users, err := client.GetUserList()
+
+	if err == nil {
+		t.Fatalf("users = %#v, want invalid payload error", users)
+	}
+	if users != nil {
+		t.Fatalf("invalid payload returned partial users: %#v", users)
+	}
+	if got := client.eTags.Get("user"); got != "old-etag" {
+		t.Fatalf("etag after invalid payload = %q, want old-etag", got)
 	}
 }
 

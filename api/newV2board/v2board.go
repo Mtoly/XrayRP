@@ -35,7 +35,7 @@ type APIClient struct {
 	DeviceLimit             int
 	LocalRuleList           []api.DetectRule
 	resp                    atomic.Value
-	eTags                   map[string]string
+	eTags                   panelhttp.ETagState
 	xboardReportUnsupported atomic.Bool
 }
 
@@ -77,7 +77,6 @@ func New(apiConfig *api.Config) *APIClient {
 		SpeedLimit:    apiConfig.SpeedLimit,
 		DeviceLimit:   apiConfig.DeviceLimit,
 		LocalRuleList: localRuleList,
-		eTags:         make(map[string]string),
 	}
 	return apiClient
 }
@@ -185,7 +184,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	}
 
 	res, err := c.client.R().
-		SetHeader("If-None-Match", c.eTags["users"]).
+		SetHeader("If-None-Match", c.eTags.Get("users")).
 		ForceContentType("application/json").
 		Get(path)
 	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
@@ -196,23 +195,28 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	if res.StatusCode() == 304 {
 		return nil, api.ErrUserNotModified
 	}
-	// update etag
-	if res.Header().Get("Etag") != "" && res.Header().Get("Etag") != c.eTags["users"] {
-		c.eTags["users"] = res.Header().Get("Etag")
-	}
+	candidateETag := res.Header().Get("Etag")
 
 	usersResp, err := c.parseResponse(res, path, err)
 	if err != nil {
 		return nil, err
 	}
-	b, _ := usersResp.Get("users").Encode()
-	json.Unmarshal(b, &users)
+	b, err := usersResp.Get("users").Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode user list failed: %w", err)
+	}
+	if err := json.Unmarshal(b, &users); err != nil {
+		return nil, fmt.Errorf("decode user list failed: %w", err)
+	}
 	if len(users) == 0 {
 		return nil, fmt.Errorf("users is null")
 	}
 
 	userList := make([]api.UserInfo, len(users))
 	for i := 0; i < len(users); i++ {
+		if users[i] == nil {
+			return nil, fmt.Errorf("decode user list failed: user at index %d is null", i)
+		}
 		u := api.UserInfo{
 			UID:  users[i].Id,
 			UUID: users[i].Uuid,
@@ -237,6 +241,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		userList[i] = u
 	}
 
+	c.eTags.Publish("users", candidateETag)
 	return &userList, nil
 }
 

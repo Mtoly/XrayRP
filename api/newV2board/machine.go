@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -79,12 +80,14 @@ func validateMachineConfig(config MachineDiscoveryConfig) (string, string, error
 	return apiHost, token, nil
 }
 
-func newMachineClient(apiHost string, timeout time.Duration) *resty.Client {
-	client := resty.New().SetBaseURL(apiHost)
-	if timeout > 0 {
-		client.SetTimeout(timeout)
-	}
-	return client
+func newMachineClient(apiHost string, timeout time.Duration, credentials ...string) (*resty.Client, panelhttp.Policy) {
+	client, policy := panelhttp.NewClient(panelhttp.ClientConfig{
+		BaseURL:     apiHost,
+		Credentials: credentials,
+	})
+	client.SetRetryCount(0)
+	client.SetTimeout(timeout)
+	return client, policy
 }
 
 func normalizeMachineNode(node MachineNode) MachineNode {
@@ -108,7 +111,7 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 		return nil, err
 	}
 
-	client := newMachineClient(apiHost, config.Timeout)
+	client, policy := newMachineClient(apiHost, config.Timeout, token)
 
 	res, err := client.R().
 		SetHeader("Content-Type", "application/json").
@@ -117,11 +120,8 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 			Token:     token,
 		}).
 		Post(machineNodesPath)
-	if err != nil {
+	if err := policy.CheckResponse(res, machineNodesPath, err); err != nil {
 		return nil, fmt.Errorf("discover machine nodes request failed: %w", err)
-	}
-	if res == nil {
-		return nil, fmt.Errorf("discover machine nodes request failed: empty response")
 	}
 	if statusCode := res.StatusCode(); statusCode < 200 || statusCode >= 300 {
 		return nil, fmt.Errorf("discover machine nodes request failed: status %d", statusCode)
@@ -200,15 +200,13 @@ func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus
 		return err
 	}
 
-	res, err := newMachineClient(report.APIHost, report.Timeout).R().
+	client, policy := newMachineClient(report.APIHost, report.Timeout, report.Payload.Token)
+	res, err := client.R().
 		SetHeader("Content-Type", "application/json").
 		SetBody(report.Payload).
 		Post(machineStatusPath)
-	if err != nil {
+	if err := policy.CheckResponse(res, machineStatusPath, err); err != nil {
 		return fmt.Errorf("report machine status request failed: %w", err)
-	}
-	if res == nil {
-		return fmt.Errorf("report machine status request failed: empty response")
 	}
 	if statusCode := res.StatusCode(); statusCode < 200 || statusCode >= 300 {
 		return fmt.Errorf("report machine status request failed: status %d", statusCode)
