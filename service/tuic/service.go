@@ -6,8 +6,8 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/sagernet/sing-box/option"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
@@ -30,8 +30,8 @@ type PanelClient interface {
 
 var _ service.Service = (*TuicService)(nil)
 
-func defaultRuntimeFactory(s *TuicService) (runtimeInstance, string, error) {
-	return s.buildSingBox()
+func defaultRuntimeFactory(s *TuicService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+	return s.buildSingBoxFor(spec)
 }
 
 func defaultReloadRuntimeFactory(s *TuicService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
@@ -74,19 +74,20 @@ func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
 	}
 }
 
-func (s *TuicService) buildRuntime() (runtimeInstance, string, error) {
+func (s *TuicService) buildRuntime(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	factory := s.runtimeFactory
 	if factory == nil {
 		factory = defaultRuntimeFactory
 	}
-	return factory(s)
+	return factory(s, cloneRuntimeBuildSpec(spec))
 }
 
 func (s *TuicService) buildReloadRuntime(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	if s.reloadRuntimeFactory == nil {
 		return nil, "", errors.New("TUIC reload runtime factory is nil")
 	}
-	return s.reloadRuntimeFactory(s, spec)
+	spec.authUsers = s.authUsersSnapshot()
+	return s.reloadRuntimeFactory(s, cloneRuntimeBuildSpec(spec))
 }
 
 func (s *TuicService) appliedStateSnapshot() (*api.NodeInfo, string, time.Time) {
@@ -134,6 +135,7 @@ func (s *TuicService) Start() (err error) {
 	if nodeInfo.Port == 0 {
 		return fail(errors.New("server port must > 0"))
 	}
+	nodeInfo = cloneNodeInfo(nodeInfo)
 	if s.config == nil || s.config.CertConfig == nil {
 		return fail(errors.New("CertConfig is required for TUIC"))
 	}
@@ -154,46 +156,13 @@ func (s *TuicService) Start() (err error) {
 		s.logger.Infof("Syncing %d users for TUIC node", len(*userInfo))
 	}
 
-	oldNodeInfo, oldTag, oldInboundTag := s.nodeInfo, s.tag, s.inboundTag
-	s.mu.Lock()
-	oldUsers := s.users
-	oldTraffic := s.traffic
-	oldOnlineIPs := s.onlineIPs
-	oldIPLastActive := s.ipLastActive
-	oldAuthUsers := s.authUsers
-	oldRateLimiters := s.rateLimiters
-	startupRateLimiters := make(map[string]*rate.Limiter, len(oldRateLimiters))
-	for key, limiter := range oldRateLimiters {
-		if limiter != nil {
-			startupRateLimiters[key] = rate.NewLimiter(limiter.Limit(), limiter.Burst())
-		}
-	}
-	s.rateLimiters = startupRateLimiters
-	s.mu.Unlock()
-	restoreStartupState := func() {
-		s.nodeInfo, s.tag, s.inboundTag = oldNodeInfo, oldTag, oldInboundTag
-		s.mu.Lock()
-		s.users = oldUsers
-		s.traffic = oldTraffic
-		s.onlineIPs = oldOnlineIPs
-		s.ipLastActive = oldIPLastActive
-		s.authUsers = oldAuthUsers
-		s.rateLimiters = oldRateLimiters
-		s.mu.Unlock()
-	}
-	s.nodeInfo, s.tag, s.inboundTag = nodeInfo, tag, tag
-	s.syncUsers(userInfo)
-	s.mu.Lock()
-	startupUsers := s.users
-	startupTraffic := s.traffic
-	startupOnlineIPs := s.onlineIPs
-	startupIPLastActive := s.ipLastActive
-	startupAuthUsers := s.authUsers
-	startupRateLimiters = s.rateLimiters
-	s.mu.Unlock()
-
-	boxInstance, inboundTag, err := s.buildRuntime()
-	restoreStartupState()
+	startupUsers := s.buildCandidateUserState(userInfo, nodeInfo)
+	boxInstance, inboundTag, err := s.buildRuntime(runtimeBuildSpec{
+		nodeInfo:   nodeInfo,
+		inboundTag: tag,
+		certConfig: cloneCertConfig(s.config.CertConfig),
+		authUsers:  append([]option.TUICUser(nil), startupUsers.authUsers...),
+	})
 	if err != nil {
 		return fail(err)
 	}
@@ -237,12 +206,7 @@ func (s *TuicService) Start() (err error) {
 	s.startAt = startAt
 	s.tasks = tasks
 	s.mu.Lock()
-	s.users = startupUsers
-	s.traffic = startupTraffic
-	s.onlineIPs = startupOnlineIPs
-	s.ipLastActive = startupIPLastActive
-	s.authUsers = startupAuthUsers
-	s.rateLimiters = startupRateLimiters
+	s.applyUserStateLocked(startupUsers)
 	s.mu.Unlock()
 	s.state = stateRunning
 	s.runtimeErr = nil
@@ -341,7 +305,7 @@ func (s *TuicService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, re
 		return errors.New("prepared certificate renewal is missing certificate or private key PEM")
 	}
 
-	candidateNode := *nodeInfo
+	candidateNode := cloneNodeInfo(nodeInfo)
 	if candidateNode.TuicConfig == nil {
 		candidateNode.TuicConfig = &api.TuicConfig{}
 	}
@@ -363,9 +327,9 @@ func (s *TuicService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, re
 	oldCertConfig := cloneCertConfig(s.config.CertConfig)
 	s.lifecycleMu.Unlock()
 
-	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
+	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, candidateNode)
 	candidateRuntime, _, err := s.buildReloadRuntime(runtimeBuildSpec{
-		nodeInfo:       &candidateNode,
+		nodeInfo:       candidateNode,
 		inboundTag:     oldInboundTag,
 		certConfig:     candidateCertConfig,
 		certificatePEM: certificatePEM(renewal),
@@ -433,7 +397,7 @@ func (s *TuicService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, re
 		}
 	}
 
-	s.finishReload(candidateRuntime, &candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
+	s.finishReload(candidateRuntime, candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
 	s.logger.Infof("TUIC node reloaded on %s:%d", s.config.ListenIP, candidateNode.Port)
 	return oldCloseErr
 }
@@ -488,6 +452,28 @@ func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
 		}
 	}
 	return &cloned
+}
+
+func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
+	if nodeInfo == nil {
+		return nil
+	}
+	cloned := *nodeInfo
+	if nodeInfo.TuicConfig != nil {
+		tuicConfig := *nodeInfo.TuicConfig
+		tuicConfig.ALPN = append([]string(nil), nodeInfo.TuicConfig.ALPN...)
+		cloned.TuicConfig = &tuicConfig
+	}
+	return &cloned
+}
+
+func cloneRuntimeBuildSpec(spec runtimeBuildSpec) runtimeBuildSpec {
+	spec.nodeInfo = cloneNodeInfo(spec.nodeInfo)
+	spec.certConfig = cloneCertConfig(spec.certConfig)
+	spec.certificatePEM = append([]byte(nil), spec.certificatePEM...)
+	spec.privateKeyPEM = append([]byte(nil), spec.privateKeyPEM...)
+	spec.authUsers = append([]option.TUICUser(nil), spec.authUsers...)
+	return spec
 }
 
 func deriveReloadCertConfig(current *mylego.CertConfig, oldInfo, candidate *api.NodeInfo) *mylego.CertConfig {

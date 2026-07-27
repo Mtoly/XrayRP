@@ -14,14 +14,6 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
 
-func (s *TuicService) buildSingBox() (*box.Box, string, error) {
-	return s.buildSingBoxFor(runtimeBuildSpec{
-		nodeInfo:   s.nodeInfo,
-		inboundTag: s.inboundTag,
-		certConfig: s.config.CertConfig,
-	})
-}
-
 func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
@@ -67,10 +59,7 @@ func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, 
 		tlsOpt.ALPN = badoption.Listable[string]{"h3"}
 	}
 
-	s.mu.RLock()
-	users := make([]option.TUICUser, len(s.authUsers))
-	copy(users, s.authUsers)
-	s.mu.RUnlock()
+	users := append([]option.TUICUser(nil), spec.authUsers...)
 
 	if len(users) == 0 {
 		return nil, "", fmt.Errorf("no users available for TUIC authentication")

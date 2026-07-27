@@ -20,13 +20,14 @@ type runtimeInstance interface {
 	Close() error
 }
 
-type runtimeFactory func(*TuicService) (runtimeInstance, string, error)
+type runtimeFactory func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error)
 type runtimeBuildSpec struct {
 	nodeInfo       *api.NodeInfo
 	inboundTag     string
 	certConfig     *mylego.CertConfig
 	certificatePEM []byte
 	privateKeyPEM  []byte
+	authUsers      []option.TUICUser
 }
 type reloadRuntimeFactory func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error
@@ -111,6 +112,15 @@ type userRecord struct {
 	Email       string
 	DeviceLimit int
 	SpeedLimit  uint64
+}
+
+type userState struct {
+	users        map[string]userRecord
+	traffic      map[string]*userTraffic
+	onlineIPs    map[string]map[string]struct{}
+	ipLastActive map[string]map[string]time.Time
+	authUsers    []option.TUICUser
+	rateLimiters map[string]*rate.Limiter
 }
 
 type userTraffic struct {

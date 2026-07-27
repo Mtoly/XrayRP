@@ -32,18 +32,6 @@ func (e *lifecycleEvents) snapshot() []string {
 	return append([]string(nil), e.events...)
 }
 
-func waitForEvents(t *testing.T, events *lifecycleEvents, want []string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if got := events.snapshot(); reflect.DeepEqual(got, want) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("events = %v, want %v", events.snapshot(), want)
-}
-
 type fakeRuntimeInstance struct {
 	events     *lifecycleEvents
 	startErr   error
@@ -74,7 +62,7 @@ func (f *fakeRuntimeInstance) Close() error {
 
 func TestRuntimeLifecycleSeamCompiles(t *testing.T) {
 	var runtime runtimeInstance = &fakeRuntimeInstance{events: &lifecycleEvents{}}
-	var factory runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+	var factory runtimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		return runtime, "test-inbound", nil
 	}
 
@@ -88,13 +76,13 @@ func TestBuildRuntimeRecordsBuildAndReturnsFactoryError(t *testing.T) {
 	wantErr := errors.New("build failed")
 	events := &lifecycleEvents{}
 	service := &AnyTLSService{
-		runtimeFactory: func(*AnyTLSService) (runtimeInstance, string, error) {
+		runtimeFactory: func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 			events.add("build")
 			return nil, "", wantErr
 		},
 	}
 
-	_, _, err := service.buildRuntime()
+	_, _, err := service.buildRuntime(runtimeBuildSpec{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("buildRuntime() error = %v, want %v", err, wantErr)
 	}
@@ -107,13 +95,13 @@ func TestBuildRuntimeReturnsInjectedFake(t *testing.T) {
 	events := &lifecycleEvents{}
 	wantRuntime := &fakeRuntimeInstance{events: events}
 	service := &AnyTLSService{
-		runtimeFactory: func(*AnyTLSService) (runtimeInstance, string, error) {
+		runtimeFactory: func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 			events.add("build")
 			return wantRuntime, "test-inbound", nil
 		},
 	}
 
-	gotRuntime, gotTag, err := service.buildRuntime()
+	gotRuntime, gotTag, err := service.buildRuntime(runtimeBuildSpec{})
 	if err != nil {
 		t.Fatalf("buildRuntime() error = %v", err)
 	}
@@ -136,7 +124,7 @@ func TestNewInstallsDefaultsWithoutSharingFactoryState(t *testing.T) {
 	if first.runtimeFactory == nil || first.startRuntime == nil || first.closeRuntime == nil {
 		t.Fatal("New() did not install lifecycle defaults")
 	}
-	first.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+	first.runtimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		return &fakeRuntimeInstance{events: &lifecycleEvents{}}, "test-inbound", nil
 	}
 	first.startRuntime = func(runtimeInstance) error { return errors.New("test start") }
@@ -164,8 +152,9 @@ func TestRuntimeFakeSupportsControlledStartAndClose(t *testing.T) {
 
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- runtime.Start()
+		err := runtime.Start()
 		events.add("join")
+		startDone <- err
 	}()
 
 	select {
@@ -181,7 +170,9 @@ func TestRuntimeFakeSupportsControlledStartAndClose(t *testing.T) {
 	if err := <-startDone; err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	waitForEvents(t, events, []string{"start", "ready", "join"})
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"start", "ready", "join"}) {
+		t.Fatalf("events after join = %v, want [start ready join]", got)
+	}
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -267,7 +258,7 @@ func newStartTestService(events *lifecycleEvents, runtime *fakeRuntimeInstance) 
 		DisableGetRule: true,
 		CertConfig:     &mylego.CertConfig{},
 	})
-	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		events.add("build")
 		return runtime, "test-inbound", nil
 	}
@@ -303,15 +294,16 @@ func TestStartBuildsRuntimeWithIncomingTag(t *testing.T) {
 	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
 	service.inboundTag = "stale-inbound"
 	service.tag = "stale-tag"
-	service.runtimeFactory = func(service *AnyTLSService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
 		events.add("build")
-		if service.tag != "AnyTLS_127.0.0.1_443_7" {
-			t.Fatalf("runtime build tag = %q, want incoming tag", service.tag)
+		panelNode := service.apiClient.(*configurablePanelClient).nodeInfo
+		if spec.nodeInfo == panelNode || !reflect.DeepEqual(spec.nodeInfo, panelNode) {
+			t.Fatalf("runtime build node = %v, want detached incoming node", spec.nodeInfo)
 		}
-		if service.inboundTag != "AnyTLS_127.0.0.1_443_7" {
-			t.Fatalf("runtime build inbound tag = %q, want incoming tag", service.inboundTag)
+		if spec.inboundTag != "AnyTLS_127.0.0.1_443_7" {
+			t.Fatalf("runtime build inbound tag = %q, want incoming tag", spec.inboundTag)
 		}
-		return &fakeRuntimeInstance{events: events}, service.inboundTag, nil
+		return &fakeRuntimeInstance{events: events}, spec.inboundTag, nil
 	}
 
 	if err := service.Start(); err != nil {
@@ -325,11 +317,93 @@ func TestStartBuildsRuntimeWithIncomingTag(t *testing.T) {
 	}
 }
 
+func TestStartBuildKeepsCandidateStatePrivate(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	oldNode := &api.NodeInfo{NodeType: "AnyTLS", NodeID: 99, Port: 9443, AnyTLSConfig: &api.AnyTLSConfig{}}
+	oldLimiter := rate.NewLimiter(10, 10)
+	service.nodeInfo = oldNode
+	service.tag = "old-tag"
+	service.inboundTag = "old-inbound"
+	service.users = map[string]userRecord{"old-user": {UID: 1}}
+	service.traffic = map[string]*userTraffic{"old-user": {Upload: 7}}
+	service.authUsers = []option.AnyTLSUser{{Name: "old-user", Password: "old-user"}}
+	service.rateLimiters = map[string]*rate.Limiter{"old-user": oldLimiter}
+	service.apiClient.(*configurablePanelClient).users = []api.UserInfo{{UUID: "candidate-user", SpeedLimit: 20}}
+	service.runtimeFactory = func(got *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		if got.nodeInfo != oldNode || got.tag != "old-tag" || got.inboundTag != "old-inbound" {
+			t.Fatalf("candidate runtime fields became visible during build: node=%v tag=%q inbound=%q", got.nodeInfo, got.tag, got.inboundTag)
+		}
+		if len(got.users) != 1 || got.users["old-user"].UID != 1 {
+			t.Fatalf("candidate users became visible during build: %v", got.users)
+		}
+		if len(got.authUsers) != 1 || got.authUsers[0].Name != "old-user" {
+			t.Fatalf("candidate auth users became visible during build: %v", got.authUsers)
+		}
+		if len(got.rateLimiters) != 1 || got.rateLimiters["old-user"] != oldLimiter {
+			t.Fatalf("candidate rate limiters became visible during build: %v", got.rateLimiters)
+		}
+		panelNode := service.apiClient.(*configurablePanelClient).nodeInfo
+		if spec.nodeInfo == panelNode || !reflect.DeepEqual(spec.nodeInfo, panelNode) ||
+			spec.inboundTag != "AnyTLS_127.0.0.1_443_7" ||
+			len(spec.authUsers) != 1 || spec.authUsers[0].Name != "candidate-user" {
+			t.Fatalf("candidate build spec = node:%v inbound:%q auth:%v", spec.nodeInfo, spec.inboundTag, spec.authUsers)
+		}
+		return &fakeRuntimeInstance{events: events}, spec.inboundTag, nil
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if service.nodeInfo == oldNode || service.tag != "AnyTLS_127.0.0.1_443_7" {
+		t.Fatalf("candidate state was not published after readiness: node=%v tag=%q", service.nodeInfo, service.tag)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestStartBuildSpecMutationCannotChangePanelOrAppliedState(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	client := service.apiClient.(*configurablePanelClient)
+	client.nodeInfo.AnyTLSConfig.PaddingScheme = []string{"panel-padding"}
+	client.users = []api.UserInfo{{UUID: "candidate-user"}}
+	service.config.CertConfig.DNSEnv = map[string]string{"TOKEN": "panel-token"}
+	service.runtimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		spec.nodeInfo.Port = 9443
+		spec.nodeInfo.AnyTLSConfig.PaddingScheme[0] = "factory-padding"
+		spec.certConfig.DNSEnv["TOKEN"] = "factory-token"
+		spec.authUsers[0].Name = "factory-user"
+		return &fakeRuntimeInstance{events: events}, spec.inboundTag, nil
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if client.nodeInfo.Port != 443 || client.nodeInfo.AnyTLSConfig.PaddingScheme[0] != "panel-padding" {
+		t.Fatalf("runtime factory mutated panel node: %+v", client.nodeInfo)
+	}
+	if service.nodeInfo == client.nodeInfo || service.nodeInfo.Port != 443 ||
+		service.nodeInfo.AnyTLSConfig.PaddingScheme[0] != "panel-padding" {
+		t.Fatalf("published node aliases or contains factory mutation: %+v", service.nodeInfo)
+	}
+	if service.config.CertConfig.DNSEnv["TOKEN"] != "panel-token" {
+		t.Fatalf("published certificate config = %v, want panel token", service.config.CertConfig.DNSEnv)
+	}
+	if len(service.authUsers) != 1 || service.authUsers[0].Name != "candidate-user" {
+		t.Fatalf("published auth users = %v, want candidate user", service.authUsers)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestStartBuildFailureDoesNotPublishRuntime(t *testing.T) {
 	wantErr := errors.New("build failed")
 	events := &lifecycleEvents{}
 	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
-	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		events.add("build")
 		return nil, "", wantErr
 	}
@@ -428,9 +502,10 @@ func TestStartFailureRestoresUserStateAndDefersRules(t *testing.T) {
 	client.rules = []api.DetectRule{{ID: 1}}
 	oldLimiter := rate.NewLimiter(10, 10)
 	service.users["old-user"] = userRecord{UID: 1}
+	service.traffic = map[string]*userTraffic{"old-user": {Upload: 7}}
 	service.authUsers = []option.AnyTLSUser{{Name: "old-user", Password: "old-user"}}
 	service.rateLimiters = map[string]*rate.Limiter{"old-user": oldLimiter}
-	service.runtimeFactory = func(*AnyTLSService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		return nil, "", errors.New("build failed")
 	}
 
@@ -445,6 +520,9 @@ func TestStartFailureRestoresUserStateAndDefersRules(t *testing.T) {
 	}
 	if limiter, ok := service.rateLimiters["old-user"]; !ok || len(service.rateLimiters) != 1 || limiter != oldLimiter {
 		t.Fatalf("rateLimiters after failed Start = %v, want original map", service.rateLimiters)
+	}
+	if traffic, ok := service.traffic["old-user"]; !ok || len(service.traffic) != 1 || traffic.Upload != 7 {
+		t.Fatalf("traffic after failed Start = %v, want unchanged original counters", service.traffic)
 	}
 	if got := oldLimiter.Limit(); got != 10 {
 		t.Fatalf("original limiter mutated during failed Start: limit=%v, want 10", got)
@@ -558,6 +636,16 @@ func TestStartTwiceWhileStartingIsRejected(t *testing.T) {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("first Start() did not enter runtime start")
+	}
+	service.lifecycleMu.Lock()
+	state, nodeInfo, boxInstance, tag := service.state, service.nodeInfo, service.box, service.tag
+	service.lifecycleMu.Unlock()
+	service.mu.RLock()
+	userCount, authUserCount := len(service.users), len(service.authUsers)
+	service.mu.RUnlock()
+	if state != stateStarting || nodeInfo != nil || boxInstance != nil || tag != "" || userCount != 0 || authUserCount != 0 {
+		t.Fatalf("candidate published before runtime readiness: state=%v node=%v box=%v tag=%q users=%d auth=%d",
+			state, nodeInfo, boxInstance, tag, userCount, authUserCount)
 	}
 	if err := service.Start(); err == nil {
 		t.Fatal("concurrent Start() error = nil, want starting-state rejection")

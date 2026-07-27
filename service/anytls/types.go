@@ -20,13 +20,14 @@ type runtimeInstance interface {
 	Close() error
 }
 
-type runtimeFactory func(*AnyTLSService) (runtimeInstance, string, error)
+type runtimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type runtimeBuildSpec struct {
 	nodeInfo       *api.NodeInfo
 	inboundTag     string
 	certConfig     *mylego.CertConfig
 	certificatePEM []byte
 	privateKeyPEM  []byte
+	authUsers      []option.AnyTLSUser
 }
 type reloadRuntimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error
@@ -112,6 +113,15 @@ type userRecord struct {
 	DeviceLimit int
 	SpeedLimit  uint64
 	LimiterKey  string
+}
+
+type userState struct {
+	users        map[string]userRecord
+	traffic      map[string]*userTraffic
+	onlineIPs    map[string]map[string]struct{}
+	ipLastActive map[string]map[string]time.Time
+	authUsers    []option.AnyTLSUser
+	rateLimiters map[string]*rate.Limiter
 }
 
 type userTraffic struct {

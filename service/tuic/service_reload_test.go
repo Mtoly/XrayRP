@@ -14,6 +14,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
+	"github.com/sagernet/sing-box/option"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
@@ -106,7 +107,7 @@ func TestRuntimeCallbacksReadTagThroughAppliedSnapshot(t *testing.T) {
 func TestReloadNilNodeInfoIsNoOp(t *testing.T) {
 	service, oldRuntime, oldNode := newReloadTestService()
 	called := false
-	service.runtimeFactory = func(*TuicService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		called = true
 		return nil, "", nil
 	}
@@ -153,7 +154,7 @@ func TestReloadRequiresExplicitCandidateFactory(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	legacyCalled := false
 	service.reloadRuntimeFactory = nil
-	service.runtimeFactory = func(*TuicService) (runtimeInstance, string, error) {
+	service.runtimeFactory = func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		legacyCalled = true
 		return &reloadRuntime{name: "legacy"}, "legacy-inbound", nil
 	}
@@ -168,6 +169,72 @@ func TestReloadRequiresExplicitCandidateFactory(t *testing.T) {
 	}
 	if legacyCalled {
 		t.Fatal("buildReloadRuntime() called legacy factory that reads mutable service fields")
+	}
+}
+
+func TestReloadBuildSnapshotsAppliedAuthUsers(t *testing.T) {
+	service, _, _ := newReloadTestService()
+	service.mu.Lock()
+	service.authUsers = []option.TUICUser{{Name: "applied-user", UUID: "applied-user", Password: "secret"}}
+	service.mu.Unlock()
+	service.reloadRuntimeFactory = func(_ *TuicService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		if len(spec.authUsers) != 1 || spec.authUsers[0].Name != "applied-user" {
+			t.Fatalf("candidate auth users = %v, want applied snapshot", spec.authUsers)
+		}
+		spec.authUsers[0].Name = "mutated"
+		return &reloadRuntime{name: "candidate"}, spec.inboundTag, nil
+	}
+
+	if _, _, err := service.buildReloadRuntime(runtimeBuildSpec{
+		nodeInfo:   newReloadNode(9443, "new.example.com"),
+		inboundTag: service.inboundTag,
+		certConfig: cloneCertConfig(service.config.CertConfig),
+	}); err != nil {
+		t.Fatalf("buildReloadRuntime() error = %v", err)
+	}
+	service.mu.RLock()
+	appliedName := service.authUsers[0].Name
+	service.mu.RUnlock()
+	if appliedName != "applied-user" {
+		t.Fatalf("candidate factory mutated applied auth user: %q", appliedName)
+	}
+}
+
+func TestReloadBuildSpecMutationCannotChangeCandidateOrPublishedState(t *testing.T) {
+	service, _, _ := newReloadTestService()
+	service.mu.Lock()
+	service.authUsers = []option.TUICUser{{Name: "applied-user", UUID: "applied-user", Password: "secret"}}
+	service.mu.Unlock()
+	candidateNode := newReloadNode(9443, "new.example.com")
+	service.config.CertConfig.DNSEnv = map[string]string{"TOKEN": "applied-token"}
+	service.reloadRuntimeFactory = func(_ *TuicService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		spec.nodeInfo.Port = 10443
+		spec.nodeInfo.TuicConfig.ALPN[0] = "factory-alpn"
+		spec.certConfig.CertDomain = "factory.example.com"
+		spec.certConfig.DNSEnv["TOKEN"] = "factory-token"
+		spec.authUsers[0].Name = "factory-user"
+		return &reloadRuntime{name: "candidate"}, spec.inboundTag, nil
+	}
+
+	if err := service.reloadNode(candidateNode); err != nil {
+		t.Fatalf("reloadNode() error = %v", err)
+	}
+	if candidateNode.Port != 9443 || candidateNode.TuicConfig.ALPN[0] != "h3" {
+		t.Fatalf("runtime factory mutated caller candidate: %+v", candidateNode)
+	}
+	if service.nodeInfo == candidateNode || service.nodeInfo.Port != 9443 ||
+		service.nodeInfo.TuicConfig.ALPN[0] != "h3" {
+		t.Fatalf("published candidate aliases or contains factory mutation: %+v", service.nodeInfo)
+	}
+	if service.config.CertConfig.CertDomain != "new.example.com" ||
+		service.config.CertConfig.DNSEnv["TOKEN"] != "applied-token" {
+		t.Fatalf("published certificate config contains factory mutation: %+v", service.config.CertConfig)
+	}
+	service.mu.RLock()
+	appliedName := service.authUsers[0].Name
+	service.mu.RUnlock()
+	if appliedName != "applied-user" {
+		t.Fatalf("published auth user = %q, want applied-user", appliedName)
 	}
 }
 

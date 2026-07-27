@@ -13,14 +13,6 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 )
 
-func (s *AnyTLSService) buildSingBox() (*box.Box, string, error) {
-	return s.buildSingBoxFor(runtimeBuildSpec{
-		nodeInfo:   s.nodeInfo,
-		inboundTag: s.inboundTag,
-		certConfig: s.config.CertConfig,
-	})
-}
-
 func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
@@ -63,10 +55,7 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 		padding = spec.nodeInfo.AnyTLSConfig.PaddingScheme
 	}
 
-	s.mu.RLock()
-	users := make([]option.AnyTLSUser, len(s.authUsers))
-	copy(users, s.authUsers)
-	s.mu.RUnlock()
+	users := append([]option.AnyTLSUser(nil), spec.authUsers...)
 
 	inOpts := &option.AnyTLSInboundOptions{
 		ListenOptions: listen,

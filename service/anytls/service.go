@@ -6,8 +6,8 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/sagernet/sing-box/option"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
@@ -30,8 +30,8 @@ type PanelClient interface {
 
 var _ service.Service = (*AnyTLSService)(nil)
 
-func defaultRuntimeFactory(s *AnyTLSService) (runtimeInstance, string, error) {
-	return s.buildSingBox()
+func defaultRuntimeFactory(s *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+	return s.buildSingBoxFor(spec)
 }
 
 func defaultReloadRuntimeFactory(s *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
@@ -74,19 +74,20 @@ func New(apiClient PanelClient, cfg *controller.Config) *AnyTLSService {
 	}
 }
 
-func (s *AnyTLSService) buildRuntime() (runtimeInstance, string, error) {
+func (s *AnyTLSService) buildRuntime(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	factory := s.runtimeFactory
 	if factory == nil {
 		factory = defaultRuntimeFactory
 	}
-	return factory(s)
+	return factory(s, cloneRuntimeBuildSpec(spec))
 }
 
 func (s *AnyTLSService) buildReloadRuntime(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	if s.reloadRuntimeFactory == nil {
 		return nil, "", errors.New("AnyTLS reload runtime factory is nil")
 	}
-	return s.reloadRuntimeFactory(s, spec)
+	spec.authUsers = s.authUsersSnapshot()
+	return s.reloadRuntimeFactory(s, cloneRuntimeBuildSpec(spec))
 }
 
 func (s *AnyTLSService) appliedStateSnapshot() (*api.NodeInfo, string, time.Time) {
@@ -134,6 +135,7 @@ func (s *AnyTLSService) Start() (err error) {
 	if nodeInfo.Port == 0 {
 		return fail(errors.New("server port must > 0"))
 	}
+	nodeInfo = cloneNodeInfo(nodeInfo)
 	if s.config == nil || s.config.CertConfig == nil {
 		return fail(errors.New("CertConfig is required for AnyTLS"))
 	}
@@ -149,46 +151,13 @@ func (s *AnyTLSService) Start() (err error) {
 		return fail(err)
 	}
 
-	oldNodeInfo, oldTag, oldInboundTag := s.nodeInfo, s.tag, s.inboundTag
-	s.mu.Lock()
-	oldUsers := s.users
-	oldTraffic := s.traffic
-	oldOnlineIPs := s.onlineIPs
-	oldIPLastActive := s.ipLastActive
-	oldAuthUsers := s.authUsers
-	oldRateLimiters := s.rateLimiters
-	startupRateLimiters := make(map[string]*rate.Limiter, len(oldRateLimiters))
-	for key, limiter := range oldRateLimiters {
-		if limiter != nil {
-			startupRateLimiters[key] = rate.NewLimiter(limiter.Limit(), limiter.Burst())
-		}
-	}
-	s.rateLimiters = startupRateLimiters
-	s.mu.Unlock()
-	restoreStartupState := func() {
-		s.nodeInfo, s.tag, s.inboundTag = oldNodeInfo, oldTag, oldInboundTag
-		s.mu.Lock()
-		s.users = oldUsers
-		s.traffic = oldTraffic
-		s.onlineIPs = oldOnlineIPs
-		s.ipLastActive = oldIPLastActive
-		s.authUsers = oldAuthUsers
-		s.rateLimiters = oldRateLimiters
-		s.mu.Unlock()
-	}
-	s.nodeInfo, s.tag, s.inboundTag = nodeInfo, tag, tag
-	s.syncUsers(userInfo)
-	s.mu.Lock()
-	startupUsers := s.users
-	startupTraffic := s.traffic
-	startupOnlineIPs := s.onlineIPs
-	startupIPLastActive := s.ipLastActive
-	startupAuthUsers := s.authUsers
-	startupRateLimiters = s.rateLimiters
-	s.mu.Unlock()
-
-	boxInstance, inboundTag, err := s.buildRuntime()
-	restoreStartupState()
+	startupUsers := s.buildCandidateUserState(userInfo, nodeInfo)
+	boxInstance, inboundTag, err := s.buildRuntime(runtimeBuildSpec{
+		nodeInfo:   nodeInfo,
+		inboundTag: tag,
+		certConfig: cloneCertConfig(s.config.CertConfig),
+		authUsers:  append([]option.AnyTLSUser(nil), startupUsers.authUsers...),
+	})
 	if err != nil {
 		return fail(err)
 	}
@@ -236,12 +205,7 @@ func (s *AnyTLSService) Start() (err error) {
 	s.startAt = startAt
 	s.tasks = tasks
 	s.mu.Lock()
-	s.users = startupUsers
-	s.traffic = startupTraffic
-	s.onlineIPs = startupOnlineIPs
-	s.ipLastActive = startupIPLastActive
-	s.authUsers = startupAuthUsers
-	s.rateLimiters = startupRateLimiters
+	s.applyUserStateLocked(startupUsers)
 	s.mu.Unlock()
 	s.state = stateRunning
 	s.runtimeErr = nil
@@ -340,7 +304,7 @@ func (s *AnyTLSService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, 
 		return errors.New("prepared certificate renewal is missing certificate or private key PEM")
 	}
 
-	candidateNode := *nodeInfo
+	candidateNode := cloneNodeInfo(nodeInfo)
 	if candidateNode.AnyTLSConfig == nil {
 		candidateNode.AnyTLSConfig = &api.AnyTLSConfig{}
 	}
@@ -362,9 +326,9 @@ func (s *AnyTLSService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, 
 	oldCertConfig := cloneCertConfig(s.config.CertConfig)
 	s.lifecycleMu.Unlock()
 
-	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
+	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, candidateNode)
 	spec := runtimeBuildSpec{
-		nodeInfo:       &candidateNode,
+		nodeInfo:       candidateNode,
 		inboundTag:     oldInboundTag,
 		certConfig:     candidateCertConfig,
 		certificatePEM: certificatePEM(renewal),
@@ -433,7 +397,7 @@ func (s *AnyTLSService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, 
 		}
 	}
 
-	s.finishReload(candidateRuntime, &candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
+	s.finishReload(candidateRuntime, candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
 	s.logger.Infof("AnyTLS node reloaded on %s:%d", s.config.ListenIP, candidateNode.Port)
 	return oldCloseErr
 }
@@ -488,6 +452,28 @@ func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
 		}
 	}
 	return &cloned
+}
+
+func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
+	if nodeInfo == nil {
+		return nil
+	}
+	cloned := *nodeInfo
+	if nodeInfo.AnyTLSConfig != nil {
+		anyTLSConfig := *nodeInfo.AnyTLSConfig
+		anyTLSConfig.PaddingScheme = append([]string(nil), nodeInfo.AnyTLSConfig.PaddingScheme...)
+		cloned.AnyTLSConfig = &anyTLSConfig
+	}
+	return &cloned
+}
+
+func cloneRuntimeBuildSpec(spec runtimeBuildSpec) runtimeBuildSpec {
+	spec.nodeInfo = cloneNodeInfo(spec.nodeInfo)
+	spec.certConfig = cloneCertConfig(spec.certConfig)
+	spec.certificatePEM = append([]byte(nil), spec.certificatePEM...)
+	spec.privateKeyPEM = append([]byte(nil), spec.privateKeyPEM...)
+	spec.authUsers = append([]option.AnyTLSUser(nil), spec.authUsers...)
+	return spec
 }
 
 func deriveReloadCertConfig(current *mylego.CertConfig, oldInfo, candidate *api.NodeInfo) *mylego.CertConfig {

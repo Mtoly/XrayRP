@@ -28,12 +28,109 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	state := reconcileUserState(*userInfo, nodeLimit, userState{
+		traffic:      s.traffic,
+		onlineIPs:    s.onlineIPs,
+		ipLastActive: s.ipLastActive,
+		rateLimiters: s.rateLimiters,
+	})
+	s.applyUserStateLocked(state)
+}
 
-	newUsers := make(map[string]userRecord, len(*userInfo))
-	authUsers := make([]option.AnyTLSUser, 0, len(*userInfo)*2)
+func (s *AnyTLSService) buildCandidateUserState(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo) userState {
+	state := s.cloneCandidateUserState()
+	if userInfo == nil {
+		return state
+	}
+	var nodeLimit uint64
+	if nodeInfo != nil {
+		nodeLimit = nodeInfo.SpeedLimit
+	}
+	return reconcileUserState(*userInfo, nodeLimit, state)
+}
+
+func (s *AnyTLSService) cloneCandidateUserState() userState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	state := userState{
+		users:        make(map[string]userRecord, len(s.users)),
+		traffic:      make(map[string]*userTraffic, len(s.traffic)),
+		onlineIPs:    make(map[string]map[string]struct{}, len(s.onlineIPs)),
+		ipLastActive: make(map[string]map[string]time.Time, len(s.ipLastActive)),
+		authUsers:    append([]option.AnyTLSUser(nil), s.authUsers...),
+		rateLimiters: cloneRateLimiters(s.rateLimiters),
+	}
+	for key, user := range s.users {
+		state.users[key] = user
+	}
+	for key, traffic := range s.traffic {
+		if traffic == nil {
+			state.traffic[key] = nil
+			continue
+		}
+		cloned := *traffic
+		state.traffic[key] = &cloned
+	}
+	for key, ips := range s.onlineIPs {
+		cloned := make(map[string]struct{}, len(ips))
+		for ip := range ips {
+			cloned[ip] = struct{}{}
+		}
+		state.onlineIPs[key] = cloned
+	}
+	for key, activity := range s.ipLastActive {
+		cloned := make(map[string]time.Time, len(activity))
+		for ip, seenAt := range activity {
+			cloned[ip] = seenAt
+		}
+		state.ipLastActive[key] = cloned
+	}
+	return state
+}
+
+func (s *AnyTLSService) authUsersSnapshot() []option.AnyTLSUser {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]option.AnyTLSUser(nil), s.authUsers...)
+}
+
+func cloneRateLimiters(current map[string]*rate.Limiter) map[string]*rate.Limiter {
+	cloned := make(map[string]*rate.Limiter, len(current))
+	bySource := make(map[*rate.Limiter]*rate.Limiter)
+	for key, limiter := range current {
+		if limiter == nil {
+			continue
+		}
+		candidate := bySource[limiter]
+		if candidate == nil {
+			candidate = rate.NewLimiter(limiter.Limit(), limiter.Burst())
+			bySource[limiter] = candidate
+		}
+		cloned[key] = candidate
+	}
+	return cloned
+}
+
+func reconcileUserState(userInfo []api.UserInfo, nodeLimit uint64, state userState) userState {
+	if state.traffic == nil {
+		state.traffic = make(map[string]*userTraffic)
+	}
+	if state.onlineIPs == nil {
+		state.onlineIPs = make(map[string]map[string]struct{})
+	}
+	if state.ipLastActive == nil {
+		state.ipLastActive = make(map[string]map[string]time.Time)
+	}
+	if state.rateLimiters == nil {
+		state.rateLimiters = make(map[string]*rate.Limiter)
+	}
+
+	newUsers := make(map[string]userRecord, len(userInfo))
+	authUsers := make([]option.AnyTLSUser, 0, len(userInfo)*2)
 	newRateLimiters := make(map[string]*rate.Limiter)
 
-	for _, u := range *userInfo {
+	for _, u := range userInfo {
 		keys := []string{u.UUID, u.Passwd}
 		limiterKey := u.UUID
 		if limiterKey == "" {
@@ -50,12 +147,11 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 		limit := determineRate(nodeLimit, u.SpeedLimit)
 		var limiter *rate.Limiter
 		if limit > 0 {
-			// Try to reuse an existing limiter if present.
 			for _, k := range keys {
 				if k == "" {
 					continue
 				}
-				if old, ok := s.rateLimiters[k]; ok && old != nil {
+				if old, ok := state.rateLimiters[k]; ok && old != nil {
 					old.SetLimit(rate.Limit(limit))
 					old.SetBurst(int(limit))
 					limiter = old
@@ -77,8 +173,8 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 			if limiter != nil {
 				newRateLimiters[k] = limiter
 			}
-			if _, ok := s.traffic[k]; !ok {
-				s.traffic[k] = &userTraffic{}
+			if _, ok := state.traffic[k]; !ok {
+				state.traffic[k] = &userTraffic{}
 			}
 		}
 
@@ -96,21 +192,30 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 		}
 	}
 
-	s.users = newUsers
-	s.authUsers = authUsers
-	s.rateLimiters = newRateLimiters
+	state.users = newUsers
+	state.authUsers = authUsers
+	state.rateLimiters = newRateLimiters
 
-	for uuid := range s.onlineIPs {
+	for uuid := range state.onlineIPs {
 		if _, ok := newUsers[uuid]; !ok {
-			delete(s.onlineIPs, uuid)
+			delete(state.onlineIPs, uuid)
 		}
 	}
-	// Clean ipLastActive records for removed users
-	for uuid := range s.ipLastActive {
+	for uuid := range state.ipLastActive {
 		if _, ok := newUsers[uuid]; !ok {
-			delete(s.ipLastActive, uuid)
+			delete(state.ipLastActive, uuid)
 		}
 	}
+	return state
+}
+
+func (s *AnyTLSService) applyUserStateLocked(state userState) {
+	s.users = state.users
+	s.traffic = state.traffic
+	s.onlineIPs = state.onlineIPs
+	s.ipLastActive = state.ipLastActive
+	s.authUsers = state.authUsers
+	s.rateLimiters = state.rateLimiters
 }
 
 func (s *AnyTLSService) recordTraffic(uuid string, up, down uint64, host string) {
