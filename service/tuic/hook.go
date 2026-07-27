@@ -32,10 +32,7 @@ func (c *connCounter) Read(p []byte) (int, error) {
 	n, readErr := c.Conn.Read(p)
 	if n > 0 {
 		if c.svc != nil {
-			c.svc.addTraffic(c.user, int64(n), 0)
-			// Re-add IP to onlineIPs on every traffic event
-			// This ensures active connections are tracked even after collectUsage() clears the maps
-			c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
+			c.svc.recordTraffic(c.user, uint64(n), 0, trafficHost(c.Conn.RemoteAddr()))
 		}
 		if c.limiter != nil {
 			if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(n)); limitErr != nil {
@@ -58,10 +55,7 @@ func (c *connCounter) Write(p []byte) (int, error) {
 	n, writeErr := c.Conn.Write(p)
 	if n > 0 {
 		if c.svc != nil {
-			c.svc.addTraffic(c.user, 0, int64(n))
-			// Re-add IP to onlineIPs on every traffic event
-			// This ensures active connections are tracked even after collectUsage() clears the maps
-			c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
+			c.svc.recordTraffic(c.user, 0, uint64(n), trafficHost(c.Conn.RemoteAddr()))
 		}
 	}
 	return n, writeErr
@@ -114,10 +108,14 @@ func (c *packetConnCounter) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) 
 		return M.Socksaddr{}, io.EOF
 	}
 	destination, readErr := c.PacketConn.ReadPacket(buffer)
-	if buffer.Len() == 0 || c.limiter == nil {
+	size := buffer.Len()
+	if size > 0 && c.svc != nil {
+		c.svc.recordTraffic(c.user, uint64(size), 0, c.host)
+	}
+	if size == 0 || c.limiter == nil {
 		return destination, readErr
 	}
-	if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(buffer.Len())); limitErr != nil {
+	if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(size)); limitErr != nil {
 		buffer.Reset()
 		return M.Socksaddr{}, errors.Join(limitErr, readErr, c.Close())
 	}
@@ -133,7 +131,14 @@ func (c *packetConnCounter) WritePacket(buffer *buf.Buffer, destination M.Socksa
 			return errors.Join(err, c.Close())
 		}
 	}
-	return c.PacketConn.WritePacket(buffer, destination)
+	size := buffer.Len()
+	if err := c.PacketConn.WritePacket(buffer, destination); err != nil {
+		return err
+	}
+	if size > 0 && c.svc != nil {
+		c.svc.recordTraffic(c.user, 0, uint64(size), c.host)
+	}
+	return nil
 }
 
 func (c *packetConnCounter) Close() error {

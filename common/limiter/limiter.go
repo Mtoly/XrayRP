@@ -520,10 +520,11 @@ func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter 
 			deviceLimit = u.DeviceLimit
 		}
 
-		entry := newUserOnlineEntry()
-		if v, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
-			entry = v.(*userOnlineEntry)
+		entryValue, ok := inboundInfo.UserOnlineIP.Load(userKey)
+		if !ok {
+			entryValue, _ = inboundInfo.UserOnlineIP.LoadOrStore(userKey, newUserOnlineEntry())
 		}
+		entry := entryValue.(*userOnlineEntry)
 		if entry.admitIP(ip, uid, deviceLimit, inboundInfo.GlobalDevices) {
 			return nil, false, true
 		}

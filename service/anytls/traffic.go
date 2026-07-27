@@ -12,6 +12,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
 func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
@@ -112,7 +113,7 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) {
 	}
 }
 
-func (s *AnyTLSService) addTraffic(uuid string, up, down int64) {
+func (s *AnyTLSService) recordTraffic(uuid string, up, down uint64, host string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -121,11 +122,23 @@ func (s *AnyTLSService) addTraffic(uuid string, up, down int64) {
 		t = &userTraffic{}
 		s.traffic[uuid] = t
 	}
-	t.Upload += up
-	t.Download += down
+	t.Upload = trafficstats.Add(t.Upload, up)
+	t.Download = trafficstats.Add(t.Download, down)
 
-	// Note: We don't update onlineIPs here because we don't have the IP address.
-	// The IP is updated in Read/Write methods via updateOnlineIP().
+	if host == "" {
+		return
+	}
+	if ipSet, exists := s.onlineIPs[uuid]; exists {
+		ipSet[host] = struct{}{}
+	} else {
+		s.onlineIPs[uuid] = map[string]struct{}{host: {}}
+	}
+	seenAt := time.Now()
+	if activeMap, exists := s.ipLastActive[uuid]; exists {
+		activeMap[host] = seenAt
+	} else {
+		s.ipLastActive[uuid] = map[string]time.Time{host: seenAt}
+	}
 }
 
 func (s *AnyTLSService) allowConnection(uuid, ip string) bool {
@@ -178,39 +191,16 @@ func (s *AnyTLSService) allowConnection(uuid, ip string) bool {
 	return true
 }
 
-// updateOnlineIP re-adds an IP to the onlineIPs map and updates its last active time.
-// This is called on every traffic event to ensure active connections are tracked
-// even after collectUsage() clears the maps (similar to traditional Xray protocols).
-func (s *AnyTLSService) updateOnlineIP(uuid string, addr net.Addr) {
+func trafficHost(addr net.Addr) string {
 	if addr == nil {
-		return
+		return ""
 	}
 
-	remote := addr.String()
-	host := remote
+	host := addr.String()
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if host == "" {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Re-add IP to onlineIPs (in case it was cleared by collectUsage)
-	if ipSet, exists := s.onlineIPs[uuid]; exists {
-		ipSet[host] = struct{}{}
-	} else {
-		s.onlineIPs[uuid] = map[string]struct{}{host: {}}
-	}
-
-	// Update last active time
-	if activeMap, exists := s.ipLastActive[uuid]; exists {
-		activeMap[host] = time.Now()
-	} else {
-		s.ipLastActive[uuid] = map[string]time.Time{host: time.Now()}
-	}
+	return host
 }
 
 func (s *AnyTLSService) collectUsage() ([]api.UserTraffic, []api.OnlineUser, map[string]userTraffic) {
@@ -278,8 +268,8 @@ func (s *AnyTLSService) restoreTraffic(snapshot map[string]userTraffic) {
 			counter = &userTraffic{}
 			s.traffic[uuid] = counter
 		}
-		counter.Upload += snap.Upload
-		counter.Download += snap.Download
+		counter.Upload = trafficstats.Add(counter.Upload, uint64(snap.Upload))
+		counter.Download = trafficstats.Add(counter.Download, uint64(snap.Download))
 	}
 }
 

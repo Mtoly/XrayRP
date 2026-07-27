@@ -12,6 +12,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	commonlimiter "github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
 // hyTrafficLogger implements server.TrafficLogger and records user traffic
@@ -52,8 +53,8 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 		counter = &userTraffic{}
 		t.svc.traffic[id] = counter
 	}
-	counter.Upload += int64(tx)
-	counter.Download += int64(rx)
+	counter.Upload = trafficstats.Add(counter.Upload, tx)
+	counter.Download = trafficstats.Add(counter.Download, rx)
 
 	if t.svc.rateLimiters != nil {
 		limiter = t.svc.rateLimiters[id]
@@ -458,8 +459,8 @@ func (h *Hysteria2Service) restoreTraffic(snapshot map[string]userTraffic) {
 			counter = &userTraffic{}
 			h.traffic[uuid] = counter
 		}
-		counter.Upload += snap.Upload
-		counter.Download += snap.Download
+		counter.Upload = trafficstats.Add(counter.Upload, uint64(snap.Upload))
+		counter.Download = trafficstats.Add(counter.Download, uint64(snap.Download))
 	}
 }
 
