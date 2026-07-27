@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -72,7 +73,7 @@ func NewAccountsStorage(l *LegoCMD) *AccountsStorage {
 
 	serverURL, err := url.Parse(acme.LetsEncryptURL)
 	if err != nil {
-		log.Panic(err)
+		panic(fmt.Errorf("parse ACME server URL: %w", err))
 	}
 
 	rootPath := filepath.Join(l.path, baseAccountsRootFolderName)
@@ -90,11 +91,13 @@ func NewAccountsStorage(l *LegoCMD) *AccountsStorage {
 }
 
 func (s *AccountsStorage) ExistsAccountFilePath() bool {
-	accountFile := filepath.Join(s.rootUserPath, accountFileName)
-	if _, err := os.Stat(accountFile); os.IsNotExist(err) {
+	if err := s.validatePaths(); err != nil {
+		panic(err)
+	}
+	if err := validateExistingRegularFile(s.accountFilePath); errors.Is(err, os.ErrNotExist) {
 		return false
 	} else if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
 	return true
 }
@@ -112,24 +115,37 @@ func (s *AccountsStorage) GetUserID() string {
 }
 
 func (s *AccountsStorage) Save(account *Account) error {
+	if err := s.validatePaths(); err != nil {
+		return err
+	}
 	jsonBytes, err := json.MarshalIndent(account, "", "\t")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(s.accountFilePath, jsonBytes, filePerm)
+	return writeFileTransaction([]fileTransactionEntry{{
+		path: s.accountFilePath,
+		data: jsonBytes,
+		perm: filePerm,
+	}}, nil)
 }
 
 func (s *AccountsStorage) LoadAccount(privateKey crypto.PrivateKey) *Account {
+	if err := s.validatePaths(); err != nil {
+		panic(err)
+	}
+	if err := validateExistingRegularFile(s.accountFilePath); err != nil {
+		panic(err)
+	}
 	fileBytes, err := os.ReadFile(s.accountFilePath)
 	if err != nil {
-		log.Panicf("Could not load file for account %s: %v", s.userID, err)
+		panic(fmt.Errorf("load account file for %s: %w", s.userID, err))
 	}
 
 	var account Account
 	err = json.Unmarshal(fileBytes, &account)
 	if err != nil {
-		log.Panicf("Could not parse file for account %s: %v", s.userID, err)
+		panic(fmt.Errorf("parse account file for %s: %w", s.userID, err))
 	}
 
 	account.key = privateKey
@@ -137,13 +153,13 @@ func (s *AccountsStorage) LoadAccount(privateKey crypto.PrivateKey) *Account {
 	if account.Registration == nil || account.Registration.Body.Status == "" {
 		reg, err := tryRecoverRegistration(privateKey)
 		if err != nil {
-			log.Panicf("Could not load account for %s. Registration is nil: %#v", s.userID, err)
+			panic(fmt.Errorf("recover registration for account %s: %w", s.userID, err))
 		}
 
 		account.Registration = reg
 		err = s.Save(&account)
 		if err != nil {
-			log.Panicf("Could not save account for %s. Registration is nil: %#v", s.userID, err)
+			panic(fmt.Errorf("save recovered registration for account %s: %w", s.userID, err))
 		}
 	}
 
@@ -151,50 +167,84 @@ func (s *AccountsStorage) LoadAccount(privateKey crypto.PrivateKey) *Account {
 }
 
 func (s *AccountsStorage) GetPrivateKey(keyType certcrypto.KeyType) crypto.PrivateKey {
+	if err := s.validatePaths(); err != nil {
+		panic(err)
+	}
 	accKeyPath := filepath.Join(s.keysPath, s.userID+".key")
 
-	if _, err := os.Stat(accKeyPath); os.IsNotExist(err) {
+	if err := validateExistingRegularFile(accKeyPath); errors.Is(err, os.ErrNotExist) {
 		log.Printf("No key found for account %s. Generating a %s key.", s.userID, keyType)
 		s.createKeysFolder()
 
 		privateKey, err := generatePrivateKey(accKeyPath, keyType)
 		if err != nil {
-			log.Panicf("Could not generate RSA private account key for account %s: %v", s.userID, err)
+			panic(fmt.Errorf("generate private account key for %s: %w", s.userID, err))
 		}
 
 		log.Printf("Saved key to %s", accKeyPath)
 		return privateKey
+	} else if err != nil {
+		panic(err)
 	}
 
 	privateKey, err := loadPrivateKey(accKeyPath)
 	if err != nil {
-		log.Panicf("Could not load RSA private key from file %s: %v", accKeyPath, err)
+		panic(fmt.Errorf("load private account key for %s: %w", s.userID, err))
 	}
 
 	return privateKey
 }
 
 func (s *AccountsStorage) createKeysFolder() {
+	if err := s.validatePaths(); err != nil {
+		panic(err)
+	}
 	if err := createNonExistingFolder(s.keysPath); err != nil {
-		log.Panicf("Could not check/create directory for account %s: %v", s.userID, err)
+		panic(fmt.Errorf("check or create key directory for account %s: %w", s.userID, err))
 	}
 }
 
+func (s *AccountsStorage) validatePaths() error {
+	if s == nil {
+		return errors.New("account storage is nil")
+	}
+	if err := validateAccountEmail(s.userID); err != nil {
+		return err
+	}
+	for _, path := range []string{s.rootUserPath, s.keysPath, s.accountFilePath} {
+		if strings.TrimSpace(path) == "" {
+			return errors.New("account storage path is empty")
+		}
+		if err := rejectSymlinkPathComponents(path); err != nil {
+			return fmt.Errorf("validate account storage path: %w", err)
+		}
+	}
+	if err := recoverFileTransaction(filepath.Dir(s.accountFilePath)); err != nil {
+		return err
+	}
+	return recoverFileTransaction(s.keysPath)
+}
+
 func generatePrivateKey(file string, keyType certcrypto.KeyType) (crypto.PrivateKey, error) {
+	return generatePrivateKeyWithRename(file, keyType, nil)
+}
+
+func generatePrivateKeyWithRename(file string, keyType certcrypto.KeyType, renameFile func(string, string) error) (crypto.PrivateKey, error) {
 	privateKey, err := certcrypto.GeneratePrivateKey(keyType)
 	if err != nil {
 		return nil, err
 	}
 
-	certOut, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
-	if err != nil {
-		return nil, err
-	}
-	defer certOut.Close()
-
 	pemKey := certcrypto.PEMBlock(privateKey)
-	err = pem.Encode(certOut, pemKey)
-	if err != nil {
+	encoded := pem.EncodeToMemory(pemKey)
+	if len(encoded) == 0 {
+		return nil, errors.New("encode private account key")
+	}
+	if err := writeFileTransaction([]fileTransactionEntry{{
+		path: file,
+		data: encoded,
+		perm: filePerm,
+	}}, renameFile); err != nil {
 		return nil, err
 	}
 

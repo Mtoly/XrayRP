@@ -4,16 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
-
-	log "github.com/sirupsen/logrus"
 )
 
-var defaultPath string
+var errCertificateFilesMissing = errors.New("certificate files are missing")
 
 func New(certConf *CertConfig) (*LegoCMD, error) {
+	if certConf == nil {
+		return nil, errors.New("certificate config is nil")
+	}
 	// Set default path to configPath/cert
 	var p = ""
 	configPath := os.Getenv("XRAY_LOCATION_CONFIG")
@@ -25,10 +25,9 @@ func New(certConf *CertConfig) (*LegoCMD, error) {
 		p = "."
 	}
 
-	defaultPath = filepath.Join(p, "cert")
 	lego := &LegoCMD{
 		C:    certConf,
-		path: defaultPath,
+		path: filepath.Join(p, "cert"),
 	}
 
 	return lego, nil
@@ -42,47 +41,55 @@ func (l *LegoCMD) getCertConfig() *CertConfig {
 	return l.C
 }
 
+func (l *LegoCMD) validate() error {
+	if l == nil {
+		return errors.New("certificate client is nil")
+	}
+	if l.C == nil {
+		return errors.New("certificate config is nil")
+	}
+	if strings.TrimSpace(l.path) == "" {
+		return errors.New("certificate storage path is empty")
+	}
+	if err := rejectSymlinkPathComponents(filepath.Join(l.path, ".certificate-operation")); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAccountEmail(email string) error {
+	if strings.TrimSpace(email) != email {
+		return errors.New("ACME account email contains surrounding whitespace")
+	}
+	if email == "." || email == ".." ||
+		strings.ContainsAny(email, `:/\`) ||
+		strings.ContainsRune(email, '\x00') ||
+		filepath.IsAbs(email) ||
+		filepath.VolumeName(email) != "" {
+		return errors.New("ACME account email must not contain path syntax")
+	}
+	return nil
+}
+
 // DNSCert cert a domain using DNS API
 func (l *LegoCMD) DNSCert() (CertPath string, KeyPath string, err error) {
-	defer func() (string, string, error) {
-		// Handle any error
-		if r := recover(); r != nil {
-			switch x := r.(type) {
-			case string:
-				err = errors.New(x)
-			case error:
-				err = x
-			default:
-				err = errors.New("unknown panic")
-			}
-			return "", "", err
-		}
-		return CertPath, KeyPath, nil
-	}()
-
-	// Set Env for DNS configuration
-	// Only allow known DNS provider environment variable prefixes to prevent
-	// arbitrary environment variable injection (e.g., PATH, LD_PRELOAD).
-	for key, value := range l.C.DNSEnv {
-		envKey := strings.ToUpper(key)
-		if !isAllowedDNSEnvKey(envKey) {
-			log.Warnf("Skipping disallowed DNS env key: %s", envKey)
-			continue
-		}
-		os.Setenv(envKey, value)
-	}
-
-	// First check if the certificate exists
-	CertPath, KeyPath, err = checkCertFile(l.C.CertDomain)
-	if err == nil {
-		return CertPath, KeyPath, err
-	}
-
-	err = l.Run()
-	if err != nil {
+	if err := l.validate(); err != nil {
 		return "", "", err
 	}
-	CertPath, KeyPath, err = checkCertFile(l.C.CertDomain)
+	err = executeCertificateOperation(l.C.DNSEnv, func() error {
+		CertPath, KeyPath, err = checkCertFile(l.path, l.C.CertDomain)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errCertificateFilesMissing) {
+			return err
+		}
+		if err := l.run(); err != nil {
+			return err
+		}
+		CertPath, KeyPath, err = checkCertFile(l.path, l.C.CertDomain)
+		return err
+	})
 	if err != nil {
 		return "", "", err
 	}
@@ -91,70 +98,48 @@ func (l *LegoCMD) DNSCert() (CertPath string, KeyPath string, err error) {
 
 // HTTPCert cert a domain using http methods
 func (l *LegoCMD) HTTPCert() (CertPath string, KeyPath string, err error) {
-	defer func() (string, string, error) {
-		// Handle any error
-		if r := recover(); r != nil {
-			switch x := r.(type) {
-			case string:
-				err = errors.New(x)
-			case error:
-				err = x
-			default:
-				err = errors.New("unknown panic")
-			}
-			return "", "", err
+	if err := l.validate(); err != nil {
+		return "", "", err
+	}
+	err = executeCertificateOperation(nil, func() error {
+		CertPath, KeyPath, err = checkCertFile(l.path, l.C.CertDomain)
+		if err == nil {
+			return nil
 		}
-		return CertPath, KeyPath, nil
-	}()
-
-	// First check if the certificate exists
-	CertPath, KeyPath, err = checkCertFile(l.C.CertDomain)
-	if err == nil {
-		return CertPath, KeyPath, err
-	}
-
-	err = l.Run()
+		if !errors.Is(err, errCertificateFilesMissing) {
+			return err
+		}
+		if err := l.run(); err != nil {
+			return err
+		}
+		CertPath, KeyPath, err = checkCertFile(l.path, l.C.CertDomain)
+		return err
+	})
 	if err != nil {
 		return "", "", err
 	}
-
-	CertPath, KeyPath, err = checkCertFile(l.C.CertDomain)
-	if err != nil {
-		return "", "", err
-	}
-
 	return CertPath, KeyPath, nil
 }
 
 // RenewCert renew a domain cert
 func (l *LegoCMD) RenewCert() (CertPath string, KeyPath string, ok bool, err error) {
-	defer func() (string, string, bool, error) {
-		// Handle any error
-		if r := recover(); r != nil {
-			switch x := r.(type) {
-			case string:
-				err = errors.New(x)
-			case error:
-				err = x
-			default:
-				err = errors.New("unknown panic")
-			}
+	prepared, err := l.PrepareRenewal()
+	if err != nil {
+		return "", "", false, err
+	}
+	ok = prepared.Renewed()
+	if ok {
+		if err := prepared.Commit(); err != nil {
 			return "", "", false, err
 		}
-		return CertPath, KeyPath, ok, nil
-	}()
-
-	ok, err = l.Renew()
-	if err != nil {
-		return
+	} else if err := prepared.Rollback(); err != nil {
+		return "", "", false, err
 	}
-
-	CertPath, KeyPath, err = checkCertFile(l.C.CertDomain)
+	CertPath, KeyPath, err = checkCertFile(l.path, l.C.CertDomain)
 	if err != nil {
-		return
+		return "", "", false, err
 	}
-
-	return
+	return CertPath, KeyPath, ok, nil
 }
 
 // allowedDNSEnvPrefixes is a whitelist of environment variable prefixes
@@ -216,16 +201,35 @@ func isAllowedDNSEnvKey(key string) bool {
 	return false
 }
 
-func checkCertFile(domain string) (string, string, error) {
-	keyPath := path.Join(defaultPath, "certificates", fmt.Sprintf("%s.key", sanitizedDomain(domain)))
-	certPath := path.Join(defaultPath, "certificates", fmt.Sprintf("%s.crt", sanitizedDomain(domain)))
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		return "", "", fmt.Errorf("cert key failed: %s", domain)
+func checkCertFile(rootPath, domain string) (string, string, error) {
+	safeDomain, err := sanitizeDomain(domain)
+	if err != nil {
+		return "", "", err
 	}
-	if _, err := os.Stat(certPath); os.IsNotExist(err) {
-		return "", "", fmt.Errorf("cert cert failed: %s", domain)
+	keyPath := filepath.Join(rootPath, "certificates", fmt.Sprintf("%s.key", safeDomain))
+	certPath := filepath.Join(rootPath, "certificates", fmt.Sprintf("%s.crt", safeDomain))
+	if err := recoverFileTransaction(filepath.Dir(certPath)); err != nil {
+		return "", "", fmt.Errorf("recover certificate transaction for %s: %w", domain, err)
 	}
-	absKeyPath, _ := filepath.Abs(keyPath)
-	absCertPath, _ := filepath.Abs(certPath)
+	if err := validateExistingRegularFile(keyPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", fmt.Errorf("%w: certificate key for %s", errCertificateFilesMissing, domain)
+		}
+		return "", "", fmt.Errorf("inspect certificate key for %s: %w", domain, err)
+	}
+	if err := validateExistingRegularFile(certPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", fmt.Errorf("%w: certificate for %s", errCertificateFilesMissing, domain)
+		}
+		return "", "", fmt.Errorf("inspect certificate for %s: %w", domain, err)
+	}
+	absKeyPath, err := filepath.Abs(keyPath)
+	if err != nil {
+		return "", "", err
+	}
+	absCertPath, err := filepath.Abs(certPath)
+	if err != nil {
+		return "", "", err
+	}
 	return absCertPath, absKeyPath, nil
 }

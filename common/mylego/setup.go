@@ -1,10 +1,10 @@
 package mylego
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/challenge/dns01"
@@ -46,19 +46,14 @@ func newClient(acc registration.User, keyType certcrypto.KeyType) *lego.Client {
 
 	client, err := lego.NewClient(config)
 	if err != nil {
-		log.Panicf("Could not create client: %v", err)
+		panic(fmt.Errorf("create ACME client: %w", err))
 	}
 
 	return client
 }
 
 func createNonExistingFolder(path string) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return os.MkdirAll(path, 0o700)
-	} else if err != nil {
-		return err
-	}
-	return nil
+	return createDirectoryAllDurable(path, 0o700)
 }
 
 func setupChallenges(l *LegoCMD, client *lego.Client) {
@@ -66,24 +61,24 @@ func setupChallenges(l *LegoCMD, client *lego.Client) {
 	case "http":
 		err := client.Challenge.SetHTTP01Provider(http01.NewProviderServer("", ""))
 		if err != nil {
-			log.Panic(err)
+			panic(err)
 		}
 	case "tls":
 		err := client.Challenge.SetTLSALPN01Provider(tlsalpn01.NewProviderServer("", ""))
 		if err != nil {
-			log.Panic(err)
+			panic(err)
 		}
 	case "dns":
 		setupDNS(l.C.Provider, client)
 	default:
-		log.Panic("No challenge selected. You must specify at least one challenge: `http`, `tls`, `dns`.")
+		panic(errors.New("no challenge selected; expected http, tls, or dns"))
 	}
 }
 
 func setupDNS(p string, client *lego.Client) {
 	provider, err := dns.NewDNSChallengeProviderByName(p)
 	if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
 
 	err = client.Challenge.SetDNS01Provider(
@@ -91,6 +86,6 @@ func setupDNS(p string, client *lego.Client) {
 		dns01.CondOption(true, dns01.AddDNSTimeout(10*time.Second)),
 	)
 	if err != nil {
-		log.Panic(err)
+		panic(err)
 	}
 }

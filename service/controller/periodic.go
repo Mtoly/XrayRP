@@ -2,11 +2,12 @@ package controller
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common"
-	"github.com/xtls/xray-core/common/task"
+	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
 const (
@@ -24,19 +25,116 @@ type periodicRunner interface {
 }
 
 type controllerPeriodicTask struct {
-	tag      string
-	interval time.Duration
-	Periodic periodicRunner
+	tag                     string
+	interval                time.Duration
+	generation              uint64
+	predecessorsDone        <-chan struct{}
+	replacementOwnsPeriodic bool
+	Periodic                periodicRunner
 }
 
 type periodicTaskFactory func(interval time.Duration, execute func() error) periodicRunner
 
-func newControllerPeriodicTask(interval time.Duration, execute func() error) periodicRunner {
-	return &task.Periodic{
-		Interval: interval,
-		Execute:  execute,
-	}
+type joinablePeriodicRunner interface {
+	periodicRunner
+	Stop() error
+	Wait() error
 }
+
+type controllerManagedPeriodic struct {
+	mu              sync.Mutex
+	runner          joinablePeriodicRunner
+	closed          bool
+	started         bool
+	startInProgress bool
+	startDone       chan struct{}
+}
+
+func newControllerPeriodicTask(interval time.Duration, execute func() error) periodicRunner {
+	periodic := &controllerManagedPeriodic{}
+	periodic.runner = specialruntime.NewPeriodic(interval, func() error {
+		periodic.mu.Lock()
+		closed := periodic.closed
+		periodic.mu.Unlock()
+		if closed {
+			return nil
+		}
+		return execute()
+	})
+	return periodic
+}
+
+func (p *controllerManagedPeriodic) finishStart(done chan struct{}) {
+	p.mu.Lock()
+	p.startInProgress = false
+	p.started = true
+	close(done)
+	p.mu.Unlock()
+}
+
+func (p *controllerManagedPeriodic) isClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+func (p *controllerManagedPeriodic) beginStart() (chan struct{}, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.started || p.startInProgress {
+		return nil, false
+	}
+	p.startInProgress = true
+	p.startDone = make(chan struct{})
+	return p.startDone, true
+}
+
+func (p *controllerManagedPeriodic) Start() error {
+	done, ok := p.beginStart()
+	if !ok {
+		return nil
+	}
+	err := p.runner.Start()
+	if p.isClosed() {
+		err = errors.Join(err, p.runner.Stop())
+	}
+	p.finishStart(done)
+	return err
+}
+
+func (p *controllerManagedPeriodic) Stop() error {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	return p.runner.Stop()
+}
+
+func (p *controllerManagedPeriodic) Wait() error {
+	p.mu.Lock()
+	startDone := p.startDone
+	startInProgress := p.startInProgress
+	p.mu.Unlock()
+	if startInProgress {
+		<-startDone
+	}
+	return p.runner.Wait()
+}
+
+func (p *controllerManagedPeriodic) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	startDone := p.startDone
+	startInProgress := p.startInProgress
+	p.mu.Unlock()
+
+	stopErr := p.runner.Stop()
+	if startInProgress {
+		<-startDone
+	}
+	return errors.Join(stopErr, p.runner.Wait())
+}
+
+func (*controllerManagedPeriodic) startAsynchronously() {}
 
 func (c *Controller) periodicTaskFactory() periodicTaskFactory {
 	if c == nil || c.newPeriodicTask == nil {
@@ -45,16 +143,23 @@ func (c *Controller) periodicTaskFactory() periodicTaskFactory {
 	return c.newPeriodicTask
 }
 
-func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) {
+func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) error {
 	if periodic == nil {
+		return nil
+	}
+	err := periodic.Start()
+	c.logPeriodicTaskError(tag, err)
+	return err
+}
+
+func (c *Controller) logPeriodicTaskError(tag string, err error) {
+	if err == nil || c.logger == nil {
 		return
 	}
-	if err := periodic.Start(); err != nil && c.logger != nil {
-		if c.showErrorDetails() {
-			c.logger.WithField("task", tag).Warn(err)
-		} else {
-			c.logger.WithField("task", tag).Warn("periodic task failed; error details omitted because they may contain credentials")
-		}
+	if c.showErrorDetails() {
+		c.logger.WithField("task", tag).Warn(err)
+	} else {
+		c.logger.WithField("task", tag).Warn("periodic task failed; error details omitted because they may contain credentials")
 	}
 }
 
@@ -62,23 +167,81 @@ func (c *Controller) showErrorDetails() bool {
 	return common.ShowErrorDetails() || c != nil && c.config != nil && c.config.ShowErrorDetails
 }
 
-func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) {
-	if _, ok := periodic.(*task.Periodic); ok {
-		go c.startPeriodicTask(tag, periodic)
+func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) (error, bool) {
+	if _, ok := periodic.(interface{ startAsynchronously() }); ok {
+		c.periodicJoinWG.Add(1)
+		go func() {
+			launchDone := false
+			defer func() {
+				if !launchDone {
+					c.periodicJoinWG.Done()
+				}
+			}()
+			err := periodic.Start()
+			if err != nil {
+				c.periodicMu.Lock()
+				c.periodicAsyncErrs = append(c.periodicAsyncErrs, err)
+				c.periodicMu.Unlock()
+			}
+			c.periodicJoinWG.Done()
+			launchDone = true
+			c.logPeriodicTaskError(tag, err)
+			c.periodicMu.Lock()
+			shouldLogStart := !c.periodicClosed
+			c.periodicMu.Unlock()
+			if shouldLogStart && c.logger != nil {
+				c.logger.Printf("Start %s periodic task", tag)
+			}
+		}()
+		return nil, true
+	}
+	return periodic.Start(), false
+}
+
+func (c *Controller) recordPeriodicReplacementError(err error) error {
+	if err == nil {
+		return nil
+	}
+	c.periodicMu.Lock()
+	if c.periodicClosed {
+		c.periodicAsyncErrs = append(c.periodicAsyncErrs, err)
+	}
+	c.periodicMu.Unlock()
+	return err
+}
+
+func (c *Controller) launchPeriodicCleanup(cleanup func() error) {
+	if cleanup == nil {
 		return
 	}
-	c.startPeriodicTask(tag, periodic)
+	c.periodicMu.Lock()
+	c.periodicJoinWG.Add(1)
+	c.periodicMu.Unlock()
+	go func() {
+		defer c.periodicJoinWG.Done()
+		if err := cleanup(); err != nil {
+			c.periodicMu.Lock()
+			c.periodicAsyncErrs = append(c.periodicAsyncErrs, err)
+			c.periodicMu.Unlock()
+		}
+	}()
 }
 
 func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Duration, execute func() error) error {
 	if interval <= 0 || execute == nil {
 		return nil
 	}
-	periodic := c.periodicTaskFactory()(interval, execute)
-	if periodic == nil {
+
+	c.periodicMu.Lock()
+	if c.periodicClosed {
+		c.periodicMu.Unlock()
 		return nil
 	}
 
+	var old periodicRunner
+	var inheritedPredecessorsDone <-chan struct{}
+	var observedGeneration uint64
+	var observedInterval time.Duration
 	c.stateMu.Lock()
 	for i := range c.tasks {
 		if c.tasks[i].tag != tag {
@@ -86,53 +249,294 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 		}
 		if c.tasks[i].interval == interval {
 			c.stateMu.Unlock()
+			c.periodicMu.Unlock()
 			return nil
 		}
-		old := c.tasks[i].Periodic
-		c.tasks[i].interval = interval
-		c.tasks[i].Periodic = periodic
-		c.stateMu.Unlock()
-		if old != nil {
-			if err := old.Close(); err != nil {
-				return err
-			}
+		old = c.tasks[i].Periodic
+		inheritedPredecessorsDone = c.tasks[i].predecessorsDone
+		observedGeneration = c.tasks[i].generation
+		observedInterval = c.tasks[i].interval
+		break
+	}
+	c.stateMu.Unlock()
+	c.periodicJoinWG.Add(1)
+	c.periodicMu.Unlock()
+	replacementTransactionDone := false
+	defer func() {
+		if !replacementTransactionDone {
+			c.periodicJoinWG.Done()
 		}
-		if c.logger != nil {
-			c.logger.Printf("Start %s periodic task", tag)
-		}
-		c.launchPeriodicTask(tag, periodic)
+	}()
+
+	periodic := c.periodicTaskFactory()(interval, execute)
+	if periodic == nil {
 		return nil
 	}
-	c.tasks = append(c.tasks, periodicTask{tag: tag, interval: interval, Periodic: periodic})
+
+	c.periodicMu.Lock()
+	if c.periodicClosed {
+		c.periodicMu.Unlock()
+		return c.recordPeriodicReplacementError(periodic.Close())
+	}
+
+	replacementIndex := -1
+	stateUnchanged := old == nil
+	c.stateMu.Lock()
+	for i := range c.tasks {
+		if c.tasks[i].tag != tag {
+			continue
+		}
+		replacementIndex = i
+		stateUnchanged = old != nil &&
+			c.tasks[i].generation == observedGeneration &&
+			c.tasks[i].interval == observedInterval &&
+			!c.tasks[i].replacementOwnsPeriodic
+		if stateUnchanged {
+			c.tasks[i].replacementOwnsPeriodic = true
+		}
+		break
+	}
+	c.stateMu.Unlock()
+	c.periodicMu.Unlock()
+	if !stateUnchanged {
+		return c.recordPeriodicReplacementError(periodic.Close())
+	}
+
+	releaseReplacementOwnership := func() bool {
+		c.periodicMu.Lock()
+		closed := c.periodicClosed
+		if !closed && old != nil {
+			c.stateMu.Lock()
+			for i := range c.tasks {
+				if c.tasks[i].tag == tag &&
+					c.tasks[i].generation == observedGeneration &&
+					c.tasks[i].interval == observedInterval {
+					c.tasks[i].replacementOwnsPeriodic = false
+					break
+				}
+			}
+			c.stateMu.Unlock()
+		}
+		c.periodicMu.Unlock()
+		return closed
+	}
+
+	var stoppedOld joinablePeriodicRunner
+	if old != nil {
+		if joinable, ok := old.(joinablePeriodicRunner); ok {
+			if err := joinable.Stop(); err != nil {
+				if releaseReplacementOwnership() {
+					c.launchPeriodicCleanup(old.Close)
+				}
+				return c.recordPeriodicReplacementError(errors.Join(err, periodic.Close()))
+			}
+			stoppedOld = joinable
+		} else if err := old.Close(); err != nil {
+			releaseReplacementOwnership()
+			return c.recordPeriodicReplacementError(errors.Join(err, periodic.Close()))
+		}
+	}
+
+	c.periodicMu.Lock()
+	if c.periodicClosed {
+		c.periodicMu.Unlock()
+		if stoppedOld != nil {
+			c.launchPeriodicCleanup(stoppedOld.Wait)
+		}
+		return c.recordPeriodicReplacementError(periodic.Close())
+	}
+
+	replacementIndex = -1
+	stateUnchanged = old == nil
+	c.stateMu.Lock()
+	for i := range c.tasks {
+		if c.tasks[i].tag != tag {
+			continue
+		}
+		replacementIndex = i
+		stateUnchanged = old != nil &&
+			c.tasks[i].generation == observedGeneration &&
+			c.tasks[i].interval == observedInterval &&
+			c.tasks[i].replacementOwnsPeriodic
+		break
+	}
+	if !stateUnchanged {
+		c.stateMu.Unlock()
+		c.periodicMu.Unlock()
+		if stoppedOld != nil {
+			c.launchPeriodicCleanup(stoppedOld.Wait)
+		}
+		return c.recordPeriodicReplacementError(periodic.Close())
+	}
+
+	c.periodicGeneration++
+	generation := c.periodicGeneration
+	var predecessorsDone chan struct{}
+	if stoppedOld != nil || inheritedPredecessorsDone != nil {
+		predecessorsDone = make(chan struct{})
+	}
+	if replacementIndex >= 0 {
+		c.tasks[replacementIndex].interval = interval
+		c.tasks[replacementIndex].Periodic = periodic
+		c.tasks[replacementIndex].generation = generation
+		c.tasks[replacementIndex].predecessorsDone = predecessorsDone
+		c.tasks[replacementIndex].replacementOwnsPeriodic = false
+	} else {
+		c.tasks = append(c.tasks, periodicTask{
+			tag:              tag,
+			interval:         interval,
+			generation:       generation,
+			predecessorsDone: predecessorsDone,
+			Periodic:         periodic,
+		})
+	}
 	c.stateMu.Unlock()
 
-	if c.logger != nil {
-		c.logger.Printf("Start %s periodic task", tag)
+	if predecessorsDone != nil {
+		c.periodicJoinWG.Add(1)
+		go c.joinAndLaunchPeriodicReplacement(
+			tag,
+			generation,
+			inheritedPredecessorsDone,
+			stoppedOld,
+			predecessorsDone,
+			periodic,
+		)
 	}
-	c.launchPeriodicTask(tag, periodic)
+	c.periodicMu.Unlock()
+
+	var startErr error
+	startedAsynchronously := false
+	if predecessorsDone == nil {
+		startErr, startedAsynchronously = c.launchPeriodicTask(tag, periodic)
+	}
+	c.periodicJoinWG.Done()
+	replacementTransactionDone = true
+
+	if !startedAsynchronously {
+		c.logPeriodicTaskError(tag, startErr)
+		if predecessorsDone == nil && c.logger != nil {
+			c.logger.Printf("Start %s periodic task", tag)
+		}
+	}
 	return nil
 }
 
+func (c *Controller) joinAndLaunchPeriodicReplacement(
+	tag string,
+	generation uint64,
+	inheritedPredecessorsDone <-chan struct{},
+	old joinablePeriodicRunner,
+	predecessorsDone chan<- struct{},
+	replacement periodicRunner,
+) {
+	replacementJoinDone := false
+	defer func() {
+		if !replacementJoinDone {
+			c.periodicJoinWG.Done()
+		}
+	}()
+	var waitErr error
+	if old != nil {
+		waitErr = old.Wait()
+	}
+	if inheritedPredecessorsDone != nil {
+		<-inheritedPredecessorsDone
+	}
+	close(predecessorsDone)
+
+	c.periodicMu.Lock()
+	if waitErr != nil {
+		c.periodicAsyncErrs = append(c.periodicAsyncErrs, waitErr)
+	}
+	shouldStart := !c.periodicClosed
+	if shouldStart {
+		c.stateMu.RLock()
+		shouldStart = false
+		for i := range c.tasks {
+			if c.tasks[i].tag == tag && c.tasks[i].generation == generation {
+				shouldStart = true
+				break
+			}
+		}
+		c.stateMu.RUnlock()
+	}
+	c.periodicMu.Unlock()
+
+	var startErr error
+	startedAsynchronously := false
+	if shouldStart {
+		startErr, startedAsynchronously = c.launchPeriodicTask(tag, replacement)
+	}
+	c.periodicJoinWG.Done()
+	replacementJoinDone = true
+	if !startedAsynchronously {
+		c.logPeriodicTaskError(tag, startErr)
+		if shouldStart && c.logger != nil {
+			c.logger.Printf("Start %s periodic task", tag)
+		}
+	}
+}
+
 func (c *Controller) closePeriodicTasks() error {
+	c.periodicMu.Lock()
+	if c.periodicClosed {
+		done := c.periodicCloseDone
+		c.periodicMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		c.periodicMu.Lock()
+		err := c.periodicCloseErr
+		c.periodicMu.Unlock()
+		return err
+	}
+	c.periodicClosed = true
+	done := make(chan struct{})
+	c.periodicCloseDone = done
+
 	c.stateMu.Lock()
-	tasks := make([]periodicTask, len(c.tasks))
-	copy(tasks, c.tasks)
+	tasks := make([]periodicTask, 0, len(c.tasks))
+	for i := range c.tasks {
+		if c.tasks[i].replacementOwnsPeriodic {
+			continue
+		}
+		tasks = append(tasks, c.tasks[i])
+	}
 	c.tasks = nil
 	c.stateMu.Unlock()
+	c.periodicMu.Unlock()
 
+	type closeFailure struct {
+		tag string
+		err error
+	}
 	var errs []error
+	var closeFailures []closeFailure
 	for i := range tasks {
 		if tasks[i].Periodic == nil {
 			continue
 		}
 		if err := tasks[i].Periodic.Close(); err != nil {
-			if c.logger != nil {
-				c.logger.Errorf("%s periodic task close failed: %s", tasks[i].tag, err)
-			}
 			errs = append(errs, err)
+			closeFailures = append(closeFailures, closeFailure{tag: tasks[i].tag, err: err})
 		}
 	}
-	return errors.Join(errs...)
+	c.periodicJoinWG.Wait()
+
+	c.periodicMu.Lock()
+	errs = append(errs, c.periodicAsyncErrs...)
+	c.periodicAsyncErrs = nil
+	closeErr := errors.Join(errs...)
+	c.periodicCloseErr = closeErr
+	close(done)
+	c.periodicMu.Unlock()
+	if c.logger != nil {
+		for _, failure := range closeFailures {
+			c.logger.Errorf("%s periodic task close failed: %s", failure.tag, failure.err)
+		}
+	}
+	return closeErr
 }
 
 func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error {
@@ -145,7 +549,7 @@ func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error 
 		return err
 	}
 	if nodeInfo != nil && nodeInfo.EnableTLS && c.config.EnableREALITY == false {
-		if err := c.startOrReplacePeriodicTask(periodicTaskCertMonitor, time.Duration(c.config.UpdatePeriodic)*time.Second*60, c.certMonitor); err != nil {
+		if err := c.startOrReplacePeriodicTask(periodicTaskCertMonitor, time.Duration(c.config.UpdatePeriodic)*time.Second*60, c.certMonitorPeriodic); err != nil {
 			return err
 		}
 	}

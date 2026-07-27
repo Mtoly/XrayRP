@@ -43,11 +43,29 @@ type LimitInfo struct {
 	originSpeedLimit  uint64
 }
 
+type preparedCertificateRenewal interface {
+	Renewed() bool
+	CertificatePEM() []byte
+	PrivateKeyPEM() []byte
+	Commit() error
+	Rollback() error
+}
+
+type prepareCertificateRenewalFunc func(*mylego.CertConfig) (preparedCertificateRenewal, error)
+
 type Controller struct {
 	server                 *core.Instance
 	config                 *Config
 	clientInfo             api.ClientInfo
 	apiClient              PanelClient
+	reloadMu               sync.Mutex
+	periodicMu             sync.Mutex
+	periodicJoinWG         sync.WaitGroup
+	periodicGeneration     uint64
+	periodicAsyncErrs      []error
+	periodicClosed         bool
+	periodicCloseDone      chan struct{}
+	periodicCloseErr       error
 	stateMu                sync.RWMutex
 	runtimeState           nodeRuntimeState
 	syncApplyHooks         syncApplyHooks
@@ -66,6 +84,7 @@ type Controller struct {
 	wsRuntime              wsRuntimeLifecycle
 	deviceReportState      *deviceReportState
 	syncExecutionState     *syncExecutionState
+	prepareRenewal         prepareCertificateRenewalFunc
 	newPeriodicTask        periodicTaskFactory
 	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
 	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
@@ -121,6 +140,7 @@ func New(server *core.Instance, apiClient PanelClient, config *Config, panelType
 	}
 	controller.deviceReportState = newDeviceReportState()
 	controller.syncExecutionState = newSyncExecutionState()
+	controller.prepareRenewal = defaultControllerPrepareCertificateRenewal
 	controller.syncCoordinatorFactory = func(executor syncActionExecutor) syncCoordinatorLifecycle {
 		return newSyncCoordinatorWithResultHandling(executor, controller.syncExecutionState, controller.logSyncExecutionResult)
 	}
@@ -508,7 +528,7 @@ func (c *Controller) Start() error {
 	c.setNodeState(newNodeInfo, tag)
 
 	// Add new tag
-	err = hooks.runtime.addTag(newNodeInfo, tag)
+	err = hooks.runtime.addTag(newNodeInfo, tag, c.config)
 	if err != nil {
 		c.logger.Panic(err)
 		return err
@@ -522,7 +542,7 @@ func (c *Controller) Start() error {
 	// sync controller userList
 	c.setUserList(userInfo)
 
-	err = hooks.runtime.addUsers(userInfo, newNodeInfo, tag)
+	err = hooks.runtime.addUsers(userInfo, newNodeInfo, tag, c.config)
 	if err != nil {
 		return err
 	}
@@ -580,8 +600,9 @@ func (c *Controller) Start() error {
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	var closeErrors []error
 	if err := c.closePeriodicTasks(); err != nil {
-		return err
+		closeErrors = append(closeErrors, err)
 	}
 
 	if c.wsRuntime != nil {
@@ -593,7 +614,7 @@ func (c *Controller) Close() error {
 		c.syncCoordinator = nil
 	}
 
-	return nil
+	return errors.Join(closeErrors...)
 }
 
 func (c *Controller) nodeInfoMonitor() error {
@@ -623,6 +644,10 @@ func (c *Controller) removeOldTag(oldTag string) (err error) {
 }
 
 func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error) {
+	return c.addNewTagWithConfig(newNodeInfo, tag, c.config)
+}
+
+func (c *Controller) addNewTagWithConfig(newNodeInfo *api.NodeInfo, tag string, config *Config) (err error) {
 	node := normalizeNodeInfo(newNodeInfo)
 	inbound := node.inboundView()
 	outbound := node.outboundView()
@@ -633,7 +658,7 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 	// Skip here — the inbound will be created by rebuildInboundWithUsers() in addNewUser().
 	if nodeType == "Socks" || nodeType == "HTTP" {
 		// Still need the outbound for routing
-		outBoundConfig, err := buildOutbound(c.config, outbound, tag)
+		outBoundConfig, err := buildOutbound(config, outbound, tag)
 		if err != nil {
 			return err
 		}
@@ -641,7 +666,7 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 	}
 
 	if nodeType != "Shadowsocks-Plugin" {
-		inboundConfig, err := buildInbound(c.config, inbound, tag)
+		inboundConfig, err := buildInbound(config, inbound, tag)
 		if err != nil {
 			return err
 		}
@@ -650,7 +675,7 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 
 			return err
 		}
-		outBoundConfig, err := buildOutbound(c.config, outbound, tag)
+		outBoundConfig, err := buildOutbound(config, outbound, tag)
 		if err != nil {
 
 			return err
@@ -662,16 +687,16 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 		}
 
 	} else {
-		return c.addInboundForSSPlugin(node, tag)
+		return c.addInboundForSSPlugin(node, tag, config)
 	}
 	return nil
 }
 
-func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err error) {
+func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string, config *Config) (err error) {
 	// Shadowsocks-Plugin require a separate inbound for other TransportProtocol likes: ws, grpc
 	views := node.shadowsocksPluginViews()
 	// Add a regular Shadowsocks inbound and outbound
-	inboundConfig, err := buildInbound(c.config, views.regularInbound, tag)
+	inboundConfig, err := buildInbound(config, views.regularInbound, tag)
 	if err != nil {
 		return err
 	}
@@ -680,7 +705,7 @@ func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err erro
 
 		return err
 	}
-	outBoundConfig, err := buildOutbound(c.config, views.regularOutbound, tag)
+	outBoundConfig, err := buildOutbound(config, views.regularOutbound, tag)
 	if err != nil {
 
 		return err
@@ -692,7 +717,7 @@ func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err erro
 	}
 	// Add an inbound for upper streaming protocol
 	dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
-	inboundConfig, err = buildInbound(c.config, views.bridgeInbound, dokodemoTag)
+	inboundConfig, err = buildInbound(config, views.bridgeInbound, dokodemoTag)
 	if err != nil {
 		return err
 	}
@@ -701,7 +726,7 @@ func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err erro
 
 		return err
 	}
-	outBoundConfig, err = buildOutbound(c.config, views.bridgeOutbound, dokodemoTag)
+	outBoundConfig, err = buildOutbound(config, views.bridgeOutbound, dokodemoTag)
 	if err != nil {
 
 		return err
@@ -717,11 +742,15 @@ func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string) (err erro
 // rebuildInboundWithUsers rebuilds the socks/http inbound with all users embedded.
 // This is needed because socks/http inbounds don't support proxy.UserManager.
 func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) error {
+	return c.rebuildInboundWithUsersWithConfig(userInfo, nodeInfo, tag, c.config)
+}
+
+func (c *Controller) rebuildInboundWithUsersWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
 	// Remove existing inbound if present (ignore errors for first-time setup)
 	_ = c.removeInbound(tag)
 
 	// Build inbound with all users
-	inboundConfig, err := buildInboundWithUsers(c.config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
+	inboundConfig, err := buildInboundWithUsers(config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
 	if err != nil {
 		return err
 	}
@@ -735,11 +764,15 @@ func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo 
 }
 
 func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (err error) {
+	return c.addNewUserWithConfig(userInfo, nodeInfo, tag, c.config)
+}
+
+func (c *Controller) addNewUserWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) (err error) {
 	node := normalizeNodeInfo(nodeInfo).userView()
 
 	// Socks/HTTP don't support proxy.UserManager — rebuild entire inbound with users embedded
 	if node.nodeType == "Socks" || node.nodeType == "HTTP" {
-		return c.rebuildInboundWithUsers(userInfo, nodeInfo, tag)
+		return c.rebuildInboundWithUsersWithConfig(userInfo, nodeInfo, tag, config)
 	}
 
 	users := make([]*protocol.User, 0)
@@ -1017,20 +1050,110 @@ func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error 
 
 // Check Cert
 func (c *Controller) certMonitor() error {
-	currentNodeInfo, _, _ := c.getStateSnapshot()
-	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false && c.config.CertConfig != nil {
-		switch c.config.CertConfig.CertMode {
-		case "dns", "http", "tls":
-			lego, err := mylego.New(c.config.CertConfig)
-			if err != nil {
-				c.logger.Print(err)
-			}
-			// Xray-core supports the OcspStapling certification hot renew
-			_, _, _, err = lego.RenewCert()
-			if err != nil {
-				c.logger.Print(err)
+	if c == nil {
+		return nil
+	}
+	c.reloadMu.Lock()
+	defer c.reloadMu.Unlock()
+
+	return c.renewCertificateIfNeeded()
+}
+
+func (c *Controller) certMonitorPeriodic() error {
+	if err := c.certMonitor(); err != nil {
+		if c.logger != nil {
+			if c.showErrorDetails() {
+				c.logger.WithError(err).Warn("certificate renewal failed")
+			} else {
+				c.logger.Warn("certificate renewal failed; error details omitted because they may contain credentials")
 			}
 		}
 	}
 	return nil
+}
+
+func (c *Controller) renewCertificateIfNeeded() (err error) {
+	if c == nil || c.config == nil {
+		return nil
+	}
+	currentNodeInfo, currentTag, currentUsers := c.getStateSnapshot()
+	if currentNodeInfo != nil && currentNodeInfo.EnableTLS && c.config.EnableREALITY == false && c.config.CertConfig != nil {
+		switch c.config.CertConfig.CertMode {
+		case "dns", "http", "tls":
+			prepare := c.prepareRenewal
+			if prepare == nil {
+				prepare = defaultControllerPrepareCertificateRenewal
+			}
+			var renewal preparedCertificateRenewal
+			renewal, err = prepare(c.config.CertConfig)
+			if err != nil {
+				return err
+			}
+			if renewal == nil {
+				return errors.New("certificate renewal preparation returned nil")
+			}
+			defer func() {
+				panicErr := certificateRenewalPanicError(recover())
+				err = errors.Join(err, panicErr, rollbackPreparedCertificateRenewal(renewal))
+			}()
+			if !renewal.Renewed() {
+				return renewal.Rollback()
+			}
+			if currentTag == "" {
+				return errors.Join(
+					errors.New("cannot replace certificate runtime without an applied node tag"),
+					renewal.Rollback(),
+				)
+			}
+			certificatePEM := renewal.CertificatePEM()
+			privateKeyPEM := renewal.PrivateKeyPEM()
+			if len(certificatePEM) == 0 || len(privateKeyPEM) == 0 {
+				return errors.Join(
+					errors.New("prepared certificate renewal is missing certificate or private key PEM"),
+					renewal.Rollback(),
+				)
+			}
+
+			appliedConfig := cloneControllerConfig(c.config)
+			candidateConfig := cloneControllerConfig(c.config)
+			candidateConfig.CertConfig.CertMode = "content"
+			candidateConfig.CertConfig.CertFile = ""
+			candidateConfig.CertConfig.KeyFile = ""
+			candidateConfig.CertConfig.CertContent = string(certificatePEM)
+			candidateConfig.CertConfig.KeyContent = string(privateKeyPEM)
+			return newNodeRuntimeStateApplyModule(c).replaceCertificateRuntime(
+				currentNodeInfo,
+				currentTag,
+				currentUsers,
+				appliedConfig,
+				candidateConfig,
+				renewal,
+			)
+		}
+	}
+	return nil
+}
+
+func rollbackPreparedCertificateRenewal(renewal preparedCertificateRenewal) (err error) {
+	if renewal == nil {
+		return nil
+	}
+	defer func() {
+		err = errors.Join(err, certificateRenewalPanicError(recover()))
+	}()
+	return renewal.Rollback()
+}
+
+func certificateRenewalPanicError(value any) error {
+	if value == nil {
+		return nil
+	}
+	if err, ok := value.(error); ok {
+		return fmt.Errorf("certificate renewal transaction panicked: %w", err)
+	}
+	return fmt.Errorf("certificate renewal transaction panicked: %v", value)
+}
+
+func defaultControllerPrepareCertificateRenewal(certConfig *mylego.CertConfig) (preparedCertificateRenewal, error) {
+	return mylego.PrepareRenewal(certConfig)
 }

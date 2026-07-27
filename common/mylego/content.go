@@ -23,10 +23,13 @@ func ContentCert(certConfig *CertConfig) (string, string, error) {
 	certFile := filepath.Join(certDir, fileBase+".crt")
 	keyFile := filepath.Join(certDir, fileBase+".key")
 
-	if err := os.WriteFile(certFile, []byte(certConfig.CertContent), filePerm); err != nil {
-		return "", "", err
-	}
-	if err := os.WriteFile(keyFile, []byte(certConfig.KeyContent), filePerm); err != nil {
+	err = executeCertificateOperation(nil, func() error {
+		return writeFileTransaction([]fileTransactionEntry{
+			{path: certFile, data: []byte(certConfig.CertContent), perm: filePerm},
+			{path: keyFile, data: []byte(certConfig.KeyContent), perm: filePerm},
+		}, nil)
+	})
+	if err != nil {
 		return "", "", err
 	}
 	return certFile, keyFile, nil
@@ -43,7 +46,10 @@ func panelContentCertDir() (string, error) {
 		}
 	}
 	certDir := filepath.Join(basePath, "cert", "panel")
-	if err := os.MkdirAll(certDir, 0o700); err != nil {
+	if err := rejectSymlinkPathComponents(filepath.Join(certDir, ".panel-certificate")); err != nil {
+		return "", err
+	}
+	if err := createDirectoryAllDurable(certDir, 0o700); err != nil {
 		return "", err
 	}
 	return certDir, nil

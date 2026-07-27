@@ -46,12 +46,8 @@ func defaultCloseRuntime(runtime runtimeServer) error {
 	return runtime.Close()
 }
 
-func defaultRenewCertificate(certConfig *mylego.CertConfig) (string, string, bool, error) {
-	lego, err := mylego.New(certConfig)
-	if err != nil {
-		return "", "", false, err
-	}
-	return lego.RenewCert()
+func defaultPrepareCertificateRenewal(certConfig *mylego.CertConfig) (preparedCertificateRenewal, error) {
+	return mylego.PrepareRenewal(certConfig)
 }
 
 // New creates a new Hysteria2 service bound to a SSPanel node.
@@ -68,7 +64,7 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		runtimeServerFactory: defaultRuntimeServerFactory,
 		serveRuntime:         defaultServeRuntime,
 		closeRuntime:         defaultCloseRuntime,
-		renewCertificate:     defaultRenewCertificate,
+		prepareRenewal:       defaultPrepareCertificateRenewal,
 		taskFactory:          defaultTaskFactory,
 		serveHandshake:       defaultServeHandshake,
 		logger:               logger,
@@ -210,7 +206,7 @@ func (h *Hysteria2Service) Start() (err error) {
 	tasks.Add(factory(tag, interval, h.userMonitor))
 	tasks.Add(factory("node monitor", interval, h.nodeMonitor))
 	if nodeInfo.EnableTLS {
-		tasks.Add(factory("cert monitor", interval*60, h.certMonitor))
+		tasks.Add(factory("cert monitor", interval*60, h.certMonitorPeriodic))
 	}
 	startupShutdown := specialruntime.RuntimeShutdown{
 		Stop: func() error {
@@ -341,6 +337,15 @@ func (h *Hysteria2Service) reloadNode(nodeInfo *api.NodeInfo) error {
 }
 
 func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
+	return h.reloadNodeWithCertificateLocked(nodeInfo, nil)
+}
+
+func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
+	if renewal != nil {
+		defer func() {
+			err = errors.Join(err, renewal.Rollback())
+		}()
+	}
 	if nodeInfo == nil {
 		return nil
 	}
@@ -356,12 +361,19 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	if h.config == nil || h.config.CertConfig == nil {
 		return errors.New("CertConfig is required for Hysteria2")
 	}
+	if renewal != nil && (len(renewal.CertificatePEM()) == 0 || len(renewal.PrivateKeyPEM()) == 0) {
+		return errors.New("prepared certificate renewal is missing certificate or private key PEM")
+	}
 
 	candidateNode := *nodeInfo
 	candidateRules := buildPortHopRulesFromNode(&candidateNode)
 
 	h.lifecycleMu.Lock()
-	if h.closed || h.state != stateRunning || h.server == nil || h.nodeInfo == nil {
+	expectedState := stateRunning
+	if renewal != nil {
+		expectedState = stateReloading
+	}
+	if h.closed || h.state != expectedState || h.server == nil || h.nodeInfo == nil {
 		state := h.state
 		h.lifecycleMu.Unlock()
 		return fmt.Errorf("Hysteria2 service cannot reload from state %d", state)
@@ -378,8 +390,10 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 
 	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
 	candidateSpec := serverBuildSpec{
-		nodeInfo:   &candidateNode,
-		certConfig: candidateCertConfig,
+		nodeInfo:       &candidateNode,
+		certConfig:     candidateCertConfig,
+		certificatePEM: certificatePEM(renewal),
+		privateKeyPEM:  privateKeyPEM(renewal),
 	}
 
 	closeRuntime := h.closeRuntime
@@ -391,7 +405,6 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	var (
 		candidate   reloadRuntime
 		oldCloseErr error
-		err         error
 	)
 	if sameEndpoint {
 		oldCloseErr = closeRuntime(oldRuntime)
@@ -409,7 +422,8 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 			h.finishExistingReload(stateRunning, nil)
 			return err
 		}
-		reloadErr := errors.Join(oldCloseErr, err)
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		reloadErr := errors.Join(oldCloseErr, err, rollbackErr)
 		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
 			nodeInfo:   oldNodeInfo,
 			certConfig: oldCertConfig,
@@ -429,6 +443,7 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	}
 	rulesRestored, ruleErr := h.replacePortHopRulesLocked(candidateRules)
 	if ruleErr != nil {
+		rollbackErr := rollbackCertificateRenewal(renewal)
 		candidate.authGate.resolve(false)
 		cleanupErr := closeRuntime(candidate.runtime)
 		h.waitRuntime(candidate.serve.done, nil)
@@ -437,7 +452,7 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 			certConfig: oldCertConfig,
 		})
 		if restoreErr != nil {
-			joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, restoreErr)
+			joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, rollbackErr, restoreErr)
 			restoredRules := oldRules
 			if !rulesRestored {
 				restoredRules = nil
@@ -445,7 +460,7 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, restoredRules, nil, nil, stateFailed, joined)
 			return joined
 		}
-		joined := errors.Join(oldCloseErr, ruleErr, cleanupErr)
+		joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, rollbackErr)
 		if !rulesRestored {
 			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, nil, restored.serve, restored.authGate, stateFailed, joined)
 			return joined
@@ -453,9 +468,56 @@ func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, stateRunning, nil)
 		return joined
 	}
+
+	if renewal != nil {
+		if commitErr := renewal.Commit(); commitErr != nil {
+			candidate.authGate.resolve(false)
+			cleanupErr := closeRuntime(candidate.runtime)
+			h.waitRuntime(candidate.serve.done, nil)
+			_, rulesErr := h.replacePortHopRulesLocked(oldRules)
+			actualRules := append([]portHopRule(nil), h.portHopRules...)
+			restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
+				nodeInfo:   oldNodeInfo,
+				certConfig: oldCertConfig,
+			})
+			joined := errors.Join(oldCloseErr, commitErr, cleanupErr, rulesErr, restoreErr)
+			if restoreErr != nil {
+				h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, stateFailed, joined)
+				return joined
+			}
+			if rulesErr != nil {
+				h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, stateFailed, joined)
+				return joined
+			}
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, stateRunning, nil)
+			return joined
+		}
+	}
+
 	h.finishReload(candidate.runtime, &candidateNode, oldTag, candidateCertConfig, candidateRules, candidate.serve, candidate.authGate, stateRunning, nil)
 	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, candidateNode.Port)
 	return oldCloseErr
+}
+
+func certificatePEM(renewal preparedCertificateRenewal) []byte {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.CertificatePEM()
+}
+
+func privateKeyPEM(renewal preparedCertificateRenewal) []byte {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.PrivateKeyPEM()
+}
+
+func rollbackCertificateRenewal(renewal preparedCertificateRenewal) error {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.Rollback()
 }
 
 func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {

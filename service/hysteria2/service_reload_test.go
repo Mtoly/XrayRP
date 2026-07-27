@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"bytes"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,45 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 	"golang.org/x/time/rate"
 )
+
+type fakePreparedRenewal struct {
+	renewed       bool
+	certificate   []byte
+	privateKey    []byte
+	commitErr     error
+	rollbackErr   error
+	commitCalls   int
+	rollbackCalls int
+	closed        bool
+	onCommit      func()
+	onRollback    func()
+}
+
+func (r *fakePreparedRenewal) Renewed() bool          { return r.renewed }
+func (r *fakePreparedRenewal) CertificatePEM() []byte { return append([]byte(nil), r.certificate...) }
+func (r *fakePreparedRenewal) PrivateKeyPEM() []byte  { return append([]byte(nil), r.privateKey...) }
+func (r *fakePreparedRenewal) Commit() error {
+	if r.closed {
+		return errors.New("prepared renewal already closed")
+	}
+	r.commitCalls++
+	r.closed = true
+	if r.onCommit != nil {
+		r.onCommit()
+	}
+	return r.commitErr
+}
+func (r *fakePreparedRenewal) Rollback() error {
+	if r.closed {
+		return nil
+	}
+	r.rollbackCalls++
+	r.closed = true
+	if r.onRollback != nil {
+		r.onRollback()
+	}
+	return r.rollbackErr
+}
 
 func newReloadTestService() (*Hysteria2Service, *fakeRuntimeServer, *api.NodeInfo) {
 	oldNode := &api.NodeInfo{
@@ -700,21 +741,32 @@ func TestConcurrentReloadsExecuteSequentially(t *testing.T) {
 }
 
 func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
-	service, _, _ := newReloadTestService()
+	service, oldRuntime, _ := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	renewEntered := make(chan struct{})
 	releaseRenew := make(chan struct{})
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		close(renewEntered)
 		<-releaseRenew
-		return "renewed.cert", "renewed.key", true, nil
+		return &fakePreparedRenewal{
+			renewed:     true,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
-	service.closeRuntime = func(runtimeServer) error { return nil }
+	closeRuntimeEntered := make(chan struct{}, 1)
+	service.closeRuntime = func(runtimeServer) error {
+		select {
+		case closeRuntimeEntered <- struct{}{}:
+		default:
+		}
+		return nil
+	}
 	service.serveRuntime = func(runtimeServer) error { return nil }
 	service.serveHandshake = func(start func(), _ <-chan struct{}, result <-chan error) error {
 		start()
@@ -727,6 +779,28 @@ func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
 	locked := !service.reloadMu.TryLock()
 	if !locked {
 		service.reloadMu.Unlock()
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- service.Close() }()
+	select {
+	case closeErr := <-closeDone:
+		if closeErr == nil {
+			close(releaseRenew)
+			<-done
+			t.Fatal("Close() succeeded while certificate reload transaction was active")
+		}
+	case <-closeRuntimeEntered:
+		close(releaseRenew)
+		<-done
+		<-closeDone
+		t.Fatal("Close() entered runtime shutdown while certificate reload transaction was active")
+	}
+	runtimeAfterRejectedClose := service.server
+	stateAfterRejectedClose := service.state
+	if runtimeAfterRejectedClose != oldRuntime || stateAfterRejectedClose != stateReloading {
+		close(releaseRenew)
+		<-done
+		t.Fatalf("rejected Close() mutated active transaction: server=%v state=%d", runtimeAfterRejectedClose, stateAfterRejectedClose)
 	}
 	close(releaseRenew)
 	if err := <-done; err != nil {
@@ -741,8 +815,8 @@ func TestCertificateRenewalFailureIsReturnedWithoutReplacingRuntime(t *testing.T
 	renewErr := errors.New("certificate renewal failed")
 	service, oldRuntime, oldNode := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
-		return "", "", false, renewErr
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return nil, renewErr
 	}
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		t.Fatal("certificate renewal failure attempted a runtime build")
@@ -758,19 +832,96 @@ func TestCertificateRenewalFailureIsReturnedWithoutReplacingRuntime(t *testing.T
 	}
 }
 
+func TestCertificateRenewalWithoutCandidatePEMDoesNotReloadOrCommit(t *testing.T) {
+	service, oldRuntime, oldNode := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	prepared := &fakePreparedRenewal{renewed: true}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
+	}
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		t.Fatal("incomplete certificate renewal attempted a runtime build")
+		return nil, nil
+	}
+
+	err := service.certMonitor()
+	if err == nil {
+		t.Fatal("certMonitor() succeeded with incomplete candidate certificate")
+	}
+	if prepared.commitCalls != 0 || prepared.rollbackCalls != 1 {
+		t.Fatalf("prepared renewal completion = commit:%d rollback:%d, want 0/1", prepared.commitCalls, prepared.rollbackCalls)
+	}
+	if service.server != oldRuntime || service.nodeInfo != oldNode || service.state != stateRunning {
+		t.Fatalf("incomplete candidate certificate replaced applied state: server=%v node=%v state=%v", service.server, service.nodeInfo, service.state)
+	}
+}
+
+func TestCertificateMonitorPeriodicRedactsFailureAndRetries(t *testing.T) {
+	const secret = "acme-token-secret"
+	service, _, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	var logs bytes.Buffer
+	logger := log.New()
+	logger.SetOutput(&logs)
+	logger.SetFormatter(&log.TextFormatter{DisableTimestamp: true})
+	service.logger = log.NewEntry(logger)
+
+	renewCalls := 0
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		renewCalls++
+		if renewCalls == 1 {
+			return nil, errors.New(secret)
+		}
+		return &fakePreparedRenewal{}, nil
+	}
+
+	if err := service.certMonitorPeriodic(); err != nil {
+		t.Fatalf("first certMonitorPeriodic() error = %v", err)
+	}
+	if renewCalls != 1 {
+		t.Fatalf("renew calls after first attempt = %d, want 1", renewCalls)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("periodic certificate log exposed sensitive error: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "certificate monitor failed; will retry") {
+		t.Fatalf("periodic certificate log = %q, want redacted retry message", logs.String())
+	}
+
+	if err := service.certMonitorPeriodic(); err != nil {
+		t.Fatalf("second certMonitorPeriodic() error = %v", err)
+	}
+	if renewCalls != 2 {
+		t.Fatalf("renew calls after retry = %d, want 2", renewCalls)
+	}
+}
+
 func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T) {
 	buildErr := errors.New("certificate candidate build failed")
+	rollbackErr := errors.New("candidate rollback failed")
 	service, _, oldNode := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
 	restored := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
-		return "renewed.cert", "renewed.key", true, nil
+	prepared := &fakePreparedRenewal{
+		renewed:     true,
+		certificate: []byte("candidate-cert"),
+		privateKey:  []byte("candidate-key"),
+		rollbackErr: rollbackErr,
+	}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
 	}
 	builds := 0
-	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+	service.serverConfigFactory = func(_ *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
 		builds++
 		if builds == 1 {
+			if string(spec.certificatePEM) != "candidate-cert" || string(spec.privateKeyPEM) != "candidate-key" {
+				t.Fatalf("candidate certificate material = %q/%q", spec.certificatePEM, spec.privateKeyPEM)
+			}
 			return nil, buildErr
+		}
+		if prepared.rollbackCalls != 1 {
+			t.Fatal("old runtime restore began before candidate certificate rollback")
 		}
 		return &server.Config{}, nil
 	}
@@ -785,11 +936,78 @@ func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T
 	t.Cleanup(func() { _ = service.Close() })
 
 	err := service.certMonitor()
-	if !errors.Is(err, buildErr) {
-		t.Fatalf("certMonitor() error = %v, want %v", err, buildErr)
+	if !errors.Is(err, buildErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("certMonitor() error = %v, want build %v and rollback %v", err, buildErr, rollbackErr)
 	}
 	if service.server != restored || service.nodeInfo != oldNode || service.state != stateRunning {
 		t.Fatalf("certificate reload failure replaced applied state: server=%v node=%v state=%v", service.server, service.nodeInfo, service.state)
+	}
+	if prepared.commitCalls != 0 || prepared.rollbackCalls != 1 {
+		t.Fatalf("candidate completion calls = commit:%d rollback:%d, want 0/1", prepared.commitCalls, prepared.rollbackCalls)
+	}
+}
+
+func TestCertificateReloadCommitsAfterPortHopBeforePublication(t *testing.T) {
+	service, oldRuntime, oldNode := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	oldNode.Hysteria2Config.PortHopEnabled = true
+	oldNode.Hysteria2Config.PortHopPorts = "12000"
+	oldRules := buildPortHopRulesFromNode(oldNode)
+	service.portHopRules = append([]portHopRule(nil), oldRules...)
+
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+	prepared := &fakePreparedRenewal{
+		renewed:     true,
+		certificate: []byte("candidate-cert"),
+		privateKey:  []byte("candidate-key"),
+	}
+	rulesApplied := false
+	prepared.onCommit = func() {
+		if !rulesApplied {
+			t.Fatal("candidate certificate committed before port-hop rules were applied")
+		}
+		if service.server != oldRuntime {
+			t.Fatal("candidate server published before certificate commit")
+		}
+	}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
+	}
+	service.serverConfigFactory = func(_ *Hysteria2Service, spec serverBuildSpec) (*server.Config, error) {
+		if string(spec.certificatePEM) != "candidate-cert" || string(spec.privateKeyPEM) != "candidate-key" {
+			t.Fatalf("candidate certificate material = %q/%q", spec.certificatePEM, spec.privateKeyPEM)
+		}
+		return &server.Config{}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
+	service.serveRuntime = defaultServeRuntime
+	service.closeRuntime = defaultCloseRuntime
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		start()
+		<-started
+		return nil
+	}
+	oldDelete := deletePortHopRules
+	oldApply := applyPortHopRules
+	t.Cleanup(func() {
+		_ = service.Close()
+		deletePortHopRules = oldDelete
+		applyPortHopRules = oldApply
+	})
+	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+		if !reflect.DeepEqual(rules, oldRules) {
+			t.Fatalf("applied port-hop rules = %v, want %v", rules, oldRules)
+		}
+		rulesApplied = true
+		return nil
+	}
+
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("certMonitor() error = %v", err)
+	}
+	if service.server != candidate || prepared.commitCalls != 1 || prepared.rollbackCalls != 0 {
+		t.Fatalf("certificate publication = server:%v commit:%d rollback:%d", service.server, prepared.commitCalls, prepared.rollbackCalls)
 	}
 }
 
@@ -798,9 +1016,13 @@ func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
 	renewCalls := 0
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
-		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+		return &fakePreparedRenewal{
+			renewed:     renewCalls <= 2,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	builds := 0
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
@@ -844,9 +1066,13 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
 	renewCalls := 0
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
-		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+		return &fakePreparedRenewal{
+			renewed:     renewCalls == 1,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	builds := 0
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {

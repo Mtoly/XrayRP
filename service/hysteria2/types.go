@@ -24,14 +24,25 @@ type runtimeServer interface {
 
 type serverConfigFactory func(*Hysteria2Service, serverBuildSpec) (*server.Config, error)
 type serverBuildSpec struct {
-	nodeInfo   *api.NodeInfo
-	certConfig *mylego.CertConfig
-	authGate   *runtimeAuthGate
+	nodeInfo       *api.NodeInfo
+	certConfig     *mylego.CertConfig
+	certificatePEM []byte
+	privateKeyPEM  []byte
+	authGate       *runtimeAuthGate
 }
 type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error
 type closeRuntimeFunc func(runtimeServer) error
-type renewCertificateFunc func(*mylego.CertConfig) (certPath, keyPath string, renewed bool, err error)
+
+type preparedCertificateRenewal interface {
+	Renewed() bool
+	CertificatePEM() []byte
+	PrivateKeyPEM() []byte
+	Commit() error
+	Rollback() error
+}
+
+type prepareCertificateRenewalFunc func(*mylego.CertConfig) (preparedCertificateRenewal, error)
 
 type portHopRulesFunc func([]portHopRule, *log.Entry) error
 
@@ -117,16 +128,17 @@ type Hysteria2Service struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	server               runtimeServer
-	serverConfigFactory  serverConfigFactory
-	runtimeServerFactory runtimeServerFactory
-	serveRuntime         serveRuntimeFunc
-	closeRuntime         closeRuntimeFunc
-	renewCertificate     renewCertificateFunc
-	taskFactory          taskFactory
-	serveHandshake       serveHandshakeFunc
-	serveDone            <-chan struct{}
-	watcherDone          <-chan struct{}
+	server                     runtimeServer
+	serverConfigFactory        serverConfigFactory
+	runtimeServerFactory       runtimeServerFactory
+	serveRuntime               serveRuntimeFunc
+	closeRuntime               closeRuntimeFunc
+	prepareRenewal             prepareCertificateRenewalFunc
+	beforeCertificateStateRead func()
+	taskFactory                taskFactory
+	serveHandshake             serveHandshakeFunc
+	serveDone                  <-chan struct{}
+	watcherDone                <-chan struct{}
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState
@@ -152,8 +164,7 @@ type Hysteria2Service struct {
 	// reloadMu serializes hot-reload operations (node / cert changes) so that
 	// we never rebuild the underlying Hysteria2 server concurrently from
 	// multiple goroutines (nodeMonitor, certMonitor, Start).
-	reloadMu          sync.Mutex
-	certReloadPending bool
+	reloadMu sync.Mutex
 
 	// portHopRules keeps track of the iptables rules we added for Hysteria2
 	// port hopping so that we can reliably remove or update them when the

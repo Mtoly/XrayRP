@@ -19,6 +19,25 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
+func TestCertMonitorAcquiresReloadLockBeforeReadingCertificateState(t *testing.T) {
+	service := &Hysteria2Service{}
+	lockHeld := false
+	service.beforeCertificateStateRead = func() {
+		if service.reloadMu.TryLock() {
+			service.reloadMu.Unlock()
+			return
+		}
+		lockHeld = true
+	}
+
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("certMonitor() error = %v", err)
+	}
+	if !lockHeld {
+		t.Fatal("certMonitor read certificate state before acquiring reloadMu")
+	}
+}
+
 func TestBuildServerConfigKeepsVulnerableSniffHookDisabled(t *testing.T) {
 	certFile, keyFile := writeTestCertificate(t)
 
@@ -50,6 +69,42 @@ func TestBuildServerConfigKeepsVulnerableSniffHookDisabled(t *testing.T) {
 
 	if cfg.RequestHook != nil {
 		t.Fatalf("RequestHook must remain nil while GHSA-9fw6-xgg2-mq9q is unpatched, got %T", cfg.RequestHook)
+	}
+}
+
+func TestBuildServerConfigUsesCandidateCertificatePEM(t *testing.T) {
+	certFile, keyFile := writeTestCertificate(t)
+	certificatePEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Hysteria2Service{
+		config: &controller.Config{ListenIP: "127.0.0.1"},
+	}
+	cfg, err := h.buildServerConfigFor(serverBuildSpec{
+		nodeInfo: &api.NodeInfo{
+			Port:            0,
+			Hysteria2Config: &api.Hysteria2Config{Obfs: "none"},
+		},
+		certConfig: &mylego.CertConfig{
+			CertMode: "file",
+			CertFile: filepath.Join(t.TempDir(), "missing.crt"),
+			KeyFile:  filepath.Join(t.TempDir(), "missing.key"),
+		},
+		certificatePEM: certificatePEM,
+		privateKeyPEM:  privateKeyPEM,
+	})
+	if err != nil {
+		t.Fatalf("buildServerConfigFor() ignored candidate certificate PEM: %v", err)
+	}
+	defer cfg.Conn.Close()
+	if len(cfg.TLSConfig.Certificates) != 1 {
+		t.Fatalf("candidate TLS certificates = %d, want 1", len(cfg.TLSConfig.Certificates))
 	}
 }
 

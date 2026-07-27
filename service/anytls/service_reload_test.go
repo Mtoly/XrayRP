@@ -1,6 +1,7 @@
 package anytls
 
 import (
+	"bytes"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -13,6 +14,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
 
@@ -20,6 +22,45 @@ type reloadRuntime struct{ name string }
 
 func (*reloadRuntime) Start() error { return nil }
 func (*reloadRuntime) Close() error { return nil }
+
+type fakePreparedRenewal struct {
+	renewed       bool
+	certificate   []byte
+	privateKey    []byte
+	commitErr     error
+	rollbackErr   error
+	commitCalls   int
+	rollbackCalls int
+	closed        bool
+	onCommit      func()
+	onRollback    func()
+}
+
+func (r *fakePreparedRenewal) Renewed() bool          { return r.renewed }
+func (r *fakePreparedRenewal) CertificatePEM() []byte { return append([]byte(nil), r.certificate...) }
+func (r *fakePreparedRenewal) PrivateKeyPEM() []byte  { return append([]byte(nil), r.privateKey...) }
+func (r *fakePreparedRenewal) Commit() error {
+	if r.closed {
+		return errors.New("prepared renewal already closed")
+	}
+	r.commitCalls++
+	r.closed = true
+	if r.onCommit != nil {
+		r.onCommit()
+	}
+	return r.commitErr
+}
+func (r *fakePreparedRenewal) Rollback() error {
+	if r.closed {
+		return nil
+	}
+	r.rollbackCalls++
+	r.closed = true
+	if r.onRollback != nil {
+		r.onRollback()
+	}
+	return r.rollbackErr
+}
 
 func newReloadTestService() (*AnyTLSService, *reloadRuntime, *api.NodeInfo) {
 	oldNode := &api.NodeInfo{
@@ -380,15 +421,19 @@ func TestConcurrentReloadsExecuteSequentially(t *testing.T) {
 }
 
 func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
-	service, _, _ := newReloadTestService()
+	service, oldRuntime, _ := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &reloadRuntime{name: "candidate"}
 	renewEntered := make(chan struct{})
 	releaseRenew := make(chan struct{})
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		close(renewEntered)
 		<-releaseRenew
-		return "renewed.cert", "renewed.key", true, nil
+		return &fakePreparedRenewal{
+			renewed:     true,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	service.reloadRuntimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		return candidate, "candidate-inbound", nil
@@ -403,6 +448,18 @@ func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
 	if !locked {
 		service.reloadMu.Unlock()
 	}
+	if closeErr := service.Close(); closeErr == nil {
+		close(releaseRenew)
+		<-done
+		t.Fatal("Close() succeeded while certificate reload transaction was active")
+	}
+	runtimeAfterRejectedClose := service.box
+	stateAfterRejectedClose := service.state
+	if runtimeAfterRejectedClose != oldRuntime || stateAfterRejectedClose != stateReloading {
+		close(releaseRenew)
+		<-done
+		t.Fatalf("rejected Close() mutated active transaction: box=%v state=%d", runtimeAfterRejectedClose, stateAfterRejectedClose)
+	}
 	close(releaseRenew)
 	if err := <-done; err != nil {
 		t.Fatalf("certMonitor() error = %v", err)
@@ -416,8 +473,8 @@ func TestCertificateRenewalFailureIsReturnedWithoutReplacingRuntime(t *testing.T
 	renewErr := errors.New("certificate renewal failed")
 	service, oldRuntime, oldNode := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
-		return "", "", false, renewErr
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return nil, renewErr
 	}
 	service.reloadRuntimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
 		t.Fatal("certificate renewal failure attempted a runtime build")
@@ -433,23 +490,195 @@ func TestCertificateRenewalFailureIsReturnedWithoutReplacingRuntime(t *testing.T
 	}
 }
 
-func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T) {
-	buildErr := errors.New("certificate candidate build failed")
+func TestCertificateRenewalWithoutCandidatePEMDoesNotReloadOrCommit(t *testing.T) {
 	service, oldRuntime, oldNode := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
-		return "renewed.cert", "renewed.key", true, nil
+	prepared := &fakePreparedRenewal{renewed: true}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
 	}
 	service.reloadRuntimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
+		t.Fatal("incomplete certificate renewal attempted a runtime build")
+		return nil, "", nil
+	}
+
+	err := service.certMonitor()
+	if err == nil {
+		t.Fatal("certMonitor() succeeded with incomplete candidate certificate")
+	}
+	if prepared.commitCalls != 0 || prepared.rollbackCalls != 1 {
+		t.Fatalf("prepared renewal completion = commit:%d rollback:%d, want 0/1", prepared.commitCalls, prepared.rollbackCalls)
+	}
+	if service.box != oldRuntime || service.nodeInfo != oldNode || service.state != stateRunning {
+		t.Fatalf("incomplete candidate certificate replaced applied state: box=%v node=%v state=%v", service.box, service.nodeInfo, service.state)
+	}
+}
+
+func TestCertificateMonitorPeriodicRedactsFailureAndRetries(t *testing.T) {
+	const secret = "acme-token-secret"
+	service, _, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	var logs bytes.Buffer
+	logger := log.New()
+	logger.SetOutput(&logs)
+	logger.SetFormatter(&log.TextFormatter{DisableTimestamp: true})
+	service.logger = log.NewEntry(logger)
+
+	renewCalls := 0
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		renewCalls++
+		if renewCalls == 1 {
+			return nil, errors.New(secret)
+		}
+		return &fakePreparedRenewal{}, nil
+	}
+
+	if err := service.certMonitorPeriodic(); err != nil {
+		t.Fatalf("first certMonitorPeriodic() error = %v", err)
+	}
+	if renewCalls != 1 {
+		t.Fatalf("renew calls after first attempt = %d, want 1", renewCalls)
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Fatalf("periodic certificate log exposed sensitive error: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "certificate monitor failed; will retry") {
+		t.Fatalf("periodic certificate log = %q, want redacted retry message", logs.String())
+	}
+
+	if err := service.certMonitorPeriodic(); err != nil {
+		t.Fatalf("second certMonitorPeriodic() error = %v", err)
+	}
+	if renewCalls != 2 {
+		t.Fatalf("renew calls after retry = %d, want 2", renewCalls)
+	}
+}
+
+func TestCertificateReloadBuildFailurePreservesLastKnownGoodRuntime(t *testing.T) {
+	buildErr := errors.New("certificate candidate build failed")
+	rollbackErr := errors.New("candidate rollback failed")
+	service, oldRuntime, oldNode := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	prepared := &fakePreparedRenewal{
+		renewed:     true,
+		certificate: []byte("candidate-cert"),
+		privateKey:  []byte("candidate-key"),
+		rollbackErr: rollbackErr,
+	}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
+	}
+	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		if string(spec.certificatePEM) != "candidate-cert" || string(spec.privateKeyPEM) != "candidate-key" {
+			t.Fatalf("candidate certificate material = %q/%q", spec.certificatePEM, spec.privateKeyPEM)
+		}
 		return nil, "", buildErr
 	}
 
 	err := service.certMonitor()
-	if !errors.Is(err, buildErr) {
-		t.Fatalf("certMonitor() error = %v, want %v", err, buildErr)
+	if !errors.Is(err, buildErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("certMonitor() error = %v, want build %v and rollback %v", err, buildErr, rollbackErr)
 	}
 	if service.box != oldRuntime || service.nodeInfo != oldNode || service.state != stateRunning {
 		t.Fatalf("certificate reload failure replaced applied state: box=%v node=%v state=%v", service.box, service.nodeInfo, service.state)
+	}
+	if prepared.commitCalls != 0 || prepared.rollbackCalls != 1 {
+		t.Fatalf("candidate completion calls = commit:%d rollback:%d, want 0/1", prepared.commitCalls, prepared.rollbackCalls)
+	}
+}
+
+func TestCertificateReloadCommitsAfterStartBeforePublication(t *testing.T) {
+	service, oldRuntime, _ := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &reloadRuntime{name: "candidate"}
+	started := false
+	prepared := &fakePreparedRenewal{
+		renewed:     true,
+		certificate: []byte("candidate-cert"),
+		privateKey:  []byte("candidate-key"),
+	}
+	prepared.onCommit = func() {
+		if !started {
+			t.Fatal("candidate certificate committed before runtime start")
+		}
+		if service.box != oldRuntime {
+			t.Fatal("candidate runtime published before certificate commit")
+		}
+	}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
+	}
+	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		if string(spec.certificatePEM) != "candidate-cert" || string(spec.privateKeyPEM) != "candidate-key" {
+			t.Fatalf("candidate certificate material = %q/%q", spec.certificatePEM, spec.privateKeyPEM)
+		}
+		return candidate, spec.inboundTag, nil
+	}
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	service.startRuntime = func(runtime runtimeInstance) error {
+		if runtime != candidate {
+			t.Fatalf("started runtime = %v, want candidate", runtime)
+		}
+		if service.box != oldRuntime || prepared.commitCalls != 0 {
+			t.Fatal("candidate state published or committed before start")
+		}
+		started = true
+		return nil
+	}
+
+	if err := service.certMonitor(); err != nil {
+		t.Fatalf("certMonitor() error = %v", err)
+	}
+	if service.box != candidate || prepared.commitCalls != 1 || prepared.rollbackCalls != 0 {
+		t.Fatalf("certificate publication = box:%v commit:%d rollback:%d", service.box, prepared.commitCalls, prepared.rollbackCalls)
+	}
+}
+
+func TestCertificateReloadStartFailureRollsBackBeforeRestore(t *testing.T) {
+	startErr := errors.New("candidate start failed")
+	service, _, oldNode := newReloadTestService()
+	service.config.CertConfig.CertMode = "dns"
+	candidate := &reloadRuntime{name: "candidate"}
+	restored := &reloadRuntime{name: "restored"}
+	prepared := &fakePreparedRenewal{
+		renewed:     true,
+		certificate: []byte("candidate-cert"),
+		privateKey:  []byte("candidate-key"),
+	}
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
+		return prepared, nil
+	}
+	builds := 0
+	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		builds++
+		if builds == 1 {
+			return candidate, spec.inboundTag, nil
+		}
+		if prepared.rollbackCalls != 1 {
+			t.Fatal("old runtime restore began before candidate certificate rollback")
+		}
+		if len(spec.certificatePEM) != 0 || len(spec.privateKeyPEM) != 0 {
+			t.Fatal("old runtime restore received candidate certificate material")
+		}
+		return restored, spec.inboundTag, nil
+	}
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	service.startRuntime = func(runtime runtimeInstance) error {
+		if runtime == candidate {
+			return startErr
+		}
+		return nil
+	}
+
+	err := service.certMonitor()
+	if !errors.Is(err, startErr) {
+		t.Fatalf("certMonitor() error = %v, want %v", err, startErr)
+	}
+	if service.box != restored || service.nodeInfo != oldNode || service.state != stateRunning {
+		t.Fatalf("restored state = box:%v node:%v state:%v", service.box, service.nodeInfo, service.state)
+	}
+	if prepared.commitCalls != 0 || prepared.rollbackCalls != 1 {
+		t.Fatalf("candidate completion calls = commit:%d rollback:%d, want 0/1", prepared.commitCalls, prepared.rollbackCalls)
 	}
 }
 
@@ -459,9 +688,13 @@ func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &reloadRuntime{name: "candidate"}
 	renewCalls := 0
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
-		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+		return &fakePreparedRenewal{
+			renewed:     renewCalls <= 2,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	builds := 0
 	service.reloadRuntimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {
@@ -500,9 +733,13 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 	service.config.CertConfig.CertMode = "dns"
 	candidate := &reloadRuntime{name: "candidate"}
 	renewCalls := 0
-	service.renewCertificate = func(*mylego.CertConfig) (string, string, bool, error) {
+	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
-		return "renewed.cert", "renewed.key", renewCalls == 1, nil
+		return &fakePreparedRenewal{
+			renewed:     renewCalls == 1,
+			certificate: []byte("candidate-cert"),
+			privateKey:  []byte("candidate-key"),
+		}, nil
 	}
 	builds := 0
 	service.reloadRuntimeFactory = func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error) {

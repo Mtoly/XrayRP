@@ -123,8 +123,8 @@ func newLifecycleTestController(apiClient PanelClient, enableWS bool) *Controlle
 		startAt:   time.Now().Add(time.Hour),
 		syncApplyHooks: syncApplyHooks{
 			runtime: syncApplyRuntimeHooks{
-				addTag:   func(*api.NodeInfo, string) error { return nil },
-				addUsers: func(*[]api.UserInfo, *api.NodeInfo, string) error { return nil },
+				addTag:   func(*api.NodeInfo, string, *Config) error { return nil },
+				addUsers: func(*[]api.UserInfo, *api.NodeInfo, string, *Config) error { return nil },
 			},
 			limiter: syncApplyLimiterHooks{
 				addInbound: func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error { return nil },

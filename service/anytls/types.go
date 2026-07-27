@@ -22,14 +22,25 @@ type runtimeInstance interface {
 
 type runtimeFactory func(*AnyTLSService) (runtimeInstance, string, error)
 type runtimeBuildSpec struct {
-	nodeInfo   *api.NodeInfo
-	inboundTag string
-	certConfig *mylego.CertConfig
+	nodeInfo       *api.NodeInfo
+	inboundTag     string
+	certConfig     *mylego.CertConfig
+	certificatePEM []byte
+	privateKeyPEM  []byte
 }
 type reloadRuntimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error
 type closeRuntimeFunc func(runtimeInstance) error
-type renewCertificateFunc func(*mylego.CertConfig) (certPath, keyPath string, renewed bool, err error)
+
+type preparedCertificateRenewal interface {
+	Renewed() bool
+	CertificatePEM() []byte
+	PrivateKeyPEM() []byte
+	Commit() error
+	Rollback() error
+}
+
+type prepareCertificateRenewalFunc func(*mylego.CertConfig) (preparedCertificateRenewal, error)
 
 type lifecycleState uint8
 
@@ -60,14 +71,15 @@ type AnyTLSService struct {
 	clientInfo api.ClientInfo
 	nodeInfo   *api.NodeInfo
 
-	box                  runtimeInstance
-	runtimeFactory       runtimeFactory
-	reloadRuntimeFactory reloadRuntimeFactory
-	startRuntime         startRuntimeFunc
-	closeRuntime         closeRuntimeFunc
-	renewCertificate     renewCertificateFunc
-	taskFactory          taskFactory
-	inboundTag           string
+	box                        runtimeInstance
+	runtimeFactory             runtimeFactory
+	reloadRuntimeFactory       reloadRuntimeFactory
+	startRuntime               startRuntimeFunc
+	closeRuntime               closeRuntimeFunc
+	prepareRenewal             prepareCertificateRenewalFunc
+	beforeCertificateStateRead func()
+	taskFactory                taskFactory
+	inboundTag                 string
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState
@@ -91,8 +103,7 @@ type AnyTLSService struct {
 
 	// reloadMu prevents concurrent rebuilds of the underlying sing-box
 	// instance when node configuration or certificates change.
-	reloadMu          sync.Mutex
-	certReloadPending bool
+	reloadMu sync.Mutex
 }
 
 type userRecord struct {

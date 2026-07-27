@@ -6,7 +6,6 @@ import (
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
-	log "github.com/sirupsen/logrus"
 )
 
 const rootPathWarningMessage = `!!!! HEADS UP !!!!
@@ -21,6 +20,17 @@ backups of this folder is ideal.
 `
 
 func (l *LegoCMD) Run() error {
+	if err := l.validate(); err != nil {
+		return err
+	}
+	var dnsEnv map[string]string
+	if l.C.CertMode == "dns" {
+		dnsEnv = l.C.DNSEnv
+	}
+	return executeCertificateOperation(dnsEnv, l.run)
+}
+
+func (l *LegoCMD) run() error {
 	accountsStorage := NewAccountsStorage(l)
 
 	account, client := setup(accountsStorage)
@@ -29,30 +39,28 @@ func (l *LegoCMD) Run() error {
 	if account.Registration == nil {
 		reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
 		if err != nil {
-			log.Panicf("Could not complete registration\n\t%v", err)
+			return fmt.Errorf("complete ACME registration: %w", err)
 		}
 
 		account.Registration = reg
 		if err = accountsStorage.Save(account); err != nil {
-			log.Panic(err)
+			return err
 		}
 
 		fmt.Printf(rootPathWarningMessage, accountsStorage.GetRootPath())
 	}
 
 	certsStorage := NewCertificatesStorage(l.path)
-	certsStorage.CreateRootFolder()
+	if err := certsStorage.createRootFolder(); err != nil {
+		return err
+	}
 
 	cert, err := obtainCertificate([]string{l.C.CertDomain}, client)
 	if err != nil {
-		// Make sure to return a non-zero exit code if ObtainSANCertificate returned at least one error.
-		// Due to us not returning partial certificate we can just exit here instead of at the end.
-		log.Panicf("Could not obtain certificates:\n\t%v", err)
+		return fmt.Errorf("obtain certificate: %w", err)
 	}
 
-	certsStorage.SaveResource(cert)
-
-	return nil
+	return certsStorage.storeResource(cert)
 }
 
 func obtainCertificate(domains []string, client *lego.Client) (*certificate.Resource, error) {

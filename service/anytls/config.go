@@ -38,11 +38,6 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 		return nil, "", fmt.Errorf("invalid port %d: must be between 1 and 65535", port)
 	}
 
-	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
-	if err != nil {
-		return nil, "", err
-	}
-
 	ctx := context.Background()
 	ctx = box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
 
@@ -58,10 +53,9 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 		ListenPort: uint16(port),
 	}
 
-	tlsOpt := &option.InboundTLSOptions{
-		Enabled:         true,
-		CertificatePath: certFile,
-		KeyPath:         keyFile,
+	tlsOpt, err := buildInboundTLSOptions(spec)
+	if err != nil {
+		return nil, "", err
 	}
 
 	padding := []string{}
@@ -109,6 +103,26 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 	return boxInstance, spec.inboundTag, nil
 }
 
+func buildInboundTLSOptions(spec runtimeBuildSpec) (*option.InboundTLSOptions, error) {
+	tlsOpt := &option.InboundTLSOptions{Enabled: true}
+	if len(spec.certificatePEM) != 0 || len(spec.privateKeyPEM) != 0 {
+		if len(spec.certificatePEM) == 0 || len(spec.privateKeyPEM) == 0 {
+			return nil, fmt.Errorf("candidate certificate and private key must be provided together")
+		}
+		tlsOpt.Certificate = badoption.Listable[string]{string(spec.certificatePEM)}
+		tlsOpt.Key = badoption.Listable[string]{string(spec.privateKeyPEM)}
+		return tlsOpt, nil
+	}
+
+	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
+	if err != nil {
+		return nil, err
+	}
+	tlsOpt.CertificatePath = certFile
+	tlsOpt.KeyPath = keyFile
+	return tlsOpt, nil
+}
+
 func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 	if certConfig == nil {
 		return "", "", fmt.Errorf("CertConfig is nil")
@@ -143,16 +157,18 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 // hot-reloaded so the new certificate is picked up without restarting the
 // whole XrayR process.
 func (s *AnyTLSService) certMonitor() error {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	if s.beforeCertificateStateRead != nil {
+		s.beforeCertificateStateRead()
+	}
 	if s.config == nil || s.config.CertConfig == nil {
 		return nil
 	}
 
-	s.reloadMu.Lock()
-	defer s.reloadMu.Unlock()
-
 	s.lifecycleMu.Lock()
 	nodeInfo := s.nodeInfo
-	runtimeBeforeReload := s.box
 	s.lifecycleMu.Unlock()
 	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
@@ -160,33 +176,48 @@ func (s *AnyTLSService) certMonitor() error {
 
 	switch s.config.CertConfig.CertMode {
 	case "dns", "http", "tls":
-		renew := s.renewCertificate
-		if renew == nil {
-			renew = defaultRenewCertificate
+		s.lifecycleMu.Lock()
+		if s.closed || s.state != stateRunning || s.box == nil || s.nodeInfo == nil {
+			state := s.state
+			s.lifecycleMu.Unlock()
+			return fmt.Errorf("AnyTLS service cannot renew certificate from state %d", state)
 		}
-		certPath, keyPath, ok, err := renew(s.config.CertConfig)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Print(err)
+		s.state = stateReloading
+		s.lifecycleMu.Unlock()
+		defer func() {
+			s.lifecycleMu.Lock()
+			if s.state == stateReloading {
+				s.state = stateRunning
 			}
+			s.lifecycleMu.Unlock()
+		}()
+
+		prepare := s.prepareRenewal
+		if prepare == nil {
+			prepare = defaultPrepareCertificateRenewal
+		}
+		renewal, err := prepare(s.config.CertConfig)
+		if err != nil {
 			return err
 		}
-		if ok {
-			s.certReloadPending = true
-			s.logger.Infof("AnyTLS certificate renewed for %s, reloading node (cert=%s, key=%s)", s.config.CertConfig.CertDomain, certPath, keyPath)
+		if renewal == nil {
+			return fmt.Errorf("certificate renewal preparation returned nil")
 		}
+		if !renewal.Renewed() {
+			return renewal.Rollback()
+		}
+		if s.logger != nil {
+			s.logger.Infof("AnyTLS certificate renewed for %s, validating replacement runtime", s.config.CertConfig.CertDomain)
+		}
+		return s.reloadNodeWithCertificateLocked(nodeInfo, renewal)
 	}
 
-	if s.certReloadPending {
-		reloadErr := s.reloadNodeLocked(nodeInfo)
-		s.lifecycleMu.Lock()
-		applied := s.state == stateRunning && s.box != runtimeBeforeReload
-		s.lifecycleMu.Unlock()
-		if reloadErr == nil || applied {
-			s.certReloadPending = false
-		}
-		return reloadErr
-	}
+	return nil
+}
 
+func (s *AnyTLSService) certMonitorPeriodic() error {
+	if err := s.certMonitor(); err != nil && s.logger != nil {
+		s.logger.Warn("certificate monitor failed; will retry")
+	}
 	return nil
 }

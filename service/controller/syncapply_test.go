@@ -143,6 +143,7 @@ type syncApplyRecorder struct {
 	removedTags             []string
 	addedTags               []string
 	addedNodeInfos          []*api.NodeInfo
+	addedCertConfigs        []*mylego.CertConfig
 	addedUserTags           []string
 	addedUserPayloads       [][]api.UserInfo
 	updatedLimiterTags      []string
@@ -158,14 +159,19 @@ type syncApplyRecorder struct {
 	updateRuleCalls         int
 	lastRuleTag             string
 	lastRules               []api.DetectRule
+	activeRules             map[string][]api.DetectRule
 	updatedGlobalDeviceTags []string
 	updatedGlobalDevices    []map[int][]string
 	clearedGlobalDeviceTags []string
 	addTagErr               error
 	updateLimiterErr        error
 	removeUsersErr          error
+	cleanupTagErr           error
+	cleanupTagErrAtCall     int
+	cleanupTagCalls         int
 	addTagErrAtCall         int
 	addTagCalls             int
+	onAddTag                func(*Config)
 	activeRuntimes          map[string]*api.NodeInfo
 	activeLimiterTags       map[string]bool
 }
@@ -221,16 +227,25 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 	controller.syncApplyHooks = syncApplyHooks{
 		runtime: syncApplyRuntimeHooks{
 			cleanupTag: func(_ *api.NodeInfo, tag string) error {
+				recorder.cleanupTagCalls++
 				recorder.removedTags = append(recorder.removedTags, tag)
 				if recorder.activeRuntimes != nil {
 					delete(recorder.activeRuntimes, tag)
 				}
+				if recorder.cleanupTagErr != nil &&
+					(recorder.cleanupTagErrAtCall == 0 || recorder.cleanupTagErrAtCall == recorder.cleanupTagCalls) {
+					return recorder.cleanupTagErr
+				}
 				return nil
 			},
-			addTag: func(nodeInfo *api.NodeInfo, tag string) error {
+			addTag: func(nodeInfo *api.NodeInfo, tag string, config *Config) error {
 				recorder.addTagCalls++
 				recorder.addedTags = append(recorder.addedTags, tag)
 				recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
+				recorder.addedCertConfigs = append(recorder.addedCertConfigs, cloneRuntimeCertConfig(config.CertConfig))
+				if recorder.onAddTag != nil {
+					recorder.onAddTag(config)
+				}
 				if recorder.addTagErr != nil && (recorder.addTagErrAtCall == 0 || recorder.addTagErrAtCall == recorder.addTagCalls) {
 					return recorder.addTagErr
 				}
@@ -240,7 +255,7 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 				recorder.activeRuntimes[tag] = cloneRecordedNodeInfo(nodeInfo)
 				return nil
 			},
-			addUsers: func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
+			addUsers: func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
 				recorder.recordAddNewUser(tag, users)
 				return nil
 			},
@@ -281,8 +296,12 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 				recorder.snapshotLimiterCalls++
 				return &limiter.InboundLimiterStateSnapshot{}, nil
 			},
-			restoreInbound: func(string, *limiter.InboundLimiterStateSnapshot) error {
+			restoreInbound: func(tag string, _ *limiter.InboundLimiterStateSnapshot) error {
 				recorder.restoreLimiterCalls++
+				if recorder.activeLimiterTags == nil {
+					recorder.activeLimiterTags = make(map[string]bool)
+				}
+				recorder.activeLimiterTags[tag] = true
 				return nil
 			},
 			applyGlobalDevices: func(tag string, apply globalDeviceApply) error {
@@ -300,6 +319,14 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 			recorder.updateRuleCalls++
 			recorder.lastRuleTag = tag
 			recorder.lastRules = append([]api.DetectRule(nil), rules...)
+			if recorder.activeRules == nil {
+				recorder.activeRules = make(map[string][]api.DetectRule)
+			}
+			if len(rules) == 0 {
+				delete(recorder.activeRules, tag)
+			} else {
+				recorder.activeRules[tag] = cloneDetectRules(rules)
+			}
 			return nil
 		},
 		onSnapshotApplied: func(snapshot syncApplySnapshot) {
@@ -467,6 +494,12 @@ func TestSyncApply_CompareAndApplyNodeRouteAndCertChanges(t *testing.T) {
 	}
 	if got := recorder.addedNodeInfos[0].RoutePolicy.Outbound.Candidates[0]; got != "new-candidate" {
 		t.Fatalf("expected addNewTag to receive updated route policy candidate, got %q", got)
+	}
+	if len(recorder.addedCertConfigs) != 1 ||
+		recorder.addedCertConfigs[0] == nil ||
+		recorder.addedCertConfigs[0].CertFile != "/tmp/new.crt" ||
+		recorder.addedCertConfigs[0].KeyFile != "/tmp/new.key" {
+		t.Fatalf("expected node runtime build to receive the same snapshot's certificate config, got %#v", recorder.addedCertConfigs)
 	}
 	if recorder.addUserCalls != 1 || recorder.addLimiterCalls != 1 || recorder.deleteLimiterCalls != 1 {
 		t.Fatalf("expected node re-apply to re-add users and limiter once, got addUsers=%d addLimiter=%d deleteLimiter=%d", recorder.addUserCalls, recorder.addLimiterCalls, recorder.deleteLimiterCalls)
@@ -648,6 +681,579 @@ func TestSyncApply_UnchangedObjectsDoNotReapply(t *testing.T) {
 	}
 	if controller.config.CertConfig == nil || controller.config.CertConfig.Provider != "cloudflare" || controller.config.CertConfig.Email != "ops@example.com" || controller.config.CertConfig.DNSEnv["CF_API_TOKEN"] != "same-token" {
 		t.Fatalf("expected unchanged cert snapshot to keep existing cert config, got %#v", controller.config.CertConfig)
+	}
+}
+
+func TestSyncApply_CertOnlyBuildFailurePreservesAppliedConfigAndRuntime(t *testing.T) {
+	buildErr := errors.New("candidate TLS runtime build failed")
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "new.example.com",
+		CertFile:   "/candidate/new.crt",
+		KeyFile:    "/candidate/new.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{certConfig: nextCert})
+	currentNode := &api.NodeInfo{
+		NodeType:  "V2ray",
+		NodeID:    1,
+		Port:      443,
+		EnableTLS: true,
+	}
+	currentUsers := []api.UserInfo{}
+	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	controller.setUserList(&currentUsers)
+	oldCert := &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+	controller.config.CertConfig = oldCert
+	recorder.addTagErr = buildErr
+	recorder.addTagErrAtCall = 1
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"}))
+
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want %v", err, buildErr)
+	}
+	if controller.config.CertConfig != oldCert {
+		t.Fatalf("failed certificate runtime build published config %#v", controller.config.CertConfig)
+	}
+	appliedNode, appliedTag, _ := controller.getStateSnapshot()
+	if !reflect.DeepEqual(appliedNode, currentNode) || appliedTag != controller.buildNodeTagFrom(currentNode) {
+		t.Fatalf("failed certificate runtime build changed applied node: node=%v tag=%q", appliedNode, appliedTag)
+	}
+	if len(recorder.removedTags) != 2 || recorder.addTagCalls != 2 {
+		t.Fatalf("candidate failure did not restore same-tag runtime: removed=%d addCalls=%d", len(recorder.removedTags), recorder.addTagCalls)
+	}
+}
+
+func TestSyncApply_CertOnlyCleanupFailureAttemptsLastKnownGoodRestore(t *testing.T) {
+	cleanupErr := errors.New("old TLS runtime cleanup failed")
+	restoreErr := errors.New("last-known-good TLS runtime restore failed")
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "new.example.com",
+		CertFile:   "/candidate/new.crt",
+		KeyFile:    "/candidate/new.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{certConfig: nextCert})
+	currentNode := &api.NodeInfo{
+		NodeType:  "V2ray",
+		NodeID:    1,
+		Port:      443,
+		EnableTLS: true,
+	}
+	currentUsers := []api.UserInfo{{UID: 1, Email: "user@example.com"}}
+	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	controller.setUserList(&currentUsers)
+	oldCert := &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+	controller.config.CertConfig = oldCert
+	recorder.cleanupTagErr = cleanupErr
+	recorder.cleanupTagErrAtCall = 1
+	recorder.addTagErr = restoreErr
+	recorder.addTagErrAtCall = 1
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"}))
+
+	if !errors.Is(err, cleanupErr) || !errors.Is(err, restoreErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want cleanup %v and restore %v", err, cleanupErr, restoreErr)
+	}
+	if recorder.addTagCalls != 1 {
+		t.Fatalf("last-known-good runtime restore attempts = %d, want 1", recorder.addTagCalls)
+	}
+	if controller.config.CertConfig != oldCert {
+		t.Fatalf("cleanup failure published candidate config: %#v", controller.config.CertConfig)
+	}
+}
+
+func TestSyncApply_CertOnlyUserReadinessFailureRestoresRuntimeAndLimiter(t *testing.T) {
+	userErr := errors.New("candidate TLS runtime user readiness failed")
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "new.example.com",
+		CertFile:   "/candidate/new.crt",
+		KeyFile:    "/candidate/new.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{certConfig: nextCert})
+	currentNode := &api.NodeInfo{
+		NodeType:  "V2ray",
+		NodeID:    1,
+		Port:      443,
+		EnableTLS: true,
+	}
+	currentUsers := []api.UserInfo{{UID: 1, Email: "user@example.com"}}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&currentUsers)
+	oldCert := &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+	controller.config.CertConfig = oldCert
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.activeLimiterTags = map[string]bool{currentTag: true}
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		recorder.recordAddNewUser(tag, users)
+		if recorder.addUserCalls == 1 {
+			return userErr
+		}
+		return nil
+	}
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"}))
+
+	if !errors.Is(err, userErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want %v", err, userErr)
+	}
+	if controller.config.CertConfig != oldCert {
+		t.Fatalf("user readiness failure published candidate config: %#v", controller.config.CertConfig)
+	}
+	if recorder.addTagCalls != 2 || recorder.cleanupTagCalls != 2 || recorder.addUserCalls != 2 {
+		t.Fatalf("candidate rollback ownership = addTag:%d cleanup:%d addUsers:%d, want 2/2/2", recorder.addTagCalls, recorder.cleanupTagCalls, recorder.addUserCalls)
+	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || !reflect.DeepEqual(runtime, currentNode) {
+		t.Fatalf("last-known-good runtime was not restored: %#v", runtime)
+	}
+	if recorder.deleteLimiterCalls != 0 || recorder.addLimiterCalls != 0 ||
+		!recorder.activeLimiterTags[currentTag] || len(recorder.activeLimiterTags) != 1 {
+		t.Fatalf("certificate-only replacement changed the applied limiter: deletes=%d adds=%d active=%#v", recorder.deleteLimiterCalls, recorder.addLimiterCalls, recorder.activeLimiterTags)
+	}
+}
+
+func TestSyncApply_NodeAndCertUserReadinessFailureRestoresLastKnownGoodSnapshot(t *testing.T) {
+	userErr := errors.New("candidate node users not ready")
+	users := []api.UserInfo{{UID: 1, Email: "user@example.com"}}
+	nextNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		EnableTLS:  true,
+		SpeedLimit: 200,
+	}
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "new.example.com",
+		CertFile:   "/candidate/new.crt",
+		KeyFile:    "/candidate/new.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo:   nextNode,
+		userList:   &users,
+		certConfig: nextCert,
+	})
+	currentNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		EnableTLS:  true,
+		SpeedLimit: 100,
+	}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&users)
+	oldCert := &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+	controller.config.CertConfig = oldCert
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.activeLimiterTags = map[string]bool{currentTag: true}
+	controller.syncApplyHooks.runtime.addUsers = func(payload *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		recorder.recordAddNewUser(tag, payload)
+		if recorder.addUserCalls == 1 {
+			return userErr
+		}
+		return nil
+	}
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
+
+	if !errors.Is(err, userErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want %v", err, userErr)
+	}
+	if controller.config.CertConfig != oldCert {
+		t.Fatalf("user readiness failure published candidate certificate config: %#v", controller.config.CertConfig)
+	}
+	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
+	if !reflect.DeepEqual(appliedNode, currentNode) || appliedTag != currentTag || !reflect.DeepEqual(appliedUsers, &users) {
+		t.Fatalf("user readiness failure published candidate state: node=%#v tag=%q users=%#v", appliedNode, appliedTag, appliedUsers)
+	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || !reflect.DeepEqual(runtime, currentNode) {
+		t.Fatalf("last-known-good runtime was not restored: %#v", runtime)
+	}
+	if len(recorder.activeRuntimes) != 1 {
+		t.Fatalf("candidate runtime remained active: %#v", recorder.activeRuntimes)
+	}
+	if !recorder.activeLimiterTags[currentTag] || len(recorder.activeLimiterTags) != 1 {
+		t.Fatalf("last-known-good limiter was not restored: %#v", recorder.activeLimiterTags)
+	}
+	if recorder.addTagCalls != 2 || recorder.cleanupTagCalls != 2 || recorder.addUserCalls != 2 {
+		t.Fatalf("runtime rollback ownership = addTag:%d cleanup:%d addUsers:%d, want 2/2/2", recorder.addTagCalls, recorder.cleanupTagCalls, recorder.addUserCalls)
+	}
+}
+
+func TestSyncApply_NodeFailureClearsCandidateTagRulesBeforeRestoringAppliedRules(t *testing.T) {
+	userErr := errors.New("candidate users not ready")
+	oldUsers := []api.UserInfo{{UID: 1, Email: "old@example.com"}}
+	oldRules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}}
+	nextRules := []api.DetectRule{{ID: 2, Pattern: regexp.MustCompile("next.example")}}
+	nextNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   2,
+		Port:     8443,
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo: nextNode,
+		ruleList: &nextRules,
+	})
+	oldNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   1,
+		Port:     443,
+	}
+	oldTag := controller.buildNodeTagFrom(oldNode)
+	nextTag := controller.buildNodeTagFrom(nextNode)
+	controller.setNodeState(oldNode, oldTag)
+	controller.setUserList(&oldUsers)
+	controller.setAppliedRuleState(oldTag, oldRules)
+	recorder.activeRuntimes = map[string]*api.NodeInfo{oldTag: cloneRecordedNodeInfo(oldNode)}
+	recorder.activeLimiterTags = map[string]bool{oldTag: true}
+	recorder.activeRules = map[string][]api.DetectRule{oldTag: cloneDetectRules(oldRules)}
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		recorder.recordAddNewUser(tag, users)
+		if recorder.addUserCalls == 1 {
+			return userErr
+		}
+		return nil
+	}
+
+	err := controller.ExecuteSyncAction(
+		context.Background(),
+		newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourceWS, syncActionMetadata{Trigger: "node_changed"}),
+	)
+
+	if !errors.Is(err, userErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want %v", err, userErr)
+	}
+	if _, exists := recorder.activeRules[nextTag]; exists {
+		t.Fatalf("failed candidate retained audit rules for tag %q: %#v", nextTag, recorder.activeRules[nextTag])
+	}
+	if got := recorder.activeRules[oldTag]; !reflect.DeepEqual(got, oldRules) {
+		t.Fatalf("last-known-good audit rules = %#v, want %#v", got, oldRules)
+	}
+}
+
+func TestSyncApply_NodeAndCertKeepsAppliedStatePrivateUntilUserReadiness(t *testing.T) {
+	oldUsers := []api.UserInfo{{UID: 1, Email: "old@example.com"}}
+	nextUsers := []api.UserInfo{{UID: 2, Email: "next@example.com"}}
+	oldRules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}}
+	nextRules := []api.DetectRule{{ID: 2, Pattern: regexp.MustCompile("next.example")}}
+	nextNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		EnableTLS:  true,
+		SpeedLimit: 200,
+	}
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "next.example.com",
+		CertFile:   "/candidate/next.crt",
+		KeyFile:    "/candidate/next.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo:   nextNode,
+		userList:   &nextUsers,
+		ruleList:   &nextRules,
+		certConfig: nextCert,
+	})
+	oldNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		EnableTLS:  true,
+		SpeedLimit: 100,
+	}
+	oldTag := controller.buildNodeTagFrom(oldNode)
+	controller.setNodeState(oldNode, oldTag)
+	controller.setUserList(&oldUsers)
+	controller.setAppliedRuleState(oldTag, oldRules)
+	controller.config.CertConfig = &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+
+	userReadinessEntered := make(chan struct{})
+	releaseUserReadiness := make(chan struct{})
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		recorder.recordAddNewUser(tag, users)
+		close(userReadinessEntered)
+		<-releaseUserReadiness
+		return nil
+	}
+
+	applyDone := make(chan error, 1)
+	go func() {
+		applyDone <- controller.ExecuteSyncAction(
+			context.Background(),
+			newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}),
+		)
+	}()
+
+	select {
+	case <-userReadinessEntered:
+	case err := <-applyDone:
+		t.Fatalf("ExecuteSyncAction() completed before user readiness was released: %v", err)
+	}
+
+	duringReadiness := controller.runtimeStateSnapshot()
+	close(releaseUserReadiness)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+
+	if appliedNode := duringReadiness.nodeInfoSnapshot(); !reflect.DeepEqual(appliedNode, oldNode) ||
+		duringReadiness.tag != oldTag ||
+		!reflect.DeepEqual(duringReadiness.userListSnapshot(), &oldUsers) ||
+		duringReadiness.appliedRuleTag != oldTag ||
+		!reflect.DeepEqual(duringReadiness.appliedRuleList, oldRules) {
+		t.Fatalf("candidate state became visible before user readiness: %#v", duringReadiness)
+	}
+
+	applied := controller.runtimeStateSnapshot()
+	if appliedNode := applied.nodeInfoSnapshot(); !reflect.DeepEqual(appliedNode, nextNode) ||
+		applied.tag != controller.buildNodeTagFrom(nextNode) ||
+		!reflect.DeepEqual(applied.userListSnapshot(), &nextUsers) ||
+		applied.appliedRuleTag != controller.buildNodeTagFrom(nextNode) ||
+		!reflect.DeepEqual(applied.appliedRuleList, nextRules) {
+		t.Fatalf("successful apply did not publish one complete candidate state: %#v", applied)
+	}
+}
+
+func TestSyncApply_NodeOnlyKeepsAppliedStatePrivateUntilUserReadiness(t *testing.T) {
+	oldUsers := []api.UserInfo{{UID: 1, Email: "old@example.com"}}
+	oldRules := []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile("old.example")}}
+	nextRules := []api.DetectRule{{ID: 2, Pattern: regexp.MustCompile("next.example")}}
+	nextNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		SpeedLimit: 200,
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo: nextNode,
+		ruleList: &nextRules,
+	})
+	oldNode := &api.NodeInfo{
+		NodeType:   "V2ray",
+		NodeID:     1,
+		Port:       443,
+		SpeedLimit: 100,
+	}
+	oldTag := controller.buildNodeTagFrom(oldNode)
+	controller.setNodeState(oldNode, oldTag)
+	controller.setUserList(&oldUsers)
+	controller.setAppliedRuleState(oldTag, oldRules)
+
+	userReadinessEntered := make(chan struct{})
+	releaseUserReadiness := make(chan struct{})
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		recorder.recordAddNewUser(tag, users)
+		close(userReadinessEntered)
+		<-releaseUserReadiness
+		return nil
+	}
+
+	applyDone := make(chan error, 1)
+	go func() {
+		applyDone <- controller.ExecuteSyncAction(
+			context.Background(),
+			newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourceWS, syncActionMetadata{Trigger: "node_changed"}),
+		)
+	}()
+
+	select {
+	case <-userReadinessEntered:
+	case err := <-applyDone:
+		t.Fatalf("ExecuteSyncAction() completed before user readiness was released: %v", err)
+	}
+
+	duringReadiness := controller.runtimeStateSnapshot()
+	close(releaseUserReadiness)
+	if err := <-applyDone; err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+
+	if appliedNode := duringReadiness.nodeInfoSnapshot(); !reflect.DeepEqual(appliedNode, oldNode) ||
+		duringReadiness.tag != oldTag ||
+		!reflect.DeepEqual(duringReadiness.userListSnapshot(), &oldUsers) ||
+		duringReadiness.appliedRuleTag != oldTag ||
+		!reflect.DeepEqual(duringReadiness.appliedRuleList, oldRules) {
+		t.Fatalf("node-only candidate state became visible before user readiness: %#v", duringReadiness)
+	}
+
+	applied := controller.runtimeStateSnapshot()
+	if appliedNode := applied.nodeInfoSnapshot(); !reflect.DeepEqual(appliedNode, nextNode) ||
+		applied.tag != controller.buildNodeTagFrom(nextNode) ||
+		!reflect.DeepEqual(applied.userListSnapshot(), &oldUsers) ||
+		applied.appliedRuleTag != controller.buildNodeTagFrom(nextNode) ||
+		!reflect.DeepEqual(applied.appliedRuleList, nextRules) {
+		t.Fatalf("successful node-only apply did not publish one complete candidate state: %#v", applied)
+	}
+}
+
+func TestSyncApply_CertOnlyBuildKeepsCandidatePrivateUntilRuntimeReady(t *testing.T) {
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "new.example.com",
+		CertFile:   "/candidate/new.crt",
+		KeyFile:    "/candidate/new.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{certConfig: nextCert})
+	currentNode := &api.NodeInfo{
+		NodeType:  "V2ray",
+		NodeID:    1,
+		Port:      443,
+		EnableTLS: true,
+	}
+	currentUsers := []api.UserInfo{}
+	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	controller.setUserList(&currentUsers)
+	oldCert := &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+	controller.config.CertConfig = oldCert
+	recorder.onAddTag = func(candidate *Config) {
+		if controller.config.CertConfig != oldCert {
+			t.Fatal("candidate certificate config published before runtime readiness")
+		}
+		if candidate == controller.config || candidate.CertConfig == oldCert {
+			t.Fatal("runtime build did not receive an isolated candidate config")
+		}
+		if candidate.CertConfig.CertFile != nextCert.CertFile || candidate.CertConfig.KeyFile != nextCert.KeyFile {
+			t.Fatalf("runtime candidate certificate = %#v", candidate.CertConfig)
+		}
+	}
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+
+	if len(recorder.removedTags) != 1 || recorder.addTagCalls != 1 {
+		t.Fatalf("certificate-only update rebuilds = removed:%d added:%d, want 1/1", len(recorder.removedTags), recorder.addTagCalls)
+	}
+	if controller.config.CertConfig == oldCert ||
+		controller.config.CertConfig.CertFile != nextCert.CertFile ||
+		controller.config.CertConfig.KeyFile != nextCert.KeyFile {
+		t.Fatalf("successful certificate runtime did not publish candidate config: %#v", controller.config.CertConfig)
+	}
+}
+
+func TestCandidateCertConfigMaterializesNormalizedMode(t *testing.T) {
+	tests := []struct {
+		name string
+		next *api.XrayRCertConfig
+		want string
+	}{
+		{
+			name: "implicit DNS",
+			next: &api.XrayRCertConfig{
+				Provider: "cloudflare",
+				DNSEnv:   map[string]string{"CF_API_TOKEN": "candidate-token"},
+			},
+			want: "dns",
+		},
+		{
+			name: "trimmed lowercase DNS",
+			next: &api.XrayRCertConfig{
+				CertMode: " DNS ",
+				Provider: "cloudflare",
+			},
+			want: "dns",
+		},
+		{
+			name: "lowercase file",
+			next: &api.XrayRCertConfig{
+				CertMode: "FILE",
+				CertFile: "/candidate/node.crt",
+				KeyFile:  "/candidate/node.key",
+			},
+			want: "file",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := candidateCertConfig(
+				&mylego.CertConfig{CertMode: "file"},
+				test.next,
+			)
+			if candidate == nil || candidate.CertMode != test.want {
+				t.Fatalf("candidateCertConfig() mode = %q, want %q", candidate.CertMode, test.want)
+			}
+		})
+	}
+}
+
+func TestSyncApply_SocksCertOnlyUserBuildReceivesCandidateConfig(t *testing.T) {
+	nextCert := &api.XrayRCertConfig{
+		CertMode:   "file",
+		CertDomain: "next.example.com",
+		CertFile:   "/candidate/next.crt",
+		KeyFile:    "/candidate/next.key",
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{certConfig: nextCert})
+	currentNode := &api.NodeInfo{
+		NodeType:  "Socks",
+		NodeID:    1,
+		Port:      443,
+		EnableTLS: true,
+	}
+	currentUsers := []api.UserInfo{{UID: 1, Email: "user@example.com"}}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&currentUsers)
+	controller.config.CertConfig = &mylego.CertConfig{
+		CertMode:   "file",
+		CertDomain: "old.example.com",
+		CertFile:   "/applied/old.crt",
+		KeyFile:    "/applied/old.key",
+	}
+
+	var userBuildCert *mylego.CertConfig
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, config *Config) error {
+		recorder.recordAddNewUser(tag, users)
+		userBuildCert = cloneRuntimeCertConfig(config.CertConfig)
+		return nil
+	}
+
+	if err := controller.ExecuteSyncAction(
+		context.Background(),
+		newSyncAction(syncActionTypeSyncCertConfig, syncActionSourceWS, syncActionMetadata{Trigger: "cert_changed"}),
+	); err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+
+	if userBuildCert == nil ||
+		userBuildCert.CertFile != nextCert.CertFile ||
+		userBuildCert.KeyFile != nextCert.KeyFile {
+		t.Fatalf("Socks user-embedded candidate runtime received certificate config %#v, want %#v", userBuildCert, nextCert)
 	}
 }
 
@@ -948,7 +1554,7 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 	controller, recorder := newTestSyncApplyController(fakeAPI)
 	tag := controller.buildNodeTagFrom(node)
 	addUserErr := errors.New("add user failed")
-	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string) error {
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
 		recorder.recordAddNewUser(tag, users)
 		return addUserErr
 	}
@@ -1113,8 +1719,9 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	if len(recorder.addedTags) != 1 {
 		t.Fatalf("expected one addNewTag attempt before aborting, got %d", len(recorder.addedTags))
 	}
-	if len(recorder.removedTags) != 0 {
-		t.Fatalf("expected old runtime tag to remain when addNewTag fails, got removed=%v", recorder.removedTags)
+	nextTag := controller.buildNodeTagFrom(fakeAPI.nodeInfo)
+	if len(recorder.removedTags) != 1 || recorder.removedTags[0] != nextTag {
+		t.Fatalf("expected only the partial candidate tag %q to be cleaned when addNewTag fails, got removed=%v", nextTag, recorder.removedTags)
 	}
 	if recorder.deleteLimiterCalls != 0 {
 		t.Fatalf("expected old limiter to remain untouched on addNewTag failure, got %d deletions", recorder.deleteLimiterCalls)
@@ -1147,6 +1754,120 @@ func TestSyncApply_NodeRebuildAddFailureKeepsOldRuntimeState(t *testing.T) {
 	}
 	if got := controller.getAppliedRuleTag(); got != currentTag {
 		t.Fatalf("expected rule state to remain bound to old tag %q, got %q", currentTag, got)
+	}
+}
+
+func TestSyncApply_TagChangeCleanupFailureRemovesCandidateAndRestoresOldRuntime(t *testing.T) {
+	cleanupErr := errors.New("old runtime cleanup failed")
+	users := []api.UserInfo{{UID: 1, Email: "rest@example.com"}}
+	nextNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   2,
+		Port:     8443,
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo: nextNode,
+		userList: &users,
+	})
+	currentNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   1,
+		Port:     443,
+	}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	nextTag := controller.buildNodeTagFrom(nextNode)
+	controller.setNodeState(currentNode, currentTag)
+	controller.setUserList(&users)
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.activeLimiterTags = map[string]bool{currentTag: true}
+	recorder.cleanupTagErr = cleanupErr
+	recorder.cleanupTagErrAtCall = 1
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
+
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want %v", err, cleanupErr)
+	}
+	if recorder.addTagCalls != 2 {
+		t.Fatalf("runtime add attempts = %d, want candidate plus old-runtime restore", recorder.addTagCalls)
+	}
+	if recorder.cleanupTagCalls != 2 ||
+		len(recorder.removedTags) != 2 ||
+		recorder.removedTags[0] != currentTag ||
+		recorder.removedTags[1] != nextTag {
+		t.Fatalf("runtime cleanup ownership = calls:%d tags:%v, want old then candidate", recorder.cleanupTagCalls, recorder.removedTags)
+	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || !reflect.DeepEqual(runtime, currentNode) {
+		t.Fatalf("last-known-good runtime was not restored: %#v", runtime)
+	}
+	if _, exists := recorder.activeRuntimes[nextTag]; exists || len(recorder.activeRuntimes) != 1 {
+		t.Fatalf("failed tag-change candidate remained active: %#v", recorder.activeRuntimes)
+	}
+	if !recorder.activeLimiterTags[currentTag] || len(recorder.activeLimiterTags) != 1 || recorder.deleteLimiterCalls != 0 {
+		t.Fatalf("failed tag change modified applied limiter: deletes=%d active=%#v", recorder.deleteLimiterCalls, recorder.activeLimiterTags)
+	}
+	appliedNode, appliedTag, _ := controller.getStateSnapshot()
+	if !reflect.DeepEqual(appliedNode, currentNode) || appliedTag != currentTag {
+		t.Fatalf("failed tag change published node state: node=%#v tag=%q", appliedNode, appliedTag)
+	}
+}
+
+func TestSyncApply_TagChangeBuildFailureCleansPartialCandidateAndJoinsCleanupError(t *testing.T) {
+	buildErr := errors.New("candidate outbound build failed")
+	cleanupErr := errors.New("partial candidate cleanup failed")
+	nextNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   2,
+		Port:     8443,
+	}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{
+		nodeInfo: nextNode,
+	})
+	currentNode := &api.NodeInfo{
+		NodeType: "V2ray",
+		NodeID:   1,
+		Port:     443,
+	}
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	nextTag := controller.buildNodeTagFrom(nextNode)
+	controller.setNodeState(currentNode, currentTag)
+	recorder.activeRuntimes = map[string]*api.NodeInfo{currentTag: cloneRecordedNodeInfo(currentNode)}
+	recorder.cleanupTagErr = cleanupErr
+	recorder.cleanupTagErrAtCall = 1
+	controller.syncApplyHooks.runtime.addTag = func(nodeInfo *api.NodeInfo, tag string, config *Config) error {
+		recorder.addTagCalls++
+		recorder.addedTags = append(recorder.addedTags, tag)
+		recorder.addedNodeInfos = append(recorder.addedNodeInfos, cloneRecordedNodeInfo(nodeInfo))
+		recorder.addedCertConfigs = append(recorder.addedCertConfigs, cloneRuntimeCertConfig(config.CertConfig))
+		if recorder.activeRuntimes == nil {
+			recorder.activeRuntimes = make(map[string]*api.NodeInfo)
+		}
+		recorder.activeRuntimes[tag] = cloneRecordedNodeInfo(nodeInfo)
+		return buildErr
+	}
+
+	err := controller.ExecuteSyncAction(
+		context.Background(),
+		newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourceWS, syncActionMetadata{Trigger: "node_changed"}),
+	)
+
+	if !errors.Is(err, buildErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want build %v and cleanup %v", err, buildErr, cleanupErr)
+	}
+	if recorder.cleanupTagCalls != 1 ||
+		len(recorder.removedTags) != 1 ||
+		recorder.removedTags[0] != nextTag {
+		t.Fatalf("partial candidate cleanup = calls:%d tags:%#v, want one cleanup for %q", recorder.cleanupTagCalls, recorder.removedTags, nextTag)
+	}
+	if _, exists := recorder.activeRuntimes[nextTag]; exists {
+		t.Fatalf("partial candidate remained active for tag %q: %#v", nextTag, recorder.activeRuntimes)
+	}
+	if runtime := recorder.activeRuntimes[currentTag]; runtime == nil || !reflect.DeepEqual(runtime, currentNode) {
+		t.Fatalf("last-known-good runtime changed after candidate build failure: %#v", runtime)
+	}
+	appliedNode, appliedTag, _ := controller.getStateSnapshot()
+	if !reflect.DeepEqual(appliedNode, currentNode) || appliedTag != currentTag {
+		t.Fatalf("candidate build failure published state: node=%#v tag=%q", appliedNode, appliedTag)
 	}
 }
 

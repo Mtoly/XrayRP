@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -107,14 +108,14 @@ func buildInboundWithUsers(config *Config, node inboundListenerView, tag string,
 	// TLS for HTTP proxy (HTTPS)
 	if node.enableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
 		streamSetting.Security = "tls"
-		certFile, keyFile, err := getCertFile(config.CertConfig)
+		certificate, err := buildTLSCertificateConfig(config)
 		if err != nil {
 			return nil, err
 		}
 		tlsSettings := &conf.TLSConfig{
 			RejectUnknownSNI: config.CertConfig.RejectUnknownSni,
 		}
-		tlsSettings.Certs = append(tlsSettings.Certs, &conf.TLSCertConfig{CertFile: certFile, KeyFile: keyFile, OcspStapling: 3600})
+		tlsSettings.Certs = append(tlsSettings.Certs, certificate)
 		streamSetting.TLSSettings = tlsSettings
 	}
 
@@ -431,14 +432,14 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 
 	if !isREALITY && node.listener.enableTLS && config.CertConfig != nil && config.CertConfig.CertMode != "none" {
 		streamSetting.Security = "tls"
-		certFile, keyFile, err := getCertFile(config.CertConfig)
+		certificate, err := buildTLSCertificateConfig(config)
 		if err != nil {
 			return nil, err
 		}
 		tlsSettings := &conf.TLSConfig{
 			RejectUnknownSNI: config.CertConfig.RejectUnknownSni,
 		}
-		tlsSettings.Certs = append(tlsSettings.Certs, &conf.TLSCertConfig{CertFile: certFile, KeyFile: keyFile, OcspStapling: 3600})
+		tlsSettings.Certs = append(tlsSettings.Certs, certificate)
 		streamSetting.TLSSettings = tlsSettings
 	}
 
@@ -452,6 +453,29 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 	inboundDetourConfig.StreamSetting = streamSetting
 
 	return inboundDetourConfig.Build()
+}
+
+func buildTLSCertificateConfig(config *Config) (*conf.TLSCertConfig, error) {
+	if config == nil || config.CertConfig == nil {
+		return nil, errors.New("certificate config is nil")
+	}
+	certConfig := config.CertConfig
+	certificate := &conf.TLSCertConfig{OcspStapling: 3600}
+	if certConfig.CertMode == "content" {
+		if strings.TrimSpace(certConfig.CertContent) == "" || strings.TrimSpace(certConfig.KeyContent) == "" {
+			return nil, errors.New("cert_mode content requires both cert_content and key_content")
+		}
+		certificate.CertStr = []string{certConfig.CertContent}
+		certificate.KeyStr = []string{certConfig.KeyContent}
+		return certificate, nil
+	}
+	certFile, keyFile, err := getCertFile(certConfig)
+	if err != nil {
+		return nil, err
+	}
+	certificate.CertFile = certFile
+	certificate.KeyFile = keyFile
+	return certificate, nil
 }
 
 func getCertFile(certConfig *mylego.CertConfig) (certFile string, keyFile string, err error) {

@@ -30,8 +30,8 @@ type globalDeviceApply struct {
 
 type syncApplyRuntimeHooks struct {
 	cleanupTag  func(*api.NodeInfo, string) error
-	addTag      func(*api.NodeInfo, string) error
-	addUsers    func(*[]api.UserInfo, *api.NodeInfo, string) error
+	addTag      func(*api.NodeInfo, string, *Config) error
+	addUsers    func(*[]api.UserInfo, *api.NodeInfo, string, *Config) error
 	removeUsers func([]string, string) error
 }
 
@@ -48,6 +48,7 @@ type syncApplyHooks struct {
 	runtime           syncApplyRuntimeHooks
 	limiter           syncApplyLimiterHooks
 	updateRule        func(string, []api.DetectRule) error
+	beforeReloadLock  func()
 	onSnapshotApplied func(syncApplySnapshot)
 }
 
@@ -178,7 +179,16 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapshot) error {
 	c := a.controller
 	hooks := a.hooks
-	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
+	if hooks.beforeReloadLock != nil {
+		hooks.beforeReloadLock()
+	}
+	c.reloadMu.Lock()
+	defer c.reloadMu.Unlock()
+
+	appliedState := c.runtimeStateSnapshot()
+	currentNodeInfo := appliedState.nodeInfoSnapshot()
+	currentTag := appliedState.tag
+	currentUserList := appliedState.userListSnapshot()
 
 	switch snapshot.Action.Type {
 	case syncActionTypeSyncDevices:
@@ -204,22 +214,109 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 	}
 
 	nodeChanged := false
-	if snapshot.NodeInfo != nil {
+	certChanged := snapshot.CertConfigFetched && !panelCertConfigEqual(c.config.CertConfig, snapshot.CertConfig)
+	appliedConfig := cloneControllerConfig(c.config)
+	candidateConfig := cloneControllerConfig(c.config)
+	if certChanged {
+		candidateConfig.CertConfig = candidateCertConfig(c.config.CertConfig, snapshot.CertConfig)
+	}
+	nextNodeInfo := snapshot.NodeInfo
+	forceCertificateRebuild := certChanged && currentNodeInfo != nil && currentNodeInfo.EnableTLS && !currentNodeInfo.EnableREALITY && !candidateConfig.EnableREALITY
+	if nextNodeInfo == nil && forceCertificateRebuild {
+		nextNodeInfo = currentNodeInfo
+	}
+	appliedNodeInfo := appliedState.nodeInfoSnapshot()
+	appliedTag := appliedState.tag
+	appliedUserList := appliedState.userListSnapshot()
+	appliedRuleTag := appliedState.appliedRuleTag
+	appliedRules := appliedState.appliedRuleList
+	var appliedLimiterSnapshot *limiter.InboundLimiterStateSnapshot
+	deferNodePublication := nextNodeInfo != nil &&
+		(currentNodeInfo == nil || forceCertificateRebuild || nodeStateChanged(currentNodeInfo, nextNodeInfo))
+	if deferNodePublication && currentTag != "" {
 		var err error
-		currentNodeInfo, currentTag, nodeChanged, err = a.applyNodeSnapshot(currentNodeInfo, currentTag, currentUserList, snapshot.NodeInfo)
+		appliedLimiterSnapshot, err = hooks.limiter.snapshotInbound(currentTag)
+		if err != nil {
+			return err
+		}
+	}
+	certPublishedWithRuntime := false
+	certOnlyRebuild := forceCertificateRebuild &&
+		currentTag != "" &&
+		(snapshot.NodeInfo == nil || !nodeStateChanged(currentNodeInfo, snapshot.NodeInfo))
+	if certOnlyRebuild {
+		if err := a.replaceRuntimeConfig(
+			currentNodeInfo,
+			currentTag,
+			currentUserList,
+			appliedConfig,
+			candidateConfig,
+		); err != nil {
+			return err
+		}
+		c.config.CertConfig = cloneRuntimeCertConfig(candidateConfig.CertConfig)
+		certPublishedWithRuntime = true
+	} else if nextNodeInfo != nil {
+		var err error
+		currentNodeInfo, currentTag, nodeChanged, err = a.applyNodeSnapshot(
+			currentNodeInfo,
+			currentTag,
+			currentUserList,
+			nextNodeInfo,
+			appliedConfig,
+			candidateConfig,
+			forceCertificateRebuild,
+			deferNodePublication,
+		)
 		if err != nil {
 			return err
 		}
 	}
 
+	pendingNodePublication := nodeChanged && deferNodePublication
+	rulesAppliedToCandidate := false
+	candidateRuleStateChanged := false
+	rollbackPendingNode := func(primary error) error {
+		if !pendingNodePublication {
+			return primary
+		}
+		rollbackErr := a.rollbackNodeCertificateApply(
+			currentNodeInfo,
+			currentTag,
+			appliedNodeInfo,
+			appliedTag,
+			appliedUserList,
+			appliedConfig,
+			appliedLimiterSnapshot,
+			appliedRuleTag,
+			appliedRules,
+			rulesAppliedToCandidate,
+		)
+		if rollbackErr == nil {
+			return primary
+		}
+		return errors.Join(primary, fmt.Errorf("rollback failed node and certificate apply: %w", rollbackErr))
+	}
+	if pendingNodePublication && appliedTag != "" {
+		if err := hooks.limiter.deleteInbound(appliedTag); err != nil {
+			return rollbackPendingNode(err)
+		}
+	}
 	if err := c.applyBaseConfig(snapshot.BaseConfig); err != nil {
-		return err
+		return rollbackPendingNode(err)
 	}
 
 	if snapshot.RuleList != nil && !c.config.DisableGetRule {
-		if err := a.applyRuleSnapshot(currentTag, *snapshot.RuleList); err != nil {
-			return err
+		var err error
+		candidateRuleStateChanged, err = a.applyRuleSnapshot(
+			currentTag,
+			*snapshot.RuleList,
+			!pendingNodePublication,
+		)
+		if err != nil {
+			return rollbackPendingNode(err)
 		}
+		rulesAppliedToCandidate = pendingNodePublication && candidateRuleStateChanged
 	}
 
 	effectiveUsers := snapshot.UserList
@@ -227,18 +324,40 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 		effectiveUsers = currentUserList
 	}
 	if currentNodeInfo != nil && effectiveUsers != nil {
-		if err := a.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers); err != nil {
-			return err
+		if err := a.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers, candidateConfig); err != nil {
+			return rollbackPendingNode(err)
 		}
 		if nodeChanged || snapshot.UserList != nil {
-			c.setUserList(effectiveUsers)
+			if !pendingNodePublication {
+				c.setUserList(effectiveUsers)
+			}
 		}
 	}
 
-	if snapshot.CertConfigFetched {
-		if err := a.applyCertConfigSnapshot(snapshot.CertConfig); err != nil {
-			return err
+	if pendingNodePublication {
+		candidateState := appliedState
+		candidateState.node = normalizeNodeInfo(currentNodeInfo)
+		candidateState.tag = currentTag
+		if nodeChanged || snapshot.UserList != nil {
+			candidateState.userListSet = effectiveUsers != nil
+			if effectiveUsers == nil {
+				candidateState.userList = nil
+			} else {
+				candidateState.userList = cloneSlice(*effectiveUsers)
+			}
 		}
+		if candidateRuleStateChanged {
+			candidateState.appliedRuleTag = currentTag
+			candidateState.appliedRuleList = cloneDetectRules(*snapshot.RuleList)
+		}
+		if certChanged {
+			c.config.CertConfig = cloneRuntimeCertConfig(candidateConfig.CertConfig)
+			certPublishedWithRuntime = true
+		}
+		c.commitRuntimeState(candidateState)
+	}
+	if certChanged && !certPublishedWithRuntime {
+		c.config.CertConfig = cloneRuntimeCertConfig(candidateConfig.CertConfig)
 	}
 
 	if hooks.onSnapshotApplied != nil {
@@ -247,7 +366,54 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 	return nil
 }
 
-func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.NodeInfo, currentTag string, currentUserList *[]api.UserInfo, nextNodeInfo *api.NodeInfo) (*api.NodeInfo, string, bool, error) {
+func (a nodeRuntimeStateApplyModule) replaceRuntimeConfig(
+	nodeInfo *api.NodeInfo,
+	tag string,
+	users *[]api.UserInfo,
+	appliedConfig *Config,
+	candidateConfig *Config,
+) error {
+	if err := a.cleanupRuntimeTag(nodeInfo, tag); err != nil {
+		if restoreErr := a.restoreRuntimeAfterFailedApply(nodeInfo, tag, users, appliedConfig); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore old runtime after failed certificate cleanup: %w", restoreErr))
+		}
+		return err
+	}
+
+	fail := func(primary error) error {
+		cleanupErr := a.cleanupRuntimeTag(nodeInfo, tag)
+		restoreErr := a.restoreRuntimeAfterFailedApply(nodeInfo, tag, users, appliedConfig)
+		joined := []error{primary}
+		if cleanupErr != nil {
+			joined = append(joined, fmt.Errorf("cleanup candidate certificate runtime: %w", cleanupErr))
+		}
+		if restoreErr != nil {
+			joined = append(joined, fmt.Errorf("restore last-known-good certificate runtime: %w", restoreErr))
+		}
+		return errors.Join(joined...)
+	}
+
+	if err := a.hooks.runtime.addTag(nodeInfo, tag, candidateConfig); err != nil {
+		return fail(err)
+	}
+	if users != nil {
+		if err := a.hooks.runtime.addUsers(users, nodeInfo, tag, candidateConfig); err != nil {
+			return fail(err)
+		}
+	}
+	return nil
+}
+
+func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(
+	currentNodeInfo *api.NodeInfo,
+	currentTag string,
+	currentUserList *[]api.UserInfo,
+	nextNodeInfo *api.NodeInfo,
+	appliedConfig *Config,
+	candidateConfig *Config,
+	force bool,
+	deferPublication bool,
+) (*api.NodeInfo, string, bool, error) {
 	c := a.controller
 	hooks := a.hooks
 	if nextNodeInfo == nil {
@@ -256,7 +422,7 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 	if nextNodeInfo.Port == 0 || nextNodeInfo.Port > 65535 {
 		return currentNodeInfo, currentTag, false, fmt.Errorf("invalid server port: %d, must be 1-65535", nextNodeInfo.Port)
 	}
-	if currentNodeInfo != nil && !nodeStateChanged(currentNodeInfo, nextNodeInfo) {
+	if !force && currentNodeInfo != nil && !nodeStateChanged(currentNodeInfo, nextNodeInfo) {
 		return currentNodeInfo, currentTag, false, nil
 	}
 
@@ -267,17 +433,33 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 
 	switch {
 	case currentNodeInfo == nil || currentTag == "":
-		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag, candidateConfig); err != nil {
+			if cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup partial candidate after build failure: %w", cleanupErr))
+			}
 			return currentNodeInfo, currentTag, false, err
 		}
 	case newTag != currentTag:
 		// When the runtime tag changes, stage the new runtime before tearing down
 		// the old one so add failures don't drop the currently serving node.
-		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag, candidateConfig); err != nil {
+			if cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup partial candidate after build failure: %w", cleanupErr))
+			}
 			return currentNodeInfo, currentTag, false, err
 		}
 		if err := removeCurrentRuntime(); err != nil {
-			return currentNodeInfo, currentTag, false, err
+			cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag)
+			restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList, appliedConfig)
+			var joined []error
+			joined = append(joined, err)
+			if cleanupErr != nil {
+				joined = append(joined, fmt.Errorf("cleanup candidate after failed old runtime removal: %w", cleanupErr))
+			}
+			if restoreErr != nil {
+				joined = append(joined, fmt.Errorf("restore old runtime after failed tag change: %w", restoreErr))
+			}
+			return currentNodeInfo, currentTag, false, errors.Join(joined...)
 		}
 	default:
 		// Same-tag rebuilds cannot pre-stage another runtime without introducing
@@ -285,11 +467,14 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 		// previous runtime if replacement add fails so the controller/runtime state
 		// stays on the last known-good node.
 		if err := removeCurrentRuntime(); err != nil {
+			if restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList, appliedConfig); restoreErr != nil {
+				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("restore old runtime after failed same-tag cleanup: %w", restoreErr))
+			}
 			return currentNodeInfo, currentTag, false, err
 		}
-		if err := hooks.runtime.addTag(nextNodeInfo, newTag); err != nil {
+		if err := hooks.runtime.addTag(nextNodeInfo, newTag, candidateConfig); err != nil {
 			cleanupErr := a.cleanupRuntimeTag(nextNodeInfo, newTag)
-			restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList)
+			restoreErr := a.restoreRuntimeAfterFailedApply(currentNodeInfo, currentTag, currentUserList, appliedConfig)
 			switch {
 			case cleanupErr != nil && restoreErr != nil:
 				return currentNodeInfo, currentTag, false, errors.Join(err, fmt.Errorf("cleanup partial same-tag rebuild runtime: %w", cleanupErr), fmt.Errorf("restore old runtime after failed same-tag rebuild: %w", restoreErr))
@@ -302,42 +487,52 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(currentNodeInfo *api.Node
 			}
 		}
 	}
-	if currentNodeInfo != nil && currentTag != "" {
+	if currentNodeInfo != nil && currentTag != "" && !deferPublication {
 		if err := hooks.limiter.deleteInbound(currentTag); err != nil {
 			return currentNodeInfo, currentTag, false, err
 		}
 	}
-	c.setNodeState(nextNodeInfo, newTag)
+	if !deferPublication {
+		c.setNodeState(nextNodeInfo, newTag)
+	}
 	return nextNodeInfo, newTag, true, nil
 }
 
-func (a nodeRuntimeStateApplyModule) applyRuleSnapshot(tag string, rules []api.DetectRule) error {
+func (a nodeRuntimeStateApplyModule) applyRuleSnapshot(tag string, rules []api.DetectRule, publish bool) (bool, error) {
 	c := a.controller
 	hooks := a.hooks
 	if tag == "" {
-		return nil
+		return false, nil
 	}
 	currentRuleTag, currentRules := c.getAppliedRuleState()
 	if detectRuleListsEqual(currentRules, rules) {
 		if tag == currentRuleTag || (len(currentRules) == 0 && len(rules) == 0) {
-			return nil
+			return false, nil
 		}
 	}
 	if err := hooks.updateRule(tag, rules); err != nil {
-		return err
+		return false, err
 	}
-	c.setAppliedRuleState(tag, rules)
-	return nil
+	if publish {
+		c.setAppliedRuleState(tag, rules)
+	}
+	return true, nil
 }
 
-func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInfo *api.NodeInfo, tag string, currentUserList, nextUserList *[]api.UserInfo) error {
+func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
+	nodeChanged bool,
+	nodeInfo *api.NodeInfo,
+	tag string,
+	currentUserList, nextUserList *[]api.UserInfo,
+	config *Config,
+) error {
 	c := a.controller
 	hooks := a.hooks
 	if nodeInfo == nil || nextUserList == nil {
 		return nil
 	}
 	if nodeChanged || currentUserList == nil {
-		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag); err != nil {
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
 			return err
 		}
 		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
@@ -347,7 +542,7 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	}
 
 	if nodeInfo.NodeType == "Socks" || nodeInfo.NodeType == "HTTP" {
-		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag); err != nil {
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
 			return err
 		}
 		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
@@ -386,7 +581,7 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 		removedUserKeys := buildRemovedUserKeys(tag, currentUserList, usersToRemove)
 		if len(removedUserKeys) > 0 {
 			if err := hooks.runtime.removeUsers(removedUserKeys, tag); err != nil {
-				if rollbackErr := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore); rollbackErr != nil {
+				if rollbackErr := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore, config); rollbackErr != nil {
 					err = errors.Join(err, fmt.Errorf("restore runtime users after remove failure: %w", rollbackErr))
 				}
 				return restoreLimiter(err)
@@ -398,8 +593,8 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(nodeChanged bool, nodeInf
 	usersToAdd = append(usersToAdd, diff.Added...)
 	usersToAdd = append(usersToAdd, diff.RuntimeUpdated...)
 	if len(usersToAdd) > 0 {
-		if err := hooks.runtime.addUsers(&usersToAdd, nodeInfo, tag); err != nil {
-			if rollbackErr := a.rollbackRuntimeUsersAfterAddFailure(nodeInfo, tag, usersToRestore, usersToAdd); rollbackErr != nil {
+		if err := hooks.runtime.addUsers(&usersToAdd, nodeInfo, tag, config); err != nil {
+			if rollbackErr := a.rollbackRuntimeUsersAfterAddFailure(nodeInfo, tag, usersToRestore, usersToAdd, config); rollbackErr != nil {
 				err = errors.Join(err, rollbackErr)
 			}
 			return restoreLimiter(err)
@@ -427,12 +622,17 @@ func currentRuntimeUsersForTargets(currentUserList *[]api.UserInfo, targets []ap
 	return users
 }
 
-func (a nodeRuntimeStateApplyModule) rollbackRuntimeUsersAfterAddFailure(nodeInfo *api.NodeInfo, tag string, usersToRestore, usersToRemove []api.UserInfo) error {
+func (a nodeRuntimeStateApplyModule) rollbackRuntimeUsersAfterAddFailure(
+	nodeInfo *api.NodeInfo,
+	tag string,
+	usersToRestore, usersToRemove []api.UserInfo,
+	config *Config,
+) error {
 	var rollbackErrs []error
 	if err := a.removeRuntimeUsersBestEffort(tag, usersToRemove); err != nil {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("remove partially added runtime users: %w", err))
 	}
-	if err := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore); err != nil {
+	if err := a.restoreRuntimeUsersBestEffort(nodeInfo, tag, usersToRestore, config); err != nil {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("restore removed runtime users: %w", err))
 	}
 	return errors.Join(rollbackErrs...)
@@ -449,41 +649,53 @@ func (a nodeRuntimeStateApplyModule) removeRuntimeUsersBestEffort(tag string, us
 	return errors.Join(rollbackErrs...)
 }
 
-func (a nodeRuntimeStateApplyModule) restoreRuntimeUsersBestEffort(nodeInfo *api.NodeInfo, tag string, users []api.UserInfo) error {
+func (a nodeRuntimeStateApplyModule) restoreRuntimeUsersBestEffort(nodeInfo *api.NodeInfo, tag string, users []api.UserInfo, config *Config) error {
 	var rollbackErrs []error
 	for _, user := range users {
 		restoreUsers := []api.UserInfo{user}
-		if err := a.hooks.runtime.addUsers(&restoreUsers, nodeInfo, tag); err != nil {
+		if err := a.hooks.runtime.addUsers(&restoreUsers, nodeInfo, tag, config); err != nil {
 			rollbackErrs = append(rollbackErrs, err)
 		}
 	}
 	return errors.Join(rollbackErrs...)
 }
 
-func (a nodeRuntimeStateApplyModule) applyCertConfigSnapshot(certConfig *api.XrayRCertConfig) error {
-	c := a.controller
-	current := c.config.CertConfig
-	if panelCertConfigEqual(current, certConfig) {
+func candidateCertConfig(current *mylego.CertConfig, next *api.XrayRCertConfig) *mylego.CertConfig {
+	if next == nil {
 		return nil
 	}
+	candidate := cloneRuntimeCertConfig(current)
+	if candidate == nil {
+		candidate = &mylego.CertConfig{}
+	}
+	candidate.CertMode = normalizeCertMode(next.CertMode, next.Provider, next.DNSEnv)
+	candidate.CertDomain = next.CertDomain
+	candidate.CertFile = next.CertFile
+	candidate.KeyFile = next.KeyFile
+	candidate.CertContent = next.CertContent
+	candidate.KeyContent = next.KeyContent
+	candidate.Provider = next.Provider
+	candidate.Email = next.Email
+	candidate.DNSEnv = cloneStringMap(next.DNSEnv)
+	return candidate
+}
+
+func cloneRuntimeCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
 	if certConfig == nil {
-		c.config.CertConfig = nil
 		return nil
 	}
-	if current == nil {
-		current = &mylego.CertConfig{}
-		c.config.CertConfig = current
+	cloned := *certConfig
+	cloned.DNSEnv = cloneStringMap(certConfig.DNSEnv)
+	return &cloned
+}
+
+func cloneControllerConfig(config *Config) *Config {
+	if config == nil {
+		return &Config{}
 	}
-	current.CertMode = certConfig.CertMode
-	current.CertDomain = certConfig.CertDomain
-	current.CertFile = certConfig.CertFile
-	current.KeyFile = certConfig.KeyFile
-	current.CertContent = certConfig.CertContent
-	current.KeyContent = certConfig.KeyContent
-	current.Provider = certConfig.Provider
-	current.Email = certConfig.Email
-	current.DNSEnv = cloneStringMap(certConfig.DNSEnv)
-	return nil
+	cloned := *config
+	cloned.CertConfig = cloneRuntimeCertConfig(config.CertConfig)
+	return &cloned
 }
 
 func ignoreNoClue(err error) error {
@@ -510,21 +722,117 @@ func (a nodeRuntimeStateApplyModule) cleanupRuntimeTag(nodeInfo *api.NodeInfo, t
 	return errors.Join(cleanupErrs...)
 }
 
-func (a nodeRuntimeStateApplyModule) restoreRuntimeAfterFailedApply(nodeInfo *api.NodeInfo, tag string, users *[]api.UserInfo) error {
+func (a nodeRuntimeStateApplyModule) restoreRuntimeAfterFailedApply(nodeInfo *api.NodeInfo, tag string, users *[]api.UserInfo, config *Config) error {
 	if nodeInfo == nil || tag == "" {
 		return nil
 	}
-	if err := a.hooks.runtime.addTag(nodeInfo, tag); err != nil {
+	if err := a.hooks.runtime.addTag(nodeInfo, tag, config); err != nil {
 		return err
 	}
 	if users == nil {
 		return nil
 	}
-	if err := a.hooks.runtime.addUsers(users, nodeInfo, tag); err != nil {
+	if err := a.hooks.runtime.addUsers(users, nodeInfo, tag, config); err != nil {
 		if cleanupErr := a.cleanupRuntimeTag(nodeInfo, tag); cleanupErr != nil {
 			return errors.Join(err, fmt.Errorf("cleanup restored runtime after user restore failure: %w", cleanupErr))
 		}
 		return err
+	}
+	return nil
+}
+
+func (a nodeRuntimeStateApplyModule) rollbackNodeCertificateApply(
+	candidateNodeInfo *api.NodeInfo,
+	candidateTag string,
+	appliedNodeInfo *api.NodeInfo,
+	appliedTag string,
+	appliedUsers *[]api.UserInfo,
+	appliedConfig *Config,
+	appliedLimiterSnapshot *limiter.InboundLimiterStateSnapshot,
+	appliedRuleTag string,
+	appliedRules []api.DetectRule,
+	restoreRules bool,
+) error {
+	var rollbackErrs []error
+	if err := a.cleanupRuntimeTag(candidateNodeInfo, candidateTag); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("cleanup candidate runtime: %w", err))
+	}
+	if candidateTag != "" {
+		if err := a.hooks.limiter.deleteInbound(candidateTag); err != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("cleanup candidate limiter: %w", err))
+		}
+	}
+	if err := a.restoreRuntimeAfterFailedApply(appliedNodeInfo, appliedTag, appliedUsers, appliedConfig); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("restore last-known-good runtime: %w", err))
+	}
+	if appliedTag != "" {
+		if err := a.hooks.limiter.restoreInbound(appliedTag, appliedLimiterSnapshot); err != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("restore last-known-good limiter: %w", err))
+		}
+	}
+	if restoreRules {
+		if candidateTag != "" {
+			if err := a.hooks.updateRule(candidateTag, nil); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("clear candidate rules: %w", err))
+			}
+		}
+		if appliedRuleTag != "" {
+			if err := a.hooks.updateRule(appliedRuleTag, appliedRules); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("restore last-known-good rules: %w", err))
+			} else {
+				a.controller.setAppliedRuleState(appliedRuleTag, appliedRules)
+			}
+		}
+	}
+	return errors.Join(rollbackErrs...)
+}
+
+func (a nodeRuntimeStateApplyModule) replaceCertificateRuntime(
+	nodeInfo *api.NodeInfo,
+	tag string,
+	users *[]api.UserInfo,
+	appliedConfig *Config,
+	candidateConfig *Config,
+	renewal preparedCertificateRenewal,
+) error {
+	if err := a.cleanupRuntimeTag(nodeInfo, tag); err != nil {
+		rollbackErr := renewal.Rollback()
+		restoreErr := a.restoreRuntimeAfterFailedApply(nodeInfo, tag, users, appliedConfig)
+		joined := []error{err, rollbackErr}
+		if restoreErr != nil {
+			joined = append(joined, fmt.Errorf("restore last-known-good certificate runtime: %w", restoreErr))
+		}
+		return errors.Join(joined...)
+	}
+
+	fail := func(primary error) error {
+		cleanupErr := a.cleanupRuntimeTag(nodeInfo, tag)
+		rollbackErr := renewal.Rollback()
+		restoreErr := a.restoreRuntimeAfterFailedApply(nodeInfo, tag, users, appliedConfig)
+		var joined []error
+		joined = append(joined, primary)
+		if cleanupErr != nil {
+			joined = append(joined, fmt.Errorf("cleanup candidate certificate runtime: %w", cleanupErr))
+		}
+		if rollbackErr != nil {
+			joined = append(joined, fmt.Errorf("rollback candidate certificate: %w", rollbackErr))
+		}
+		if restoreErr != nil {
+			joined = append(joined, fmt.Errorf("restore last-known-good certificate runtime: %w", restoreErr))
+		}
+		return errors.Join(joined...)
+	}
+
+	if err := a.hooks.runtime.addTag(nodeInfo, tag, candidateConfig); err != nil {
+		return fail(err)
+	}
+	if users != nil {
+		if err := a.hooks.runtime.addUsers(users, nodeInfo, tag, candidateConfig); err != nil {
+			return fail(err)
+		}
+	}
+	if err := renewal.Commit(); err != nil {
+		return fail(err)
 	}
 	return nil
 }
@@ -584,10 +892,10 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 		hooks.runtime.cleanupTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
 	}
 	if hooks.runtime.addTag == nil {
-		hooks.runtime.addTag = c.addNewTag
+		hooks.runtime.addTag = c.addNewTagWithConfig
 	}
 	if hooks.runtime.addUsers == nil {
-		hooks.runtime.addUsers = c.addNewUser
+		hooks.runtime.addUsers = c.addNewUserWithConfig
 	}
 	if hooks.runtime.removeUsers == nil {
 		hooks.runtime.removeUsers = c.removeUsers

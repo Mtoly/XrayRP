@@ -59,16 +59,28 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 		return nil, fmt.Errorf("unsupported hysteria2 obfs: %s", hy.Obfs)
 	}
 
-	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
-	if err != nil {
-		packetConn.Close()
-		return nil, err
-	}
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		packetConn.Close()
-		return nil, fmt.Errorf("load tls cert: %w", err)
+	var cert tls.Certificate
+	if len(spec.certificatePEM) != 0 || len(spec.privateKeyPEM) != 0 {
+		if len(spec.certificatePEM) == 0 || len(spec.privateKeyPEM) == 0 {
+			packetConn.Close()
+			return nil, fmt.Errorf("candidate certificate and private key must be provided together")
+		}
+		cert, err = tls.X509KeyPair(spec.certificatePEM, spec.privateKeyPEM)
+		if err != nil {
+			packetConn.Close()
+			return nil, fmt.Errorf("load candidate tls certificate: %w", err)
+		}
+	} else {
+		certFile, keyFile, certErr := getOrIssueCert(spec.certConfig)
+		if certErr != nil {
+			packetConn.Close()
+			return nil, certErr
+		}
+		cert, err = tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			packetConn.Close()
+			return nil, fmt.Errorf("load tls cert: %w", err)
+		}
 	}
 
 	bandwidth := server.BandwidthConfig{}
@@ -134,16 +146,18 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 
 // certMonitor checks and renews the certificate when needed.
 func (h *Hysteria2Service) certMonitor() error {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	if h.beforeCertificateStateRead != nil {
+		h.beforeCertificateStateRead()
+	}
 	if h.config == nil || h.config.CertConfig == nil {
 		return nil
 	}
 
-	h.reloadMu.Lock()
-	defer h.reloadMu.Unlock()
-
 	h.lifecycleMu.Lock()
 	nodeInfo := h.nodeInfo
-	runtimeBeforeReload := h.server
 	h.lifecycleMu.Unlock()
 	if nodeInfo == nil || !nodeInfo.EnableTLS {
 		return nil
@@ -151,33 +165,48 @@ func (h *Hysteria2Service) certMonitor() error {
 
 	switch h.config.CertConfig.CertMode {
 	case "dns", "http", "tls":
-		renew := h.renewCertificate
-		if renew == nil {
-			renew = defaultRenewCertificate
+		h.lifecycleMu.Lock()
+		if h.closed || h.state != stateRunning || h.server == nil || h.nodeInfo == nil {
+			state := h.state
+			h.lifecycleMu.Unlock()
+			return fmt.Errorf("Hysteria2 service cannot renew certificate from state %d", state)
 		}
-		certPath, keyPath, ok, err := renew(h.config.CertConfig)
-		if err != nil {
-			if h.logger != nil {
-				h.logger.Print(err)
+		h.state = stateReloading
+		h.lifecycleMu.Unlock()
+		defer func() {
+			h.lifecycleMu.Lock()
+			if h.state == stateReloading {
+				h.state = stateRunning
 			}
+			h.lifecycleMu.Unlock()
+		}()
+
+		prepare := h.prepareRenewal
+		if prepare == nil {
+			prepare = defaultPrepareCertificateRenewal
+		}
+		renewal, err := prepare(h.config.CertConfig)
+		if err != nil {
 			return err
 		}
-		if ok {
-			h.certReloadPending = true
-			h.logger.Infof("Hysteria2 certificate renewed for %s, reloading server (cert=%s, key=%s)", h.config.CertConfig.CertDomain, certPath, keyPath)
+		if renewal == nil {
+			return fmt.Errorf("certificate renewal preparation returned nil")
 		}
+		if !renewal.Renewed() {
+			return renewal.Rollback()
+		}
+		if h.logger != nil {
+			h.logger.Infof("Hysteria2 certificate renewed for %s, validating replacement runtime", h.config.CertConfig.CertDomain)
+		}
+		return h.reloadNodeWithCertificateLocked(nodeInfo, renewal)
 	}
 
-	if h.certReloadPending {
-		reloadErr := h.reloadNodeLocked(nodeInfo)
-		h.lifecycleMu.Lock()
-		applied := h.state == stateRunning && h.server != runtimeBeforeReload
-		h.lifecycleMu.Unlock()
-		if reloadErr == nil || applied {
-			h.certReloadPending = false
-		}
-		return reloadErr
-	}
+	return nil
+}
 
+func (h *Hysteria2Service) certMonitorPeriodic() error {
+	if err := h.certMonitor(); err != nil && h.logger != nil {
+		h.logger.Warn("certificate monitor failed; will retry")
+	}
 	return nil
 }

@@ -46,12 +46,8 @@ func defaultCloseRuntime(runtime runtimeInstance) error {
 	return runtime.Close()
 }
 
-func defaultRenewCertificate(certConfig *mylego.CertConfig) (string, string, bool, error) {
-	lego, err := mylego.New(certConfig)
-	if err != nil {
-		return "", "", false, err
-	}
-	return lego.RenewCert()
+func defaultPrepareCertificateRenewal(certConfig *mylego.CertConfig) (preparedCertificateRenewal, error) {
+	return mylego.PrepareRenewal(certConfig)
 }
 
 func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
@@ -67,7 +63,7 @@ func New(apiClient PanelClient, cfg *controller.Config) *TuicService {
 		reloadRuntimeFactory: defaultReloadRuntimeFactory,
 		startRuntime:         defaultStartRuntime,
 		closeRuntime:         defaultCloseRuntime,
-		renewCertificate:     defaultRenewCertificate,
+		prepareRenewal:       defaultPrepareCertificateRenewal,
 		taskFactory:          defaultTaskFactory,
 		logger:               logger,
 		rules:                rule.New(),
@@ -223,7 +219,7 @@ func (s *TuicService) Start() (err error) {
 	tasks.Add(factory(tag, interval, s.userMonitor))
 	tasks.Add(factory("node monitor", interval, s.nodeMonitor))
 	if nodeInfo.EnableTLS {
-		tasks.Add(factory("cert monitor", interval*60, s.certMonitor))
+		tasks.Add(factory("cert monitor", interval*60, s.certMonitorPeriodic))
 	}
 
 	if err := tasks.Start(specialruntime.RuntimeShutdown{
@@ -320,6 +316,15 @@ func (s *TuicService) reloadNode(nodeInfo *api.NodeInfo) error {
 }
 
 func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
+	return s.reloadNodeWithCertificateLocked(nodeInfo, nil)
+}
+
+func (s *TuicService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
+	if renewal != nil {
+		defer func() {
+			err = errors.Join(err, renewal.Rollback())
+		}()
+	}
 	if nodeInfo == nil {
 		return nil
 	}
@@ -332,13 +337,20 @@ func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	if s.config == nil || s.config.CertConfig == nil {
 		return errors.New("CertConfig is required for TUIC")
 	}
+	if renewal != nil && (len(renewal.CertificatePEM()) == 0 || len(renewal.PrivateKeyPEM()) == 0) {
+		return errors.New("prepared certificate renewal is missing certificate or private key PEM")
+	}
 
 	candidateNode := *nodeInfo
 	if candidateNode.TuicConfig == nil {
 		candidateNode.TuicConfig = &api.TuicConfig{}
 	}
 	s.lifecycleMu.Lock()
-	if s.closed || s.state != stateRunning || s.box == nil || s.nodeInfo == nil {
+	expectedState := stateRunning
+	if renewal != nil {
+		expectedState = stateReloading
+	}
+	if s.closed || s.state != expectedState || s.box == nil || s.nodeInfo == nil {
 		state := s.state
 		s.lifecycleMu.Unlock()
 		return fmt.Errorf("TUIC service cannot reload from state %d", state)
@@ -353,9 +365,11 @@ func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 
 	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
 	candidateRuntime, _, err := s.buildReloadRuntime(runtimeBuildSpec{
-		nodeInfo:   &candidateNode,
-		inboundTag: oldInboundTag,
-		certConfig: candidateCertConfig,
+		nodeInfo:       &candidateNode,
+		inboundTag:     oldInboundTag,
+		certConfig:     candidateCertConfig,
+		certificatePEM: certificatePEM(renewal),
+		privateKeyPEM:  privateKeyPEM(renewal),
 	})
 	if err != nil {
 		s.finishReload(oldRuntime, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateRunning, nil)
@@ -372,8 +386,9 @@ func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 	}
 
 	oldCloseErr := closeRuntime(oldRuntime)
-	if err := startRuntime(candidateRuntime); err != nil {
-		reloadErr := errors.Join(oldCloseErr, err, closeRuntime(candidateRuntime))
+	if startErr := startRuntime(candidateRuntime); startErr != nil {
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		reloadErr := errors.Join(oldCloseErr, startErr, closeRuntime(candidateRuntime), rollbackErr)
 		restoredRuntime, _, restoreErr := s.buildReloadRuntime(runtimeBuildSpec{
 			nodeInfo:   oldNodeInfo,
 			inboundTag: oldInboundTag,
@@ -394,9 +409,54 @@ func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
 		return reloadErr
 	}
 
+	if renewal != nil {
+		if commitErr := renewal.Commit(); commitErr != nil {
+			reloadErr := errors.Join(oldCloseErr, commitErr, closeRuntime(candidateRuntime))
+			restoredRuntime, _, restoreErr := s.buildReloadRuntime(runtimeBuildSpec{
+				nodeInfo:   oldNodeInfo,
+				inboundTag: oldInboundTag,
+				certConfig: oldCertConfig,
+			})
+			if restoreErr == nil {
+				restoreErr = startRuntime(restoredRuntime)
+				if restoreErr != nil {
+					restoreErr = errors.Join(restoreErr, closeRuntime(restoredRuntime))
+				}
+			}
+			if restoreErr != nil {
+				joined := errors.Join(reloadErr, restoreErr)
+				s.finishReload(nil, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateFailed, joined)
+				return joined
+			}
+			s.finishReload(restoredRuntime, oldNodeInfo, oldTag, oldInboundTag, oldCertConfig, stateRunning, nil)
+			return reloadErr
+		}
+	}
+
 	s.finishReload(candidateRuntime, &candidateNode, oldTag, oldInboundTag, candidateCertConfig, stateRunning, nil)
 	s.logger.Infof("TUIC node reloaded on %s:%d", s.config.ListenIP, candidateNode.Port)
 	return oldCloseErr
+}
+
+func certificatePEM(renewal preparedCertificateRenewal) []byte {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.CertificatePEM()
+}
+
+func privateKeyPEM(renewal preparedCertificateRenewal) []byte {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.PrivateKeyPEM()
+}
+
+func rollbackCertificateRenewal(renewal preparedCertificateRenewal) error {
+	if renewal == nil {
+		return nil
+	}
+	return renewal.Rollback()
 }
 
 func (s *TuicService) finishReload(runtime runtimeInstance, nodeInfo *api.NodeInfo, _, _ string, certConfig *mylego.CertConfig, state lifecycleState, runtimeErr error) {
