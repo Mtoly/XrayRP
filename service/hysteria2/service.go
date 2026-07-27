@@ -256,7 +256,7 @@ func (h *Hysteria2Service) Start() (err error) {
 	if !h.config.DisableGetRule && h.rules != nil {
 		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
 			h.logger.Printf("Get rule list filed: %s", ruleErr)
-		} else if ruleList != nil && len(*ruleList) > 0 {
+		} else if ruleList != nil {
 			if ruleErr := h.rules.UpdateRule(tag, *ruleList); ruleErr != nil {
 				h.logger.Print(ruleErr)
 			}

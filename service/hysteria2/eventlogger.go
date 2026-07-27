@@ -1,7 +1,6 @@
 package hysteria2
 
 import (
-	"fmt"
 	"net"
 	"time"
 
@@ -57,8 +56,7 @@ func (l *hyEventLogger) auditRequest(addr net.Addr, id, reqAddr string) {
 		return
 	}
 
-	userKey := fmt.Sprintf("%d", user.UID)
-	if l.svc.rules.Detect(l.svc.appliedTag(), reqAddr, userKey, host) {
+	if l.svc.rules.DetectUID(l.svc.appliedTag(), reqAddr, user.UID, host) {
 		// Mark this connection ID as blocked. The TrafficLogger will see this
 		// flag and return false on the next traffic callback, which instructs
 		// the Hysteria2 core to disconnect the client immediately.

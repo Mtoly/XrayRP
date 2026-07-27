@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
@@ -165,6 +166,20 @@ func (c *Controller) buildUserTag(user *api.UserInfo) string {
 
 func (c *Controller) buildUserTagFrom(user api.UserInfo, tag string) string {
 	return fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+}
+
+func auditUIDFromUserTag(tag, userTag string) (int, bool) {
+	prefix := tag + "|"
+	if !strings.HasPrefix(userTag, prefix) {
+		return 0, false
+	}
+	identity := strings.TrimPrefix(userTag, prefix)
+	lastSeparator := strings.LastIndexByte(identity, '|')
+	if lastSeparator < 0 || lastSeparator == len(identity)-1 {
+		return 0, false
+	}
+	uid, err := strconv.Atoi(identity[lastSeparator+1:])
+	return uid, err == nil
 }
 
 func (c *Controller) checkShadowsocksPassword(password string, method string) (string, error) {

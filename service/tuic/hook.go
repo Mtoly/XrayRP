@@ -2,7 +2,6 @@ package tuic
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 
@@ -173,12 +172,11 @@ func (t *tuicTracker) RoutedConnection(_ context.Context, conn net.Conn, m adapt
 
 	// Audit check: if a rule hits, mark this connection as blocked and close it.
 	if ok && dest != "" && t.svc.rules != nil {
-		userKey := fmt.Sprintf("%d", userRec.UID)
 		srcIP := remote
 		if h, _, err := net.SplitHostPort(srcIP); err == nil {
 			srcIP = h
 		}
-		if t.svc.rules.Detect(nodeTag, dest, userKey, srcIP) {
+		if t.svc.rules.DetectUID(nodeTag, dest, userRec.UID, srcIP) {
 			t.svc.logger.WithFields(fields).Warn("TUIC audit rule hit, closing connection")
 			blocked = true
 		}
@@ -262,9 +260,8 @@ func (t *tuicTracker) RoutedPacketConnection(_ context.Context, conn N.PacketCon
 
 	// Audit check for UDP: if a rule hits, block this logical session.
 	if ok && dest != "" && t.svc.rules != nil {
-		userKey := fmt.Sprintf("%d", userRec.UID)
 		srcIP := host
-		if t.svc.rules.Detect(nodeTag, dest, userKey, srcIP) {
+		if t.svc.rules.DetectUID(nodeTag, dest, userRec.UID, srcIP) {
 			t.svc.logger.WithFields(fields).Warn("TUIC audit rule hit on UDP, closing connection")
 			blocked = true
 		}

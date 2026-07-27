@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"reflect"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -397,6 +398,27 @@ func (f *fakeRuntimeServer) servingSignal() <-chan struct{} {
 	ready := make(chan struct{})
 	close(ready)
 	return ready
+}
+
+func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeServer{events: events})
+	service.config.DisableGetRule = false
+	tag := "Hysteria2_127.0.0.1_9443_9"
+	if err := service.rules.UpdateRule(tag, []api.DetectRule{{
+		ID:      7,
+		Pattern: regexp.MustCompile(`blocked\.example`),
+	}}); err != nil {
+		t.Fatalf("UpdateRule() error = %v", err)
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer service.Close()
+	if service.rules.DetectUID(tag, "blocked.example:443", 17, "192.0.2.1") {
+		t.Fatal("Start() retained rules absent from the panel snapshot")
+	}
 }
 
 func TestStartPreservesUsersWhenPanelReturnsNoUserSnapshot(t *testing.T) {

@@ -3,6 +3,7 @@ package anytls
 import (
 	"errors"
 	"reflect"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -274,6 +275,27 @@ func newStartTestService(events *lifecycleEvents, runtime *fakeRuntimeInstance) 
 		return &fakePeriodicTask{tag: tag, events: events}
 	}
 	return service
+}
+
+func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.config.DisableGetRule = false
+	tag := "AnyTLS_127.0.0.1_443_7"
+	if err := service.rules.UpdateRule(tag, []api.DetectRule{{
+		ID:      7,
+		Pattern: regexp.MustCompile(`blocked\.example`),
+	}}); err != nil {
+		t.Fatalf("UpdateRule() error = %v", err)
+	}
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer service.Close()
+	if service.rules.DetectUID(tag, "blocked.example:443", 17, "192.0.2.1") {
+		t.Fatal("Start() retained rules absent from the panel snapshot")
+	}
 }
 
 func TestStartBuildsRuntimeWithIncomingTag(t *testing.T) {

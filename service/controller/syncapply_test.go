@@ -329,6 +329,12 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 			}
 			return nil
 		},
+		retireRuleTag: func(oldTag, replacementTag string) {
+			if recorder.activeRules == nil {
+				return
+			}
+			delete(recorder.activeRules, oldTag)
+		},
 		onSnapshotApplied: func(snapshot syncApplySnapshot) {
 			recorder.recordAppliedSnapshot(snapshot)
 		},
@@ -604,8 +610,12 @@ func TestSyncApply_TagChangeWithSameRulesReappliesRulesThroughUnifiedApply(t *te
 		SpeedLimit:  100,
 		RoutePolicy: routePolicyWithCandidate("same-candidate"),
 	}
-	controller.setNodeState(currentNode, controller.buildNodeTagFrom(currentNode))
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
 	controller.setAppliedRuleList(rules)
+	recorder.activeRules = map[string][]api.DetectRule{
+		currentTag: cloneDetectRules(rules),
+	}
 
 	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncRoutesAndOutbounds, syncActionSourceWS, syncActionMetadata{Trigger: "routes_changed"})); err != nil {
 		t.Fatalf("ExecuteSyncAction returned error: %v", err)
@@ -625,6 +635,12 @@ func TestSyncApply_TagChangeWithSameRulesReappliesRulesThroughUnifiedApply(t *te
 	}
 	if got := controller.getAppliedRuleTag(); got != recorder.addedTags[0] {
 		t.Fatalf("expected controller rule state to track new runtime tag %q, got %q", recorder.addedTags[0], got)
+	}
+	if _, retained := recorder.activeRules[currentTag]; retained {
+		t.Fatalf("successful tag change retained rules for old tag %q", currentTag)
+	}
+	if got := recorder.activeRules[recorder.addedTags[0]]; !reflect.DeepEqual(got, rules) {
+		t.Fatalf("rules for new tag = %#v, want %#v", got, rules)
 	}
 }
 

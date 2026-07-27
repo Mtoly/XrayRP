@@ -500,7 +500,7 @@ func (h *Hysteria2Service) userMonitor() error {
 			if !errors.Is(err, api.ErrRuleNotModified) {
 				h.logger.Printf("Get rule list filed: %s", err)
 			}
-		} else if len(*ruleList) > 0 {
+		} else if ruleList != nil {
 			if err := h.rules.UpdateRule(tag, *ruleList); err != nil {
 				h.logger.Print(err)
 			}

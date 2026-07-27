@@ -776,7 +776,7 @@ func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 	if service.tag != oldTag || service.inboundTag != oldTag {
 		t.Fatalf("reload changed stable runtime tags: tag=%q inbound=%q want=%q", service.tag, service.inboundTag, oldTag)
 	}
-	if !service.rules.Detect(service.tag, "blocked.example:443", "17", "127.0.0.1") {
+	if !service.rules.DetectUID(service.tag, "blocked.example:443", 17, "127.0.0.1") {
 		t.Fatal("detect rules no longer apply after successful reload")
 	}
 }

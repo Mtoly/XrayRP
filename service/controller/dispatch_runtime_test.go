@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	logtest "github.com/sirupsen/logrus/hooks/test"
+	xraynet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features"
@@ -32,6 +34,23 @@ func (f *fakeOutboundHandler) ProxySettings() *serial.TypedMessage  { return nil
 var _ outbound.Handler = (*fakeOutboundHandler)(nil)
 var _ features.Feature = (*fakeOutboundHandler)(nil)
 
+type recordingAuditRuleManager struct {
+	uid         int
+	uidCalls    int
+	legacyCalls int
+}
+
+func (m *recordingAuditRuleManager) Detect(string, string, string, string) bool {
+	m.legacyCalls++
+	return true
+}
+
+func (m *recordingAuditRuleManager) DetectUID(_ string, _ string, uid int, _ string) bool {
+	m.uid = uid
+	m.uidCalls++
+	return true
+}
+
 type fakeOutboundManager struct {
 	handlers map[string]outbound.Handler
 }
@@ -56,6 +75,44 @@ func (m *fakeOutboundManager) AddHandler(ctx context.Context, handler outbound.H
 func (m *fakeOutboundManager) RemoveHandler(ctx context.Context, tag string) error {
 	delete(m.handlers, tag)
 	return nil
+}
+
+func TestDataPathWrapperAuditsExplicitUID(t *testing.T) {
+	base := &fakeOutboundHandler{tag: "node"}
+	auditRules := &recordingAuditRuleManager{}
+	wrapper := &dataPathWrapper{
+		Handler: base,
+		ruleMgr: auditRules,
+		tag:     "node",
+	}
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+		Tag: "node",
+		Source: xraynet.TCPDestination(
+			xraynet.ParseAddress("192.0.2.1"),
+			xraynet.Port(1234),
+		),
+		User: &protocol.MemoryUser{Email: "node|mail|alias@example.test|17"},
+	})
+	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{
+		Target: xraynet.TCPDestination(
+			xraynet.ParseAddress("blocked.example"),
+			xraynet.Port(443),
+		),
+	}})
+
+	wrapper.Dispatch(ctx, &transport.Link{})
+
+	if auditRules.uidCalls != 1 || auditRules.legacyCalls != 0 || auditRules.uid != 17 {
+		t.Fatalf(
+			"audit calls = typed:%d legacy:%d UID:%d, want typed:1 legacy:0 UID:17",
+			auditRules.uidCalls,
+			auditRules.legacyCalls,
+			auditRules.uid,
+		)
+	}
+	if base.dispatched {
+		t.Fatal("matching audit rule reached the outbound handler")
+	}
 }
 func (m *fakeOutboundManager) ListHandlers(ctx context.Context) []outbound.Handler {
 	result := make([]outbound.Handler, 0, len(m.handlers))

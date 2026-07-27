@@ -48,6 +48,7 @@ type syncApplyHooks struct {
 	runtime           syncApplyRuntimeHooks
 	limiter           syncApplyLimiterHooks
 	updateRule        func(string, []api.DetectRule) error
+	retireRuleTag     func(string, string)
 	beforeReloadLock  func()
 	onSnapshotApplied func(syncApplySnapshot)
 }
@@ -355,6 +356,11 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 			certPublishedWithRuntime = true
 		}
 		c.commitRuntimeState(candidateState)
+	}
+	if candidateRuleStateChanged &&
+		appliedRuleTag != "" &&
+		appliedRuleTag != currentTag {
+		hooks.retireRuleTag(appliedRuleTag, currentTag)
 	}
 	if certChanged && !certPublishedWithRuntime {
 		c.config.CertConfig = cloneRuntimeCertConfig(candidateConfig.CertConfig)
@@ -920,6 +926,9 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	}
 	if hooks.updateRule == nil {
 		hooks.updateRule = c.UpdateRule
+	}
+	if hooks.retireRuleTag == nil {
+		hooks.retireRuleTag = c.retireRuleTag
 	}
 	return hooks
 }

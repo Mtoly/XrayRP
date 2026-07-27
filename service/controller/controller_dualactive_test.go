@@ -134,6 +134,33 @@ func newLifecycleTestController(apiClient PanelClient, enableWS bool) *Controlle
 	}
 }
 
+func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
+	controller := newLifecycleTestController(newFakeControllerAPI(), false)
+	controller.config.DisableGetRule = false
+	controller.syncCoordinatorFactory = func(syncActionExecutor) syncCoordinatorLifecycle {
+		return &fakeLifecycleCoordinator{}
+	}
+	var (
+		updateCalls int
+		updatedTag  string
+		updated     []api.DetectRule
+	)
+	controller.syncApplyHooks.updateRule = func(tag string, rules []api.DetectRule) error {
+		updateCalls++
+		updatedTag = tag
+		updated = append([]api.DetectRule(nil), rules...)
+		return nil
+	}
+
+	if err := controller.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer controller.Close()
+	if updateCalls != 1 || updatedTag == "" || len(updated) != 0 {
+		t.Fatalf("empty rule update = calls:%d tag:%q rules:%#v", updateCalls, updatedTag, updated)
+	}
+}
+
 func TestController_WSStartInitializesRuntimeWhenCapableAndEnabled(t *testing.T) {
 	apiClient := newFakeControllerWSCapableAPI()
 	controller := newLifecycleTestController(apiClient, true)

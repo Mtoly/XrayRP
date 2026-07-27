@@ -37,6 +37,7 @@ type dataPathWrapper struct {
 	// ruleMgr provides audit detection
 	ruleMgr interface {
 		Detect(tag string, destination string, email string, srcIP string) bool
+		DetectUID(tag string, destination string, uid int, srcIP string) bool
 	}
 	// tag identifies this node/inbound tag for limiter and rules
 	tag string
@@ -119,10 +120,18 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 				if outs := session.OutboundsFromContext(ctx); len(outs) > 0 {
 					destStr = outs[len(outs)-1].Target.String()
 				}
-				if destStr != "" && w.ruleMgr.Detect(nodeTag, destStr, email, srcIP) {
-					common.Close(link.Writer)
-					common.Interrupt(link.Reader)
-					return
+				if destStr != "" {
+					rejected := false
+					if uid, valid := auditUIDFromUserTag(nodeTag, email); valid {
+						rejected = w.ruleMgr.DetectUID(nodeTag, destStr, uid, srcIP)
+					} else {
+						rejected = w.ruleMgr.Detect(nodeTag, destStr, email, srcIP)
+					}
+					if rejected {
+						common.Close(link.Writer)
+						common.Interrupt(link.Reader)
+						return
+					}
 				}
 			}
 
@@ -310,4 +319,8 @@ func (c *Controller) UpdateRule(tag string, newRuleList []api.DetectRule) error 
 
 func (c *Controller) GetDetectResult(tag string) (*[]api.DetectResult, error) {
 	return c.dispatcher.RuleManager.GetDetectResult(tag)
+}
+
+func (c *Controller) retireRuleTag(oldTag, replacementTag string) {
+	c.dispatcher.RuleManager.RetireTag(oldTag, replacementTag)
 }
