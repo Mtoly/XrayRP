@@ -2,13 +2,18 @@ package anytls
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
+
+	commonlimiter "github.com/Mtoly/XrayRP/common/limiter"
 )
 
 type connCounter struct {
@@ -16,6 +21,7 @@ type connCounter struct {
 	svc     *AnyTLSService
 	user    string
 	blocked bool
+	ctx     context.Context
 	limiter *rate.Limiter
 }
 
@@ -23,34 +29,42 @@ func (c *connCounter) Read(p []byte) (int, error) {
 	if c.blocked {
 		return 0, io.EOF
 	}
-	n, err := c.Conn.Read(p)
-	if n > 0 && c.svc != nil {
-		c.svc.addTraffic(c.user, int64(n), 0)
-		// Re-add IP to onlineIPs on every traffic event
-		// This ensures active connections are tracked even after collectUsage() clears the maps
-		c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
+	n, readErr := c.Conn.Read(p)
+	if n > 0 {
+		if c.svc != nil {
+			c.svc.addTraffic(c.user, int64(n), 0)
+			// Re-add IP to onlineIPs on every traffic event
+			// This ensures active connections are tracked even after collectUsage() clears the maps
+			c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
+		}
 		if c.limiter != nil {
-			_ = c.limiter.WaitN(context.Background(), n)
+			if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(n)); limitErr != nil {
+				return 0, errors.Join(limitErr, readErr, c.Close())
+			}
 		}
 	}
-	return n, err
+	return n, readErr
 }
 
 func (c *connCounter) Write(p []byte) (int, error) {
 	if c.blocked {
 		return 0, io.EOF
 	}
-	n, err := c.Conn.Write(p)
-	if n > 0 && c.svc != nil {
-		c.svc.addTraffic(c.user, 0, int64(n))
-		// Re-add IP to onlineIPs on every traffic event
-		// This ensures active connections are tracked even after collectUsage() clears the maps
-		c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
-		if c.limiter != nil {
-			_ = c.limiter.WaitN(context.Background(), n)
+	if len(p) > 0 && c.limiter != nil {
+		if err := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(len(p))); err != nil {
+			return 0, errors.Join(err, c.Close())
 		}
 	}
-	return n, err
+	n, writeErr := c.Conn.Write(p)
+	if n > 0 {
+		if c.svc != nil {
+			c.svc.addTraffic(c.user, 0, int64(n))
+			// Re-add IP to onlineIPs on every traffic event
+			// This ensures active connections are tracked even after collectUsage() clears the maps
+			c.svc.updateOnlineIP(c.user, c.Conn.RemoteAddr())
+		}
+	}
+	return n, writeErr
 }
 
 func (c *connCounter) Close() error {
@@ -91,6 +105,35 @@ type packetConnCounter struct {
 	user    string
 	host    string
 	blocked bool
+	ctx     context.Context
+	limiter *rate.Limiter
+}
+
+func (c *packetConnCounter) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	if c.blocked {
+		return M.Socksaddr{}, io.EOF
+	}
+	destination, readErr := c.PacketConn.ReadPacket(buffer)
+	if buffer.Len() == 0 || c.limiter == nil {
+		return destination, readErr
+	}
+	if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(buffer.Len())); limitErr != nil {
+		buffer.Reset()
+		return M.Socksaddr{}, errors.Join(limitErr, readErr, c.Close())
+	}
+	return destination, readErr
+}
+
+func (c *packetConnCounter) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if c.blocked {
+		return io.EOF
+	}
+	if buffer.Len() > 0 && c.limiter != nil {
+		if err := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(buffer.Len())); err != nil {
+			return errors.Join(err, c.Close())
+		}
+	}
+	return c.PacketConn.WritePacket(buffer, destination)
 }
 
 func (c *packetConnCounter) Close() error {
@@ -122,7 +165,7 @@ var _ adapter.ConnectionTracker = (*anyTLSTracker)(nil)
 
 func (t *anyTLSTracker) ModeList() []string { return nil }
 
-func (t *anyTLSTracker) RoutedConnection(_ context.Context, conn net.Conn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) net.Conn {
+func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) net.Conn {
 	if t.svc == nil {
 		return conn
 	}
@@ -188,15 +231,22 @@ func (t *anyTLSTracker) RoutedConnection(_ context.Context, conn net.Conn, m ada
 		blocked = true
 	}
 
+	var limiter *rate.Limiter
+	t.svc.mu.RLock()
+	if t.svc.rateLimiters != nil {
+		limiter = t.svc.rateLimiters[m.User]
+	}
+	t.svc.mu.RUnlock()
+
 	if blocked {
 		_ = conn.Close()
-		return &connCounter{Conn: conn, svc: t.svc, user: m.User, blocked: true}
+		return &connCounter{Conn: conn, svc: t.svc, user: m.User, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &connCounter{Conn: conn, svc: t.svc, user: m.User}
+	return &connCounter{Conn: conn, svc: t.svc, user: m.User, ctx: ctx, limiter: limiter}
 }
 
-func (t *anyTLSTracker) RoutedPacketConnection(_ context.Context, conn N.PacketConn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
+func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
 	if t.svc == nil {
 		return conn
 	}
@@ -265,10 +315,24 @@ func (t *anyTLSTracker) RoutedPacketConnection(_ context.Context, conn N.PacketC
 		blocked = true
 	}
 
+	var limiter *rate.Limiter
+	t.svc.mu.RLock()
+	if t.svc.rateLimiters != nil {
+		limiter = t.svc.rateLimiters[m.User]
+	}
+	t.svc.mu.RUnlock()
+
 	if blocked {
 		_ = conn.Close()
-		return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, blocked: true}
+		return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host}
+	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, ctx: ctx, limiter: limiter}
+}
+
+func admissionContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }

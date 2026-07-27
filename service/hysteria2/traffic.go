@@ -10,6 +10,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
+	commonlimiter "github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
 )
 
@@ -41,7 +42,8 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 		}
 	}
 
-	if _, ok := t.svc.users[id]; !ok {
+	user, ok := t.svc.users[id]
+	if !ok {
 		t.svc.mu.Unlock()
 		return true
 	}
@@ -60,9 +62,16 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 	t.svc.mu.Unlock()
 
 	if limiter != nil {
-		total := int(tx + rx)
-		if total > 0 {
-			_ = limiter.WaitN(context.Background(), total)
+		waitErr := commonlimiter.WaitN(context.Background(), limiter, tx)
+		if waitErr == nil {
+			waitErr = commonlimiter.WaitN(context.Background(), limiter, rx)
+		}
+		if waitErr != nil {
+			t.svc.rateLimitFailures.Add(1)
+			if t.svc.logger != nil {
+				t.svc.logger.WithError(waitErr).WithField("uid", user.UID).Warn("Hysteria2 rate limiter admission failed")
+			}
+			return false
 		}
 	}
 

@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/server"
@@ -160,6 +161,8 @@ type Hysteria2Service struct {
 	ipLastActive map[string]map[string]time.Time // uuid -> ip -> last active time
 	blockedIDs   map[string]bool                 // connection id -> blocked by audit
 	rateLimiters map[string]*rate.Limiter        // uuid -> per-user speed limiter
+
+	rateLimitFailures atomic.Uint64
 
 	// reloadMu serializes hot-reload operations (node / cert changes) so that
 	// we never rebuild the underlying Hysteria2 server concurrently from
