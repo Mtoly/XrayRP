@@ -80,11 +80,11 @@ func TestSyncAliveListRefreshesPanelConfirmedIPs(t *testing.T) {
 		t.Fatal("expected user IP to be accepted")
 	}
 
-	value, ok := l.inboundInfo.Load("inbound")
+	value, ok := l.InboundInfo.Load("inbound")
 	if !ok {
 		t.Fatal("expected inbound limiter state")
 	}
-	entryValue, ok := value.(*inboundState).onlineUsers.Load(userKey)
+	entryValue, ok := value.(*inboundState).UserOnlineIP.Load(userKey)
 	if !ok {
 		t.Fatal("expected online user entry")
 	}

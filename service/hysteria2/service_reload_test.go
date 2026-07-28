@@ -116,6 +116,38 @@ func newReloadNode(port uint32, sni string) *api.NodeInfo {
 	}
 }
 
+func TestReloadPublishesOwnedHysteria2Config(t *testing.T) {
+	service, _, _ := newReloadTestService()
+	candidate := &fakeRuntimeServer{
+		events:     &lifecycleEvents{},
+		serveBlock: make(chan struct{}),
+		serving:    make(chan struct{}),
+	}
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		return &server.Config{}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
+		return candidate, nil
+	}
+	service.serveRuntime = defaultServeRuntime
+	service.serveHandshake = func(start func(), _ <-chan struct{}, _ <-chan error) error {
+		start()
+		<-candidate.serving
+		return nil
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	input := newReloadNode(10443, "new.example.com")
+	if err := service.reloadNode(input); err != nil {
+		t.Fatalf("reloadNode() error = %v", err)
+	}
+	input.Hysteria2Config.Obfs = "caller-mutated"
+
+	if got := service.nodeInfo.Hysteria2Config.Obfs; got != "none" {
+		t.Fatalf("published Hysteria2 config aliases caller input: got %q, want %q", got, "none")
+	}
+}
+
 func TestRuntimeCallbacksReadTagThroughAppliedSnapshot(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "eventlogger.go", nil, 0)
 	if err != nil {

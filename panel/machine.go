@@ -116,7 +116,7 @@ func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRunt
 	rawAPIClient := newAPIClient(apiConfig)
 	apiClient := rawAPIClient
 	if nodePlan.sharedWS != nil {
-		wrappedAPIClient, wrapErr := machine.WrapAPIWithReporter(apiClient, nodePlan.binding.NodeID, nodePlan.sharedWS)
+		wrappedAPIClient, wrapErr := machine.WrapMachineAPIWithReporter(apiClient, nodePlan.binding.NodeID, nodePlan.sharedWS)
 		if wrapErr != nil {
 			return nil, fmt.Errorf("configure machine runtime node reporter: %w", wrapErr)
 		}

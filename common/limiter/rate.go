@@ -13,16 +13,27 @@ import (
 // Using a package-level constant avoids creating a new duration per I/O op.
 const rateWaitTimeout = 30 * time.Second
 
-type limitedWriter struct {
+type Writer struct {
 	writer  buf.Writer
 	limiter *rate.Limiter
 	owner   *Limiter
 }
 
-type limitedReader struct {
+type Reader struct {
 	reader  buf.Reader
 	limiter *rate.Limiter
 	owner   *Limiter
+}
+
+type limitedWriter = Writer
+type limitedReader = Reader
+
+func (l *Limiter) RateWriter(writer buf.Writer, limiter *rate.Limiter) buf.Writer {
+	return l.rateWriter(writer, limiter)
+}
+
+func (l *Limiter) RateReader(reader buf.Reader, limiter *rate.Limiter) buf.Reader {
+	return l.rateReader(reader, limiter)
 }
 
 func (l *Limiter) rateWriter(writer buf.Writer, limiter *rate.Limiter) buf.Writer {

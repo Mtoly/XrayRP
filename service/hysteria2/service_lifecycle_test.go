@@ -400,6 +400,26 @@ func (f *fakeRuntimeServer) servingSignal() <-chan struct{} {
 	return ready
 }
 
+func TestStartPublishesOwnedHysteria2Config(t *testing.T) {
+	serving := make(chan struct{})
+	service := newStartTestService(&lifecycleEvents{}, &fakeRuntimeServer{
+		events:     &lifecycleEvents{},
+		serveBlock: make(chan struct{}),
+		serving:    serving,
+	})
+	client := service.apiClient.(*configurablePanelClient)
+
+	if err := service.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	client.nodeInfo.Hysteria2Config.Obfs = "caller-mutated"
+
+	if got := service.nodeInfo.Hysteria2Config.Obfs; got != "" {
+		t.Fatalf("published Hysteria2 config aliases Panel input: got %q, want empty", got)
+	}
+}
+
 func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
 	events := &lifecycleEvents{}
 	service := newStartTestService(events, &fakeRuntimeServer{events: events})

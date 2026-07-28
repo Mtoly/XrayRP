@@ -19,6 +19,7 @@ import (
 // into the service's in-memory counters.
 type hyTrafficLogger struct {
 	svc *Hysteria2Service
+	ctx context.Context
 }
 
 func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
@@ -63,9 +64,17 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 	t.svc.mu.Unlock()
 
 	if limiter != nil {
-		waitErr := commonlimiter.WaitN(context.Background(), limiter, tx)
+		waitContext := t.ctx
+		if waitContext == nil {
+			waitContext = context.Background()
+		}
+		waitTraffic := t.svc.waitTraffic
+		if waitTraffic == nil {
+			waitTraffic = commonlimiter.WaitN
+		}
+		waitErr := waitTraffic(waitContext, limiter, tx)
 		if waitErr == nil {
-			waitErr = commonlimiter.WaitN(context.Background(), limiter, rx)
+			waitErr = waitTraffic(waitContext, limiter, rx)
 		}
 		if waitErr != nil {
 			t.svc.rateLimitFailures.Add(1)

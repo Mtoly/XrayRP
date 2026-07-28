@@ -88,7 +88,7 @@ func isNilPanelClient(client PanelClient) bool {
 	}
 }
 
-func WrapAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) (PanelClient, error) {
+func WrapMachineAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) (PanelClient, error) {
 	if reporter == nil || nodeID <= 0 {
 		return apiClient, nil
 	}
@@ -96,38 +96,38 @@ func WrapAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) (Panel
 	if err != nil {
 		return nil, err
 	}
-	return &reportingAPI{
+	return &machineReportingAPI{
 		machinePanelClient: client,
 		nodeID:             nodeID,
 		reporter:           reporter,
 	}, nil
 }
 
-func WrapAPIWithStatusReporter(apiClient PanelClient, nodeID int, reporter NodeStatusReporter) (PanelClient, error) {
-	return WrapAPIWithReporter(apiClient, nodeID, reporter)
+func WrapMachineAPIWithStatusReporter(apiClient PanelClient, nodeID int, reporter NodeStatusReporter) (PanelClient, error) {
+	return WrapMachineAPIWithReporter(apiClient, nodeID, reporter)
 }
 
-type reportingAPI struct {
+type machineReportingAPI struct {
 	machinePanelClient
 	nodeID   int
 	reporter any
 }
 
-func (a *reportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+func (a *machineReportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
 	if reporter, ok := a.reporter.(NodeStatusReporter); ok {
 		_ = reporter.ReportNodeStatus(a.nodeID, nodeStatus)
 	}
 	return a.machinePanelClient.ReportNodeStatus(nodeStatus)
 }
 
-func (a *reportingAPI) ReportNodeDevices(devices map[int][]string) error {
+func (a *machineReportingAPI) ReportNodeDevices(devices map[int][]string) error {
 	if reporter, ok := a.reporter.(NodeDeviceReporter); ok {
 		return reporter.ReportNodeDevices(a.nodeID, devices)
 	}
 	return nil
 }
 
-func (a *reportingAPI) DeviceReporterReady() bool {
+func (a *machineReportingAPI) DeviceReporterReady() bool {
 	readiness, ok := a.reporter.(DeviceReporterReadiness)
 	return !ok || readiness.DeviceReporterReady()
 }

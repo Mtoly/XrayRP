@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,10 +31,12 @@ type serverBuildSpec struct {
 	certificatePEM []byte
 	privateKeyPEM  []byte
 	authGate       *runtimeAuthGate
+	trafficContext context.Context
 }
 type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error
 type closeRuntimeFunc func(runtimeServer) error
+type trafficWaitFunc func(context.Context, *rate.Limiter, uint64) error
 
 type preparedCertificateRenewal interface {
 	Renewed() bool
@@ -56,6 +59,7 @@ type reloadRuntime struct {
 	runtime  runtimeServer
 	serve    *runtimeServeOutcome
 	authGate *runtimeAuthGate
+	cancel   context.CancelFunc
 }
 
 type runtimeAuthGate struct {
@@ -140,6 +144,8 @@ type Hysteria2Service struct {
 	serveHandshake             serveHandshakeFunc
 	serveDone                  <-chan struct{}
 	watcherDone                <-chan struct{}
+	trafficCancel              context.CancelFunc
+	waitTraffic                trafficWaitFunc
 
 	lifecycleMu sync.Mutex
 	state       lifecycleState

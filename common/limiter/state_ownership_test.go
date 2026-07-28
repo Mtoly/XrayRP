@@ -69,11 +69,11 @@ func TestReplaceInboundUsersRemovesStaleOnlineDevices(t *testing.T) {
 	}
 }
 
-func TestLimiterDoesNotExposeMutableAdmissionState(t *testing.T) {
+func TestLimiterOnlyExportsLegacyCompatibilityState(t *testing.T) {
 	typeOfLimiter := reflect.TypeOf(Limiter{})
 	for index := 0; index < typeOfLimiter.NumField(); index++ {
 		field := typeOfLimiter.Field(index)
-		if field.IsExported() {
+		if field.IsExported() && field.Name != "InboundInfo" {
 			t.Fatalf("Limiter exposes mutable field %s", field.Name)
 		}
 	}
@@ -361,11 +361,11 @@ func TestRestoreInboundLimiterStateReturnsCandidateCleanupFailure(t *testing.T) 
 	}
 }
 
-func TestInboundLimiterSnapshotDoesNotExposeMutableState(t *testing.T) {
+func TestInboundLimiterSnapshotOnlyExportsCompatibilityCopies(t *testing.T) {
 	typeOfSnapshot := reflect.TypeOf(InboundLimiterStateSnapshot{})
 	for index := 0; index < typeOfSnapshot.NumField(); index++ {
 		field := typeOfSnapshot.Field(index)
-		if field.IsExported() {
+		if field.IsExported() && field.Name != "UserInfo" && field.Name != "Buckets" {
 			t.Fatalf("InboundLimiterStateSnapshot exposes mutable field %s", field.Name)
 		}
 	}
@@ -385,7 +385,7 @@ func TestRestoreInboundLimiterStateReinstatesExactAppliedState(t *testing.T) {
 	if rejected || !speedLimited || originalBucket == nil {
 		t.Fatalf("initial admission = bucket:%v speedLimited:%v rejected:%v", originalBucket, speedLimited, rejected)
 	}
-	originalValue, _ := limiter.inboundInfo.Load("inbound")
+	originalValue, _ := limiter.InboundInfo.Load("inbound")
 	originalState := originalValue.(*inboundState)
 
 	snapshot, err := limiter.SnapshotInboundLimiterState("inbound")
@@ -400,7 +400,7 @@ func TestRestoreInboundLimiterStateReinstatesExactAppliedState(t *testing.T) {
 		t.Fatalf("RestoreInboundLimiterState() error = %v", err)
 	}
 
-	restoredValue, _ := limiter.inboundInfo.Load("inbound")
+	restoredValue, _ := limiter.InboundInfo.Load("inbound")
 	if restoredValue != originalState {
 		t.Fatal("restore did not republish the exact applied inbound generation")
 	}
@@ -540,14 +540,11 @@ func TestRestoreSnapshotPreservesCompatibleBucketCreatedAfterSnapshot(t *testing
 	}
 }
 
-func TestLimiterAdmissionInterfaceDoesNotExposeRateBuckets(t *testing.T) {
+func TestLimiterAdmissionInterfaceKeepsOwnedAndLegacyEntrypoints(t *testing.T) {
 	typeOfLimiter := reflect.TypeOf((*Limiter)(nil))
-	if _, exists := typeOfLimiter.MethodByName("Admit"); !exists {
-		t.Fatal("Limiter is missing the Admit interface")
-	}
-	for _, methodName := range []string{"GetUserBucket", "RateReader", "RateWriter"} {
-		if _, exists := typeOfLimiter.MethodByName(methodName); exists {
-			t.Fatalf("Limiter exposes mutable token accounting through %s", methodName)
+	for _, methodName := range []string{"Admit", "GetUserBucket", "RateReader", "RateWriter"} {
+		if _, exists := typeOfLimiter.MethodByName(methodName); !exists {
+			t.Fatalf("Limiter is missing compatibility entrypoint %s", methodName)
 		}
 	}
 }
@@ -558,7 +555,7 @@ func TestReplacementRetiresPriorGenerationAndRestoreReactivatesIt(t *testing.T) 
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	applied := value.(*inboundState)
 	snapshot, err := limiter.SnapshotInboundLimiterState("inbound")
 	if err != nil {
@@ -630,7 +627,7 @@ func TestDeleteAndCloseReleaseAllRetiredAdmissionWaiters(t *testing.T) {
 			if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 				t.Fatalf("AddInboundLimiter() error = %v", err)
 			}
-			value, _ := limiter.inboundInfo.Load("inbound")
+			value, _ := limiter.InboundInfo.Load("inbound")
 			value.(*inboundState).retireAdmissions()
 
 			waiting := make(chan struct{}, waiterCount)
@@ -672,7 +669,7 @@ func TestReplaceInboundUsersDrainsAdmissionBeforePublishingPreservedState(t *tes
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	applied := value.(*inboundState)
 
 	entered := make(chan struct{})
@@ -697,7 +694,7 @@ func TestReplaceInboundUsersDrainsAdmissionBeforePublishingPreservedState(t *tes
 	}()
 
 	<-drainStarted
-	published, _ := limiter.inboundInfo.Load("inbound")
+	published, _ := limiter.InboundInfo.Load("inbound")
 	publishedBeforeDrain := published.(*inboundState) != applied
 
 	close(release)
@@ -709,17 +706,98 @@ func TestReplaceInboundUsersDrainsAdmissionBeforePublishingPreservedState(t *tes
 		t.Fatal("replacement generation was published before the applied admission drained")
 	}
 
-	currentValue, _ := limiter.inboundInfo.Load("inbound")
+	currentValue, _ := limiter.InboundInfo.Load("inbound")
 	current := currentValue.(*inboundState)
 	userKey := "inbound|user@example.test|1"
-	entryValue, online := current.onlineUsers.Load(userKey)
+	entryValue, online := current.UserOnlineIP.Load(userKey)
 	if !online || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
 		t.Fatal("replacement lost the device admitted while the applied generation drained")
 	}
-	appliedBucket, appliedBucketExists := applied.buckets.Load(userKey)
-	currentBucket, currentBucketExists := current.buckets.Load(userKey)
+	appliedBucket, appliedBucketExists := applied.BucketHub.Load(userKey)
+	currentBucket, currentBucketExists := current.BucketHub.Load(userKey)
 	if !appliedBucketExists || !currentBucketExists || currentBucket != appliedBucket {
 		t.Fatal("replacement lost the compatible token bucket created by the draining admission")
+	}
+}
+
+func TestAdmissionEnteringRetiredGenerationAfterReplacementRetriesPublishedGeneration(t *testing.T) {
+	limiter := New()
+	users := []api.UserInfo{{UID: 1, Email: "user@example.test", SpeedLimit: 100}}
+	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter() error = %v", err)
+	}
+	value, _ := limiter.InboundInfo.Load("inbound")
+	applied := value.(*inboundState)
+
+	replacement := []api.UserInfo{{UID: 1, Email: "user@example.test", SpeedLimit: 25}}
+	if err := limiter.ReplaceInboundUsers("inbound", &replacement); err != nil {
+		t.Fatalf("ReplaceInboundUsers() error = %v", err)
+	}
+	admitted, replacementReady := applied.beginAdmission()
+	if admitted || replacementReady == nil {
+		t.Fatalf("retired generation admission = admitted:%v replacementReady:%v, want retry signal", admitted, replacementReady)
+	}
+	select {
+	case <-replacementReady:
+	default:
+		t.Fatal("replacement retry signal was not closed after publication")
+	}
+
+	bucket, _, rejected := limiter.getUserBucket(
+		"inbound",
+		"inbound|user@example.test|1",
+		"192.0.2.1",
+	)
+	if rejected || bucket == nil || bucket.Limit() != 25 {
+		t.Fatalf("published generation admission = bucket:%v rejected:%v, want limit 25", bucket, rejected)
+	}
+}
+
+func TestReplacementPublicationDoesNotExposeRetiredAppliedGeneration(t *testing.T) {
+	limiter := New()
+	users := []api.UserInfo{{UID: 1, Email: "user@example.test", SpeedLimit: 100}}
+	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter() error = %v", err)
+	}
+
+	publishEntered := make(chan struct{})
+	releasePublish := make(chan struct{})
+	limiter.onBeforeReplacementPublish = func() {
+		close(publishEntered)
+		<-releasePublish
+	}
+	waiting := make(chan struct{}, 1)
+	limiter.onAdmissionWaiting = func() {
+		waiting <- struct{}{}
+	}
+	replacementDone := make(chan error, 1)
+	replacement := []api.UserInfo{{UID: 1, Email: "user@example.test", SpeedLimit: 25}}
+	go func() {
+		replacementDone <- limiter.ReplaceInboundUsers("inbound", &replacement)
+	}()
+	<-publishEntered
+
+	result := make(chan bool, 1)
+	go func() {
+		_, _, rejected := limiter.getUserBucket(
+			"inbound",
+			"inbound|user@example.test|1",
+			"192.0.2.1",
+		)
+		result <- rejected
+	}()
+	select {
+	case <-waiting:
+	case rejected := <-result:
+		t.Fatalf("admission completed before replacement publication: rejected=%v, want wait", rejected)
+	}
+
+	close(releasePublish)
+	if err := <-replacementDone; err != nil {
+		t.Fatalf("ReplaceInboundUsers() error = %v", err)
+	}
+	if rejected := <-result; rejected {
+		t.Fatal("admission waiting during replacement was rejected")
 	}
 }
 
@@ -729,7 +807,7 @@ func TestUpdateInboundLimiterDrainsAdmissionBeforeApplyingPartialPolicy(t *testi
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	applied := value.(*inboundState)
 
 	entered := make(chan struct{})
@@ -754,7 +832,7 @@ func TestUpdateInboundLimiterDrainsAdmissionBeforeApplyingPartialPolicy(t *testi
 	}()
 
 	<-drainStarted
-	published, _ := limiter.inboundInfo.Load("inbound")
+	published, _ := limiter.InboundInfo.Load("inbound")
 	publishedBeforeDrain := published.(*inboundState) != applied
 
 	close(release)
@@ -766,15 +844,15 @@ func TestUpdateInboundLimiterDrainsAdmissionBeforeApplyingPartialPolicy(t *testi
 		t.Fatal("updated generation was published before the applied admission drained")
 	}
 
-	currentValue, _ := limiter.inboundInfo.Load("inbound")
+	currentValue, _ := limiter.InboundInfo.Load("inbound")
 	current := currentValue.(*inboundState)
 	userKey := "inbound|user@example.test|1"
-	entryValue, online := current.onlineUsers.Load(userKey)
+	entryValue, online := current.UserOnlineIP.Load(userKey)
 	if !online || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
 		t.Fatal("partial update lost the device admitted while the applied generation drained")
 	}
-	appliedBucket, appliedBucketExists := applied.buckets.Load(userKey)
-	currentBucket, currentBucketExists := current.buckets.Load(userKey)
+	appliedBucket, appliedBucketExists := applied.BucketHub.Load(userKey)
+	currentBucket, currentBucketExists := current.BucketHub.Load(userKey)
 	if !appliedBucketExists || !currentBucketExists || currentBucket != appliedBucket {
 		t.Fatal("partial update lost the compatible token bucket created by the draining admission")
 	}
@@ -786,7 +864,7 @@ func TestAddInboundLimiterDrainsAdmissionBeforePublishingPreservedState(t *testi
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	applied := value.(*inboundState)
 
 	entered := make(chan struct{})
@@ -811,7 +889,7 @@ func TestAddInboundLimiterDrainsAdmissionBeforePublishingPreservedState(t *testi
 	}()
 
 	<-drainStarted
-	published, _ := limiter.inboundInfo.Load("inbound")
+	published, _ := limiter.InboundInfo.Load("inbound")
 	publishedBeforeDrain := published.(*inboundState) != applied
 
 	close(release)
@@ -823,15 +901,15 @@ func TestAddInboundLimiterDrainsAdmissionBeforePublishingPreservedState(t *testi
 		t.Fatal("added replacement generation was published before the applied admission drained")
 	}
 
-	currentValue, _ := limiter.inboundInfo.Load("inbound")
+	currentValue, _ := limiter.InboundInfo.Load("inbound")
 	current := currentValue.(*inboundState)
 	userKey := "inbound|user@example.test|1"
-	entryValue, online := current.onlineUsers.Load(userKey)
+	entryValue, online := current.UserOnlineIP.Load(userKey)
 	if !online || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
 		t.Fatal("added replacement lost the device admitted while the applied generation drained")
 	}
-	appliedBucket, appliedBucketExists := applied.buckets.Load(userKey)
-	currentBucket, currentBucketExists := current.buckets.Load(userKey)
+	appliedBucket, appliedBucketExists := applied.BucketHub.Load(userKey)
+	currentBucket, currentBucketExists := current.BucketHub.Load(userKey)
 	if !appliedBucketExists || !currentBucketExists || currentBucket != appliedBucket {
 		t.Fatal("added replacement lost the compatible token bucket created by the draining admission")
 	}
@@ -1039,7 +1117,7 @@ func TestClosedGlobalLimitStateRejectsStaleInflightAdmission(t *testing.T) {
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, config); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, exists := limiter.inboundInfo.Load("inbound")
+	value, exists := limiter.InboundInfo.Load("inbound")
 	if !exists {
 		t.Fatal("inbound state was not published")
 	}
@@ -1071,7 +1149,7 @@ func TestReplaceInboundUsersPrunesRemovedGlobalLimitKeyLocks(t *testing.T) {
 	if err := limiter.AddInboundLimiter("inbound", 0, &users, config); err != nil {
 		t.Fatalf("AddInboundLimiter() error = %v", err)
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	state := value.(*inboundState)
 	keptKey := "inbound|kept@example.test|1"
 	removedKey := "inbound|removed@example.test|2"
@@ -1082,10 +1160,10 @@ func TestReplaceInboundUsersPrunesRemovedGlobalLimitKeyLocks(t *testing.T) {
 	if err := limiter.ReplaceInboundUsers("inbound", &replacement); err != nil {
 		t.Fatalf("ReplaceInboundUsers() error = %v", err)
 	}
-	if _, exists := state.globalLimit.keyLocks.Load(removedKey); exists {
+	if _, exists := state.GlobalLimit.keyLocks.Load(removedKey); exists {
 		t.Fatal("removed user global-limit lock was retained")
 	}
-	if _, exists := state.globalLimit.keyLocks.Load(keptKey); !exists {
+	if _, exists := state.GlobalLimit.keyLocks.Load(keptKey); !exists {
 		t.Fatal("kept user global-limit lock was removed")
 	}
 }
@@ -1099,16 +1177,16 @@ func TestGetOnlineDeviceRetiresDetachedEntryBeforeConcurrentAdmission(t *testing
 	if _, _, rejected := limiter.getUserBucket("inbound", userKey, "192.0.2.1"); rejected {
 		t.Fatal("initial admission was rejected")
 	}
-	value, _ := limiter.inboundInfo.Load("inbound")
+	value, _ := limiter.InboundInfo.Load("inbound")
 	state := value.(*inboundState)
-	entryValue, _ := state.onlineUsers.Load(userKey)
+	entryValue, _ := state.UserOnlineIP.Load(userKey)
 	detached := entryValue.(*userOnlineEntry)
 	detached.ips.Store("192.0.2.1", connIP{UID: 1, LastSeen: time.Now().Unix() - ipTTL - 1})
 
 	if _, err := limiter.GetOnlineDevice("inbound"); err != nil {
 		t.Fatalf("GetOnlineDevice() error = %v", err)
 	}
-	if rejected, retry := detached.admitIP("198.51.100.1", 1, 2, state.globalDevices); rejected || !retry {
+	if rejected, retry := detached.admitIP("198.51.100.1", 1, 2, state.GlobalDevices); rejected || !retry {
 		t.Fatalf("detached entry admission = rejected:%v retry:%v, want retry", rejected, retry)
 	}
 	if detached.hasIP("198.51.100.1") {

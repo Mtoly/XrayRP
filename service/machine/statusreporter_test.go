@@ -187,11 +187,11 @@ func (r *statusReporterStub) ReportNodeDevices(nodeID int, devices map[int][]str
 
 func (r *statusReporterStub) DeviceReporterReady() bool { return r.ready }
 
-func mustWrapAPIWithReporter(t *testing.T, client PanelClient, nodeID int, reporter any) PanelClient {
+func mustWrapMachineAPIWithReporter(t *testing.T, client PanelClient, nodeID int, reporter any) PanelClient {
 	t.Helper()
-	wrapped, err := WrapAPIWithReporter(client, nodeID, reporter)
+	wrapped, err := WrapMachineAPIWithReporter(client, nodeID, reporter)
 	if err != nil {
-		t.Fatalf("WrapAPIWithReporter returned error: %v", err)
+		t.Fatalf("WrapMachineAPIWithReporter returned error: %v", err)
 	}
 	return wrapped
 }
@@ -201,7 +201,7 @@ func TestReportingAPIReportsStatusToReporterAndRESTClient(t *testing.T) {
 	client := newStatusReporterAllCapableStub()
 	client.reportStatusErr = restErr
 	reporter := &statusReporterStub{}
-	wrapped := mustWrapAPIWithReporter(t, client, 7, reporter)
+	wrapped := mustWrapMachineAPIWithReporter(t, client, 7, reporter)
 	status := &api.NodeStatus{CPU: 12}
 
 	err := wrapped.ReportNodeStatus(status)
@@ -219,7 +219,7 @@ func TestReportingAPIReportsStatusToReporterAndRESTClient(t *testing.T) {
 
 func TestReportingAPIDeviceReportingAndReadiness(t *testing.T) {
 	reporter := &statusReporterStub{ready: true}
-	wrapped := mustWrapAPIWithReporter(t, newStatusReporterAllCapableStub(), 8, reporter)
+	wrapped := mustWrapMachineAPIWithReporter(t, newStatusReporterAllCapableStub(), 8, reporter)
 	capable, ok := wrapped.(interface {
 		ReportNodeDevices(map[int][]string) error
 		DeviceReporterReady() bool
@@ -245,7 +245,7 @@ func TestReportingAPIForwardsWSCapabilities(t *testing.T) {
 	baseConfig := &api.BaseConfig{PushInterval: 15, PullInterval: 45}
 	cert := &api.XrayRCertConfig{CertMode: "file"}
 	alive := map[int][]string{4: {"phone"}}
-	wrapped := mustWrapAPIWithReporter(t, &statusReporterAllCapableStub{
+	wrapped := mustWrapMachineAPIWithReporter(t, &statusReporterAllCapableStub{
 		statusReporterCertAliveCapableStub: &statusReporterCertAliveCapableStub{
 			statusReporterPanelClientStub: &statusReporterPanelClientStub{},
 			certConfig:                    cert,
@@ -304,9 +304,9 @@ func TestReportingAPISupportsExplicitMachineCapabilitySets(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			wrapped, err := WrapAPIWithReporter(test.client, 9, &statusReporterStub{})
+			wrapped, err := WrapMachineAPIWithReporter(test.client, 9, &statusReporterStub{})
 			if err != nil {
-				t.Fatalf("WrapAPIWithReporter returned error: %v", err)
+				t.Fatalf("WrapMachineAPIWithReporter returned error: %v", err)
 			}
 			if _, ok := wrapped.(machinePanelClient); !ok {
 				t.Fatalf("supported capability set was not preserved: %T", wrapped)
@@ -378,7 +378,7 @@ func TestReportingAPIRejectsIncompleteMachineCapabilitySets(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			wrapped, err := WrapAPIWithReporter(test.client, 9, &statusReporterStub{})
+			wrapped, err := WrapMachineAPIWithReporter(test.client, 9, &statusReporterStub{})
 			if err == nil {
 				t.Fatalf("expected capability error, got wrapped client %T", wrapped)
 			}
@@ -393,7 +393,7 @@ func TestReportingAPIRejectsIncompleteMachineCapabilitySets(t *testing.T) {
 }
 
 func TestReportingAPIRejectsNilMachineClientWhenReporterIsEnabled(t *testing.T) {
-	wrapped, err := WrapAPIWithReporter(nil, 9, &statusReporterStub{})
+	wrapped, err := WrapMachineAPIWithReporter(nil, 9, &statusReporterStub{})
 	if err == nil {
 		t.Fatalf("expected nil machine client error, got wrapped client %T", wrapped)
 	}
@@ -407,7 +407,7 @@ func TestReportingAPIRejectsNilMachineClientWhenReporterIsEnabled(t *testing.T) 
 
 func TestReportingAPIRejectsTypedNilMachineClientWhenReporterIsEnabled(t *testing.T) {
 	var client *statusReporterAllCapableStub
-	wrapped, err := WrapAPIWithReporter(client, 9, &statusReporterStub{})
+	wrapped, err := WrapMachineAPIWithReporter(client, 9, &statusReporterStub{})
 	if err == nil {
 		t.Fatalf("expected typed-nil machine client error, got wrapped client %T", wrapped)
 	}
@@ -433,9 +433,9 @@ func TestReportingAPIKeepsDisabledReporterInputsAsNoOps(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			wrapped, err := WrapAPIWithReporter(client, test.nodeID, test.reporter)
+			wrapped, err := WrapMachineAPIWithReporter(client, test.nodeID, test.reporter)
 			if err != nil {
-				t.Fatalf("WrapAPIWithReporter returned error: %v", err)
+				t.Fatalf("WrapMachineAPIWithReporter returned error: %v", err)
 			}
 			if wrapped != client {
 				t.Fatalf("disabled reporter changed client: got %T, want original", wrapped)

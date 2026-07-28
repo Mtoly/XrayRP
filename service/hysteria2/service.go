@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -108,9 +109,12 @@ func (h *Hysteria2Service) appliedTag() string {
 func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRuntime, error) {
 	authGate := newRuntimeAuthGate()
 	spec.authGate = authGate
+	trafficContext, cancelTraffic := context.WithCancel(context.Background())
+	spec.trafficContext = trafficContext
 	runtime, err := h.buildRuntimeServer(spec)
 	if err != nil {
 		authGate.resolve(false)
+		cancelTraffic()
 		return reloadRuntime{}, err
 	}
 	serveRuntime := h.serveRuntime
@@ -120,6 +124,7 @@ func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRun
 	serve, err := h.startReloadRuntime(runtime, serveRuntime)
 	if err != nil {
 		authGate.resolve(false)
+		cancelTraffic()
 		closeRuntime := h.closeRuntime
 		if closeRuntime == nil {
 			closeRuntime = defaultCloseRuntime
@@ -128,7 +133,7 @@ func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRun
 		h.waitRuntime(serve.done, nil)
 		return reloadRuntime{}, errors.Join(err, cleanupErr)
 	}
-	return reloadRuntime{runtime: runtime, serve: serve, authGate: authGate}, nil
+	return reloadRuntime{runtime: runtime, serve: serve, authGate: authGate, cancel: cancelTraffic}, nil
 }
 
 func (h *Hysteria2Service) Start() (err error) {
@@ -171,6 +176,7 @@ func (h *Hysteria2Service) Start() (err error) {
 	if h.config == nil || h.config.CertConfig == nil {
 		return fail(errors.New("CertConfig is required for Hysteria2"))
 	}
+	nodeInfo = cloneNodeInfo(nodeInfo)
 
 	tag := fmt.Sprintf("%s_%s_%d_%d", nodeInfo.NodeType, h.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
 	startAt := time.Now()
@@ -211,6 +217,7 @@ func (h *Hysteria2Service) Start() (err error) {
 	startupShutdown := specialruntime.RuntimeShutdown{
 		Stop: func() error {
 			candidate.authGate.resolve(false)
+			candidate.cancel()
 			return closeRuntime(srv)
 		},
 		Join: func() error {
@@ -249,9 +256,10 @@ func (h *Hysteria2Service) Start() (err error) {
 	h.runtimeErr = nil
 	h.serveDone = serve.done
 	h.watcherDone = watcherDone
+	h.trafficCancel = candidate.cancel
 	h.lifecycleMu.Unlock()
 	candidate.authGate.resolve(true)
-	go h.watchRuntime(srv, serve, watcherDone)
+	go h.watchRuntime(srv, serve, candidate.cancel, watcherDone)
 
 	if !h.config.DisableGetRule && h.rules != nil {
 		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
@@ -288,6 +296,7 @@ func (h *Hysteria2Service) Close() error {
 	srv := h.server
 	serveDone := h.serveDone
 	watcherDone := h.watcherDone
+	cancelTraffic := h.trafficCancel
 	h.lifecycleMu.Unlock()
 
 	var shutdownErr error
@@ -297,7 +306,12 @@ func (h *Hysteria2Service) Close() error {
 			closeRuntime = defaultCloseRuntime
 		}
 		shutdown := specialruntime.RuntimeShutdown{
-			Stop: func() error { return closeRuntime(srv) },
+			Stop: func() error {
+				if cancelTraffic != nil {
+					cancelTraffic()
+				}
+				return closeRuntime(srv)
+			},
 			Join: func() error {
 				h.waitRuntime(serveDone, watcherDone)
 				return nil
@@ -319,6 +333,7 @@ func (h *Hysteria2Service) Close() error {
 	h.server = nil
 	h.serveDone = nil
 	h.watcherDone = nil
+	h.trafficCancel = nil
 	h.runtimeErr = nil
 	h.state = stateStopped
 	h.lifecycleMu.Unlock()
@@ -365,8 +380,8 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 		return errors.New("prepared certificate renewal is missing certificate or private key PEM")
 	}
 
-	candidateNode := *nodeInfo
-	candidateRules := buildPortHopRulesFromNode(&candidateNode)
+	candidateNode := cloneNodeInfo(nodeInfo)
+	candidateRules := buildPortHopRulesFromNode(candidateNode)
 
 	h.lifecycleMu.Lock()
 	expectedState := stateRunning
@@ -386,11 +401,12 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 	oldRules := append([]portHopRule(nil), h.portHopRules...)
 	oldServeDone := h.serveDone
 	oldWatcherDone := h.watcherDone
+	oldTrafficCancel := h.trafficCancel
 	h.lifecycleMu.Unlock()
 
-	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, &candidateNode)
+	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, candidateNode)
 	candidateSpec := serverBuildSpec{
-		nodeInfo:       &candidateNode,
+		nodeInfo:       candidateNode,
 		certConfig:     candidateCertConfig,
 		certificatePEM: certificatePEM(renewal),
 		privateKeyPEM:  privateKeyPEM(renewal),
@@ -407,12 +423,18 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 		oldCloseErr error
 	)
 	if sameEndpoint {
+		if oldTrafficCancel != nil {
+			oldTrafficCancel()
+		}
 		oldCloseErr = closeRuntime(oldRuntime)
 		h.waitRuntime(oldServeDone, oldWatcherDone)
 		candidate, err = h.startReloadCandidate(candidateSpec)
 	} else {
 		candidate, err = h.startReloadCandidate(candidateSpec)
 		if err == nil {
+			if oldTrafficCancel != nil {
+				oldTrafficCancel()
+			}
 			oldCloseErr = closeRuntime(oldRuntime)
 			h.waitRuntime(oldServeDone, oldWatcherDone)
 		}
@@ -430,10 +452,10 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 		})
 		if restoreErr != nil {
 			joined := errors.Join(reloadErr, restoreErr)
-			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, oldRules, nil, nil, stateFailed, joined)
+			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, oldRules, nil, nil, nil, stateFailed, joined)
 			return joined
 		}
-		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, stateRunning, nil)
+		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
 		return reloadErr
 	}
 
@@ -445,6 +467,7 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 	if ruleErr != nil {
 		rollbackErr := rollbackCertificateRenewal(renewal)
 		candidate.authGate.resolve(false)
+		candidate.cancel()
 		cleanupErr := closeRuntime(candidate.runtime)
 		h.waitRuntime(candidate.serve.done, nil)
 		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
@@ -457,21 +480,22 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 			if !rulesRestored {
 				restoredRules = nil
 			}
-			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, restoredRules, nil, nil, stateFailed, joined)
+			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, restoredRules, nil, nil, nil, stateFailed, joined)
 			return joined
 		}
 		joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, rollbackErr)
 		if !rulesRestored {
-			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, nil, restored.serve, restored.authGate, stateFailed, joined)
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, nil, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
 			return joined
 		}
-		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, stateRunning, nil)
+		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
 		return joined
 	}
 
 	if renewal != nil {
 		if commitErr := renewal.Commit(); commitErr != nil {
 			candidate.authGate.resolve(false)
+			candidate.cancel()
 			cleanupErr := closeRuntime(candidate.runtime)
 			h.waitRuntime(candidate.serve.done, nil)
 			_, rulesErr := h.replacePortHopRulesLocked(oldRules)
@@ -482,19 +506,19 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 			})
 			joined := errors.Join(oldCloseErr, commitErr, cleanupErr, rulesErr, restoreErr)
 			if restoreErr != nil {
-				h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, stateFailed, joined)
+				h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
 				return joined
 			}
 			if rulesErr != nil {
-				h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, stateFailed, joined)
+				h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
 				return joined
 			}
-			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, stateRunning, nil)
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
 			return joined
 		}
 	}
 
-	h.finishReload(candidate.runtime, &candidateNode, oldTag, candidateCertConfig, candidateRules, candidate.serve, candidate.authGate, stateRunning, nil)
+	h.finishReload(candidate.runtime, candidateNode, oldTag, candidateCertConfig, candidateRules, candidate.serve, candidate.authGate, candidate.cancel, stateRunning, nil)
 	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, candidateNode.Port)
 	return oldCloseErr
 }
@@ -542,9 +566,12 @@ func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntim
 	return serve, nil
 }
 
-func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeServeOutcome, watcherDone chan struct{}) {
+func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeServeOutcome, cancelTraffic context.CancelFunc, watcherDone chan struct{}) {
 	defer close(watcherDone)
 	<-serve.done
+	if cancelTraffic != nil {
+		cancelTraffic()
+	}
 	h.lifecycleMu.Lock()
 	recordFailure := (h.state == stateRunning || h.state == stateFailed) && h.server == runtime
 	if recordFailure {
@@ -575,7 +602,7 @@ func (h *Hysteria2Service) finishExistingReload(state lifecycleState, runtimeErr
 	h.lifecycleMu.Unlock()
 }
 
-func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.NodeInfo, _ string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, authGate *runtimeAuthGate, state lifecycleState, runtimeErr error) {
+func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.NodeInfo, _ string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, authGate *runtimeAuthGate, cancelTraffic context.CancelFunc, state lifecycleState, runtimeErr error) {
 	var watcherDone chan struct{}
 	if runtime != nil && serve != nil {
 		watcherDone = make(chan struct{})
@@ -598,13 +625,26 @@ func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.Nod
 		h.serveDone = nil
 	}
 	h.watcherDone = watcherDone
+	h.trafficCancel = cancelTraffic
 	h.state = state
 	h.runtimeErr = runtimeErr
 	h.lifecycleMu.Unlock()
 	authGate.resolve(runtime != nil)
 	if watcherDone != nil {
-		go h.watchRuntime(runtime, serve, watcherDone)
+		go h.watchRuntime(runtime, serve, cancelTraffic, watcherDone)
 	}
+}
+
+func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
+	if nodeInfo == nil {
+		return nil
+	}
+	cloned := *nodeInfo
+	if nodeInfo.Hysteria2Config != nil {
+		hysteria2Config := *nodeInfo.Hysteria2Config
+		cloned.Hysteria2Config = &hysteria2Config
+	}
+	return &cloned
 }
 
 func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {

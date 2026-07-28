@@ -106,7 +106,7 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 		IgnoreClientBandwidth: hy.IgnoreClientBandwidth,
 		Authenticator:         &hyAuthenticator{svc: h, authGate: spec.authGate},
 		EventLogger:           &hyEventLogger{svc: h},
-		TrafficLogger:         &hyTrafficLogger{svc: h},
+		TrafficLogger:         &hyTrafficLogger{svc: h, ctx: spec.trafficContext},
 	}
 
 	return cfg, nil

@@ -373,9 +373,9 @@ func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 	restErr := errors.New("rest failed")
 	apiClient := &recordingStatusAPI{err: restErr}
 	reporter := &recordingNodeStatusReporter{}
-	wrapped, err := WrapAPIWithStatusReporter(apiClient, 9, reporter)
+	wrapped, err := WrapMachineAPIWithStatusReporter(apiClient, 9, reporter)
 	if err != nil {
-		t.Fatalf("WrapAPIWithStatusReporter returned error: %v", err)
+		t.Fatalf("WrapMachineAPIWithStatusReporter returned error: %v", err)
 	}
 	status := &api.NodeStatus{CPU: 1}
 
@@ -394,9 +394,9 @@ func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 func TestReportingAPIReportsNodeDevicesOverWS(t *testing.T) {
 	apiClient := &recordingStatusAPI{}
 	reporter := &recordingNodeDeviceReporter{ready: true}
-	wrapped, err := WrapAPIWithReporter(apiClient, 9, reporter)
+	wrapped, err := WrapMachineAPIWithReporter(apiClient, 9, reporter)
 	if err != nil {
-		t.Fatalf("WrapAPIWithReporter returned error: %v", err)
+		t.Fatalf("WrapMachineAPIWithReporter returned error: %v", err)
 	}
 	deviceReporter, ok := wrapped.(interface {
 		ReportNodeDevices(map[int][]string) error
