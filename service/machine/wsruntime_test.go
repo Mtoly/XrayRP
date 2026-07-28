@@ -124,6 +124,7 @@ func TestSharedWSRuntimeRoutesNodeEventsToMatchingMailboxOnly(t *testing.T) {
 
 func TestSharedWSRuntimeSyncNodesTriggersRediscover(t *testing.T) {
 	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
+	startSharedWSRuntimeWithClient(t, runtime, newRecordingSharedWSClient())
 	called := make(chan struct{}, 1)
 	runtime.SetRediscover(func() error {
 		called <- struct{}{}
@@ -139,6 +140,96 @@ func TestSharedWSRuntimeSyncNodesTriggersRediscover(t *testing.T) {
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for rediscover trigger")
+	}
+}
+
+func TestSharedWSRuntimeRediscoveryCoalescesAndCloseCancelsJoinsOwner(t *testing.T) {
+	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
+	factoryEntered := make(chan struct{}, 1)
+	factoryDone := make(chan struct{})
+	runtime.factory = func(ctx context.Context) (sharedWSClient, error) {
+		factoryEntered <- struct{}{}
+		<-ctx.Done()
+		close(factoryDone)
+		return nil, ctx.Err()
+	}
+
+	var callsMu sync.Mutex
+	calls := 0
+	entered := make(chan int, 3)
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	runtime.SetRediscover(func() error {
+		callsMu.Lock()
+		calls++
+		current := calls
+		callsMu.Unlock()
+		entered <- current
+		switch current {
+		case 1:
+			<-releaseFirst
+		case 2:
+			<-releaseSecond
+		}
+		return nil
+	})
+
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	waitForSignal(t, factoryEntered, "websocket factory")
+
+	rediscoverCancelled := make(chan struct{})
+	runtime.mu.Lock()
+	originalCancel := runtime.rediscoverCancel
+	runtime.rediscoverCancel = func() {
+		close(rediscoverCancelled)
+		originalCancel()
+	}
+	runtime.mu.Unlock()
+
+	runtime.triggerRediscover()
+	if call := receiveInt(t, entered, "first rediscovery"); call != 1 {
+		t.Fatalf("first rediscovery call = %d, want 1", call)
+	}
+	for range 100 {
+		runtime.triggerRediscover()
+	}
+	close(releaseFirst)
+	if call := receiveInt(t, entered, "coalesced rediscovery"); call != 2 {
+		t.Fatalf("coalesced rediscovery call = %d, want 2", call)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- runtime.Close()
+	}()
+	waitForSignal(t, rediscoverCancelled, "rediscovery cancellation")
+	runtime.triggerRediscover()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before owned rediscovery completed: %v", err)
+	default:
+	}
+
+	close(releaseSecond)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	waitForSignal(t, factoryDone, "websocket factory cancellation")
+
+	callsMu.Lock()
+	gotCalls := calls
+	callsMu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("rediscovery calls = %d, want one active and one coalesced call", gotCalls)
+	}
+	runtime.triggerRediscover()
+	callsMu.Lock()
+	gotCalls = calls
+	callsMu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("rediscovery ran after Close: calls = %d", gotCalls)
 	}
 }
 
@@ -282,10 +373,13 @@ func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 	restErr := errors.New("rest failed")
 	apiClient := &recordingStatusAPI{err: restErr}
 	reporter := &recordingNodeStatusReporter{}
-	wrapped := WrapAPIWithStatusReporter(apiClient, 9, reporter)
+	wrapped, err := WrapAPIWithStatusReporter(apiClient, 9, reporter)
+	if err != nil {
+		t.Fatalf("WrapAPIWithStatusReporter returned error: %v", err)
+	}
 	status := &api.NodeStatus{CPU: 1}
 
-	err := wrapped.ReportNodeStatus(status)
+	err = wrapped.ReportNodeStatus(status)
 	if !errors.Is(err, restErr) {
 		t.Fatalf("expected REST error, got %v", err)
 	}
@@ -300,7 +394,10 @@ func TestStatusReportingAPIReportsWSBestEffortThenREST(t *testing.T) {
 func TestReportingAPIReportsNodeDevicesOverWS(t *testing.T) {
 	apiClient := &recordingStatusAPI{}
 	reporter := &recordingNodeDeviceReporter{ready: true}
-	wrapped := WrapAPIWithReporter(apiClient, 9, reporter)
+	wrapped, err := WrapAPIWithReporter(apiClient, 9, reporter)
+	if err != nil {
+		t.Fatalf("WrapAPIWithReporter returned error: %v", err)
+	}
 	deviceReporter, ok := wrapped.(interface {
 		ReportNodeDevices(map[int][]string) error
 	})
@@ -418,6 +515,11 @@ type recordingStatusAPI struct {
 }
 
 func (a *recordingStatusAPI) GetNodeInfo() (*api.NodeInfo, error) { return nil, nil }
+func (a *recordingStatusAPI) GetWSConfig() *api.WSConfig          { return &api.WSConfig{} }
+func (a *recordingStatusAPI) DiscoverWSEndpoint() (string, error) {
+	return "wss://panel.example.com/ws", nil
+}
+func (a *recordingStatusAPI) GetBaseConfig() *api.BaseConfig { return &api.BaseConfig{} }
 func (a *recordingStatusAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 	return nil, nil
 }
@@ -473,6 +575,17 @@ func receiveDeviceCall(t *testing.T, ch <-chan deviceCall) deviceCall {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for device call")
 		return deviceCall{}
+	}
+}
+
+func receiveInt(t *testing.T, ch <-chan int, name string) int {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for %s", name)
+		return 0
 	}
 }
 

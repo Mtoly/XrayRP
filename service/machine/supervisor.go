@@ -906,14 +906,18 @@ func (s *Supervisor) runStatus(ctx context.Context, done chan struct{}, interval
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	s.reportMachineStatus()
+	if !s.reportMachineStatusContext(ctx) {
+		return
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.reportMachineStatus()
+			if !s.reportMachineStatusContext(ctx) {
+				return
+			}
 		}
 	}
 }
@@ -932,16 +936,30 @@ func materializeMachineStatusSnapshot(collector MachineStatusCollector) machineS
 }
 
 func (s *Supervisor) reportMachineStatus() {
+	s.reportMachineStatusContext(context.Background())
+}
+
+func (s *Supervisor) reportMachineStatusContext(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
 	if s == nil || s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil {
-		return
+		return false
 	}
 	snapshot := materializeMachineStatusSnapshot(s.config.MachineStatus.Collector)
+	if ctx.Err() != nil {
+		return false
+	}
 	if snapshot.err != nil {
 		s.logWarning(fmt.Errorf("collect machine status: %w", snapshot.err))
 	}
 	if err := s.config.MachineStatus.Reporter.ReportMachineStatus(snapshot.status); err != nil {
 		s.logWarning(fmt.Errorf("report machine status: %w", err))
 	}
+	return ctx.Err() == nil
 }
 
 func (s *Supervisor) logWarning(err error) {

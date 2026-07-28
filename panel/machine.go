@@ -113,7 +113,15 @@ func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRunt
 	if newAPIClient == nil {
 		newAPIClient = plan.machineNewAPIClient
 	}
-	apiClient := newAPIClient(apiConfig)
+	rawAPIClient := newAPIClient(apiConfig)
+	apiClient := rawAPIClient
+	if nodePlan.sharedWS != nil {
+		wrappedAPIClient, wrapErr := machine.WrapAPIWithReporter(apiClient, nodePlan.binding.NodeID, nodePlan.sharedWS)
+		if wrapErr != nil {
+			return nil, fmt.Errorf("configure machine runtime node reporter: %w", wrapErr)
+		}
+		apiClient = wrappedAPIClient
+	}
 
 	controllerConfig, err := plan.machineNodeControllerConfig()
 	if err != nil {
@@ -123,10 +131,7 @@ func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRunt
 	if materializeCertConfig == nil {
 		materializeCertConfig = materializeRuntimeCertConfig
 	}
-	materializeCertConfig(apiClient, controllerConfig, logger)
-	if nodePlan.sharedWS != nil {
-		apiClient = machine.WrapAPIWithReporter(apiClient, nodePlan.binding.NodeID, nodePlan.sharedWS)
-	}
+	materializeCertConfig(rawAPIClient, controllerConfig, logger)
 
 	return &machineRuntimeNode{
 		apiClient:        apiClient,

@@ -47,14 +47,22 @@ type SharedWSRuntime struct {
 	lifecycle  *wslifecycle.Runtime
 	rediscover func() error
 
-	mu        sync.RWMutex
-	mailboxes map[int]*SharedWSMailbox
+	lifecycleMu sync.Mutex
+	closed      bool
+
+	mu               sync.RWMutex
+	mailboxes        map[int]*SharedWSMailbox
+	rediscoverSignal chan struct{}
+	rediscoverActive bool
+	rediscoverCancel context.CancelFunc
+	rediscoverDone   chan struct{}
 }
 
 func NewSharedWSRuntime(config SharedWSRuntimeConfig) *SharedWSRuntime {
 	runtime := &SharedWSRuntime{
-		config:    config,
-		mailboxes: make(map[int]*SharedWSMailbox),
+		config:           config,
+		mailboxes:        make(map[int]*SharedWSMailbox),
+		rediscoverSignal: make(chan struct{}, 1),
 	}
 	runtime.factory = func(ctx context.Context) (sharedWSClient, error) {
 		return newV2board.NewWSClientContext(ctx, config.Endpoint)
@@ -94,12 +102,54 @@ func (r *SharedWSRuntime) NewNodeRuntimeFactory(nodeID int) controller.WSEventRu
 }
 
 func (r *SharedWSRuntime) Start() error {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.closed {
+		return nil
+	}
+
+	r.mu.Lock()
+	if !r.rediscoverActive {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		r.rediscoverActive = true
+		r.rediscoverCancel = cancel
+		r.rediscoverDone = done
+		go r.runRediscover(ctx, done)
+	}
+	r.mu.Unlock()
+
 	r.lifecycle.Start()
 	return nil
 }
 
 func (r *SharedWSRuntime) Close() error {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+
+	r.mu.Lock()
+	r.rediscoverActive = false
+	cancel := r.rediscoverCancel
+	done := r.rediscoverDone
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+
 	r.lifecycle.Close()
+	if done != nil {
+		<-done
+	}
+	r.mu.Lock()
+	if r.rediscoverDone == done {
+		r.rediscoverCancel = nil
+		r.rediscoverDone = nil
+	}
+	r.mu.Unlock()
 	return nil
 }
 
@@ -166,17 +216,41 @@ func (r *SharedWSRuntime) handleOutcome(outcome wslifecycle.Outcome) {
 
 func (r *SharedWSRuntime) triggerRediscover() {
 	r.mu.RLock()
-	rediscover := r.rediscover
+	active := r.rediscoverActive
+	signal := r.rediscoverSignal
 	r.mu.RUnlock()
-	if rediscover == nil {
+	if !active {
 		return
 	}
 
-	go func() {
+	select {
+	case signal <- struct{}{}:
+	default:
+	}
+}
+
+func (r *SharedWSRuntime) runRediscover(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.rediscoverSignal:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		r.mu.RLock()
+		rediscover := r.rediscover
+		r.mu.RUnlock()
+		if rediscover == nil {
+			continue
+		}
 		if err := rediscover(); err != nil && r.config.Logger != nil {
 			r.config.Logger.Warn(err)
 		}
-	}()
+	}
 }
 
 func (r *SharedWSRuntime) registerMailbox(mailbox *SharedWSMailbox) {

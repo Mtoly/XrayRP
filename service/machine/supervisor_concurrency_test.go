@@ -542,6 +542,7 @@ func TestSupervisorPeriodicAndWebSocketReconcileShareSerialization(t *testing.T)
 
 	wsRuntime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
 	wsRuntime.SetRediscover(supervisor.ReconcileNow)
+	startSharedWSRuntimeWithClient(t, wsRuntime, newRecordingSharedWSClient())
 	wsRuntime.handleEvent(nil, &newV2board.WSEvent{
 		Event:   newV2board.WSEventXboardSyncNodes,
 		Payload: map[string]any{},

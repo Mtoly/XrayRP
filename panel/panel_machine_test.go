@@ -393,6 +393,41 @@ func TestMaterializeMachineRuntimeNodeBuildsClientConfigControllerConfigAndCert(
 	}
 }
 
+func TestMaterializeMachineRuntimeNodeRejectsIncompleteSharedWSCapabilities(t *testing.T) {
+	panel := New(&Config{})
+	config := validMachineModeConfig()
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeClient := &machineRuntimeNodeTestAPI{}
+	incompleteClient := &struct {
+		*machineRuntimeNodeTestAPI
+		api.WSCapable
+	}{
+		machineRuntimeNodeTestAPI: completeClient,
+	}
+
+	runtimeNode, err := plan.materializeMachineRuntimeNode(machineRuntimeNodePlan{
+		binding:  machine.NodeBinding{NodeID: 9, NodeType: "Vless"},
+		sharedWS: machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{}),
+		newAPIClient: func(*api.Config) runtimePanelClient {
+			return incompleteClient
+		},
+		materializeCertConfig: func(any, *controller.Config, *log.Entry) {},
+	}, panel.logger)
+
+	if err == nil {
+		t.Fatalf("expected incomplete machine capability error, got runtime node %#v", runtimeNode)
+	}
+	if runtimeNode != nil {
+		t.Fatalf("expected no runtime node on capability failure, got %#v", runtimeNode)
+	}
+	if !strings.Contains(err.Error(), "websocket config") {
+		t.Fatalf("expected websocket config error, got %v", err)
+	}
+}
+
 func TestMachineRuntimeNodePlanUseSharedWSRuntime(t *testing.T) {
 	sharedWS := machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{})
 	tests := []struct {
@@ -446,6 +481,11 @@ type machineRuntimeNodeTestAPI struct {
 }
 
 func (a *machineRuntimeNodeTestAPI) GetNodeInfo() (*api.NodeInfo, error) { return &api.NodeInfo{}, nil }
+func (a *machineRuntimeNodeTestAPI) GetWSConfig() *api.WSConfig          { return &api.WSConfig{} }
+func (a *machineRuntimeNodeTestAPI) DiscoverWSEndpoint() (string, error) {
+	return "wss://panel.example.com/ws", nil
+}
+func (a *machineRuntimeNodeTestAPI) GetBaseConfig() *api.BaseConfig { return &api.BaseConfig{} }
 func (a *machineRuntimeNodeTestAPI) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 	return &api.XrayRCertConfig{}, nil
 }

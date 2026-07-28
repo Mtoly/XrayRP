@@ -294,6 +294,46 @@ func TestSupervisorCloseClosesAllRunningServices(t *testing.T) {
 	}
 }
 
+func TestSupervisorReconcileNowDoesNoWorkAfterClose(t *testing.T) {
+	service := &fakeService{}
+	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+		machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "first"}),
+	}}
+	factory := newFakeFactory()
+	factory.services[1] = service
+	supervisor := newTestSupervisor(t, discoverer, factory)
+	if err := supervisor.Start(); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	discoveryCalls := discoverer.calls
+	buildCalls := len(factory.built)
+	startCalls := service.starts
+	closeCalls := service.closes
+
+	if err := supervisor.ReconcileNow(); err != nil {
+		t.Fatalf("ReconcileNow after Close returned error: %v", err)
+	}
+
+	if discoverer.calls != discoveryCalls {
+		t.Fatalf("discovery ran after Close: calls = %d, want %d", discoverer.calls, discoveryCalls)
+	}
+	if len(factory.built) != buildCalls {
+		t.Fatalf("factory ran after Close: builds = %d, want %d", len(factory.built), buildCalls)
+	}
+	if service.starts != startCalls || service.closes != closeCalls {
+		t.Fatalf(
+			"runtime lifecycle changed after Close: starts/closes = %d/%d, want %d/%d",
+			service.starts,
+			service.closes,
+			startCalls,
+			closeCalls,
+		)
+	}
+}
+
 func newTestSupervisor(t *testing.T, discoverer *fakeDiscoverer, factory *fakeFactory) *Supervisor {
 	t.Helper()
 	supervisor, err := NewSupervisor(SupervisorConfig{}, discoverer, factory.build)
@@ -1432,6 +1472,67 @@ func TestSupervisorStatusLoopDoesNotRunDiscovery(t *testing.T) {
 	}
 	if service.starts != 1 || service.closes != 0 {
 		t.Fatalf("expected node service lifecycle unchanged, start=%d close=%d", service.starts, service.closes)
+	}
+}
+
+func TestSupervisorStatusLoopDoesNoWorkWhenCancelledBeforeStart(t *testing.T) {
+	reporter := &channelMachineStatusReporter{statuses: make(chan api.MachineStatus, 1)}
+	collectorCalls := make(chan struct{}, 1)
+	supervisor := &Supervisor{config: SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter: reporter,
+			Collector: func() (api.MachineStatus, error) {
+				collectorCalls <- struct{}{}
+				return api.MachineStatus{}, nil
+			},
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+
+	go supervisor.runStatus(ctx, done, time.Hour)
+	waitForSignal(t, done, "cancelled status loop")
+
+	select {
+	case <-collectorCalls:
+		t.Fatal("status collector started after cancellation")
+	default:
+	}
+	select {
+	case <-reporter.statuses:
+		t.Fatal("status reporter started after cancellation")
+	default:
+	}
+}
+
+func TestSupervisorStatusLoopDoesNotPublishCollectorResultAfterCancel(t *testing.T) {
+	reporter := &channelMachineStatusReporter{statuses: make(chan api.MachineStatus, 1)}
+	collectorEntered := make(chan struct{}, 1)
+	collectorRelease := make(chan struct{})
+	supervisor := &Supervisor{config: SupervisorConfig{
+		MachineStatus: MachineStatusReporterConfig{
+			Reporter: reporter,
+			Collector: func() (api.MachineStatus, error) {
+				collectorEntered <- struct{}{}
+				<-collectorRelease
+				return api.MachineStatus{CPU: 1}, nil
+			},
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go supervisor.runStatus(ctx, done, time.Hour)
+	waitForSignal(t, collectorEntered, "status collector")
+
+	cancel()
+	close(collectorRelease)
+	waitForSignal(t, done, "cancelled status loop")
+
+	select {
+	case <-reporter.statuses:
+		t.Fatal("status reporter started after cancellation")
+	default:
 	}
 }
 
