@@ -281,7 +281,7 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 				}
 				return nil
 			},
-			updateInbound: func(tag string, users *[]api.UserInfo) error {
+			replaceInbound: func(tag string, users *[]api.UserInfo) error {
 				recorder.recordUpdateInboundLimiter(tag, users)
 				if recorder.updateLimiterErr != nil {
 					return recorder.updateLimiterErr
@@ -1584,16 +1584,12 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 	if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 1 {
 		t.Fatalf("expected limiter snapshot and restore once, got snapshot=%d restore=%d", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
 	}
-	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 2 {
-		t.Fatalf("expected limiter update, runtime add attempt, and rollback restore, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
+	if recorder.updateLimiterCalls != 0 || recorder.addUserCalls != 2 {
+		t.Fatalf("expected runtime add attempt and rollback restore without limiter publication, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
 	}
-	if len(recorder.updatedLimiterTags) != 1 || recorder.updatedLimiterTags[0] != tag {
-		t.Fatalf("expected limiter update for tag %q, got %#v", tag, recorder.updatedLimiterTags)
+	if len(recorder.updatedLimiterTags) != 0 || len(recorder.updatedLimiterPayloads) != 0 {
+		t.Fatalf("runtime failure published candidate limiter: tags=%#v payloads=%#v", recorder.updatedLimiterTags, recorder.updatedLimiterPayloads)
 	}
-	if len(recorder.updatedLimiterPayloads) != 1 {
-		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
-	}
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{nextUsers[0]})
 	if len(recorder.addedUserTags) != 2 || recorder.addedUserTags[0] != tag || recorder.addedUserTags[1] != tag {
 		t.Fatalf("expected runtime add attempt and rollback restore for tag %q, got %#v", tag, recorder.addedUserTags)
 	}
@@ -1629,16 +1625,12 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 	if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 1 {
 		t.Fatalf("expected limiter snapshot and restore once, got snapshot=%d restore=%d", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
 	}
-	if recorder.updateLimiterCalls != 1 || recorder.addUserCalls != 1 {
-		t.Fatalf("expected limiter update and rollback restore after remove failure, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
+	if recorder.updateLimiterCalls != 0 || recorder.addUserCalls != 1 {
+		t.Fatalf("expected rollback restore after remove failure without limiter publication, got updateLimiter=%d addUsers=%d", recorder.updateLimiterCalls, recorder.addUserCalls)
 	}
-	if len(recorder.updatedLimiterTags) != 1 || recorder.updatedLimiterTags[0] != tag {
-		t.Fatalf("expected limiter update for tag %q, got %#v", tag, recorder.updatedLimiterTags)
+	if len(recorder.updatedLimiterTags) != 0 || len(recorder.updatedLimiterPayloads) != 0 {
+		t.Fatalf("runtime failure published candidate limiter: tags=%#v payloads=%#v", recorder.updatedLimiterTags, recorder.updatedLimiterPayloads)
 	}
-	if len(recorder.updatedLimiterPayloads) != 1 {
-		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
-	}
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{nextUsers[0]})
 	if len(recorder.addedUserPayloads) != 1 {
 		t.Fatalf("expected runtime restore payload after remove failure, got %#v", recorder.addedUserPayloads)
 	}
@@ -1649,6 +1641,215 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 	_, _, appliedUsers := controller.getStateSnapshot()
 	if appliedUsers == &currentUsers || appliedUsers == nil || (*appliedUsers)[0].UUID != "uuid-1" || (*appliedUsers)[0].SpeedLimit != 100 || (*appliedUsers)[0].DeviceLimit != 1 {
 		t.Fatalf("expected committed user state to retain old UUID and limits, got %#v", appliedUsers)
+	}
+}
+
+func TestSyncApply_RuntimeRemoveDoesNotPublishCandidateLimiter(t *testing.T) {
+	kept := api.UserInfo{UID: 1, Email: "kept@example.test", UUID: "kept-uuid"}
+	removed := api.UserInfo{UID: 2, Email: "removed@example.test", UUID: "removed-uuid"}
+	currentUsers := []api.UserInfo{kept, removed}
+	nextUsers := []api.UserInfo{kept}
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	controller, _ := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	controller.setUserList(&currentUsers)
+
+	panelLimiter := limiter.New()
+	t.Cleanup(func() {
+		if err := panelLimiter.Close(); err != nil {
+			t.Errorf("Limiter.Close() error = %v", err)
+		}
+	})
+	if err := panelLimiter.AddInboundLimiter(tag, node.SpeedLimit, &currentUsers, nil); err != nil {
+		t.Fatalf("AddInboundLimiter() error = %v", err)
+	}
+	controller.syncApplyHooks.limiter.replaceInbound = panelLimiter.ReplaceInboundUsers
+	controller.syncApplyHooks.limiter.snapshotInbound = panelLimiter.SnapshotInboundLimiterState
+	controller.syncApplyHooks.limiter.restoreInbound = panelLimiter.RestoreInboundLimiterState
+
+	removeEntered := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	runtimeErr := errors.New("remove user failed")
+	controller.syncApplyHooks.runtime.removeUsers = func([]string, string) error {
+		close(removeEntered)
+		<-releaseRemove
+		return runtimeErr
+	}
+
+	applyDone := make(chan error, 1)
+	go func() {
+		applyDone <- controller.ExecuteSyncAction(
+			context.Background(),
+			newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}),
+		)
+	}()
+
+	<-removeEntered
+	removedKey := fmt.Sprintf("%s|%s|%d", tag, removed.Email, removed.UID)
+	_, _, rejectedDuringApply := panelLimiter.Admit(tag, removedKey, "192.0.2.2", nil, nil)
+	close(releaseRemove)
+	err := <-applyDone
+
+	if rejectedDuringApply {
+		t.Fatal("candidate limiter was published before the runtime user transaction completed")
+	}
+	if !errors.Is(err, runtimeErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want runtime remove failure", err)
+	}
+	if _, _, rejected := panelLimiter.Admit(tag, removedKey, "192.0.2.2", nil, nil); rejected {
+		t.Fatal("runtime failure did not preserve the last-known-good limiter")
+	}
+}
+
+func TestSyncApply_EmbeddedRuntimeRebuildFailureRestoresAppliedUsers(t *testing.T) {
+	for _, nodeType := range []string{"Socks", "HTTP"} {
+		t.Run(nodeType, func(t *testing.T) {
+			currentUsers := []api.UserInfo{{UID: 1, Email: "current@example.test", UUID: "current-uuid"}}
+			nextUsers := []api.UserInfo{{UID: 2, Email: "next@example.test", UUID: "next-uuid"}}
+			node := &api.NodeInfo{NodeType: nodeType, NodeID: 1, Port: 1080}
+			controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+			tag := controller.buildNodeTagFrom(node)
+			controller.setNodeState(node, tag)
+			controller.setUserList(&currentUsers)
+
+			rebuildErr := errors.New("rebuild embedded inbound failed")
+			controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+				recorder.recordAddNewUser(tag, users)
+				if recorder.addUserCalls == 1 {
+					return rebuildErr
+				}
+				return nil
+			}
+
+			err := controller.ExecuteSyncAction(
+				context.Background(),
+				newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}),
+			)
+			if !errors.Is(err, rebuildErr) {
+				t.Fatalf("ExecuteSyncAction() error = %v, want runtime rebuild failure", err)
+			}
+			if recorder.addUserCalls != 2 {
+				t.Fatalf("runtime rebuild calls = %d, want candidate attempt and applied restore", recorder.addUserCalls)
+			}
+			assertUserPayload(t, recorder.addedUserPayloads[0], nextUsers)
+			assertUserPayload(t, recorder.addedUserPayloads[1], currentUsers)
+			if recorder.addLimiterCalls != 0 || recorder.updateLimiterCalls != 0 {
+				t.Fatalf("runtime failure published limiter: add=%d replace=%d", recorder.addLimiterCalls, recorder.updateLimiterCalls)
+			}
+			_, _, appliedUsers := controller.getStateSnapshot()
+			if appliedUsers == nil || !reflect.DeepEqual(*appliedUsers, currentUsers) {
+				t.Fatalf("runtime failure changed applied users: %#v", appliedUsers)
+			}
+		})
+	}
+}
+
+func TestSyncApply_EmbeddedLimiterFailureRestoresRuntimeAndLimiter(t *testing.T) {
+	for _, nodeType := range []string{"Socks", "HTTP"} {
+		t.Run(nodeType, func(t *testing.T) {
+			currentUsers := []api.UserInfo{{UID: 1, Email: "current@example.test", UUID: "current-uuid"}}
+			nextUsers := []api.UserInfo{{UID: 2, Email: "next@example.test", UUID: "next-uuid"}}
+			node := &api.NodeInfo{NodeType: nodeType, NodeID: 1, Port: 1080}
+			controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+			tag := controller.buildNodeTagFrom(node)
+			controller.setNodeState(node, tag)
+			controller.setUserList(&currentUsers)
+
+			controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+				recorder.recordAddNewUser(tag, users)
+				return nil
+			}
+			limiterErr := errors.New("replace embedded limiter failed")
+			controller.syncApplyHooks.limiter.addInbound = func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error {
+				recorder.addLimiterCalls++
+				return limiterErr
+			}
+			controller.syncApplyHooks.limiter.replaceInbound = func(tag string, users *[]api.UserInfo) error {
+				recorder.recordUpdateInboundLimiter(tag, users)
+				return limiterErr
+			}
+
+			err := controller.ExecuteSyncAction(
+				context.Background(),
+				newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}),
+			)
+			if !errors.Is(err, limiterErr) {
+				t.Fatalf("ExecuteSyncAction() error = %v, want limiter replacement failure", err)
+			}
+			if recorder.addUserCalls != 2 {
+				t.Fatalf("runtime rebuild calls = %d, want candidate apply and applied restore", recorder.addUserCalls)
+			}
+			assertUserPayload(t, recorder.addedUserPayloads[0], nextUsers)
+			assertUserPayload(t, recorder.addedUserPayloads[1], currentUsers)
+			if recorder.addLimiterCalls != 0 || recorder.updateLimiterCalls != 1 {
+				t.Fatalf("limiter publication calls = add:%d replace:%d, want authoritative replacement", recorder.addLimiterCalls, recorder.updateLimiterCalls)
+			}
+			if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 1 {
+				t.Fatalf("limiter transaction calls = snapshot:%d restore:%d, want 1/1", recorder.snapshotLimiterCalls, recorder.restoreLimiterCalls)
+			}
+			_, _, appliedUsers := controller.getStateSnapshot()
+			if appliedUsers == nil || !reflect.DeepEqual(*appliedUsers, currentUsers) {
+				t.Fatalf("limiter failure changed applied users: %#v", appliedUsers)
+			}
+		})
+	}
+}
+
+func TestSyncApply_InitialUserLimiterFailureRemovesCandidateRuntimeUsers(t *testing.T) {
+	for _, nodeType := range []string{"V2ray", "Socks", "HTTP"} {
+		t.Run(nodeType, func(t *testing.T) {
+			nextUsers := []api.UserInfo{{UID: 2, Email: "next@example.test", UUID: "next-uuid"}}
+			node := &api.NodeInfo{NodeType: nodeType, NodeID: 1, Port: 1080}
+			controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+			tag := controller.buildNodeTagFrom(node)
+			controller.setNodeState(node, tag)
+
+			controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+				recorder.recordAddNewUser(tag, users)
+				return nil
+			}
+			limiterErr := errors.New("create initial limiter failed")
+			controller.syncApplyHooks.limiter.addInbound = func(tag string, _ uint64, _ *[]api.UserInfo, _ *limiter.GlobalDeviceLimitConfig) error {
+				recorder.addLimiterCalls++
+				if recorder.activeLimiterTags == nil {
+					recorder.activeLimiterTags = make(map[string]bool)
+				}
+				recorder.activeLimiterTags[tag] = true
+				return limiterErr
+			}
+
+			err := controller.ExecuteSyncAction(
+				context.Background(),
+				newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}),
+			)
+			if !errors.Is(err, limiterErr) {
+				t.Fatalf("ExecuteSyncAction() error = %v, want initial limiter failure", err)
+			}
+			if recorder.addLimiterCalls != 1 || recorder.deleteLimiterCalls != 1 {
+				t.Fatalf("limiter transaction calls = add:%d delete:%d, want 1/1", recorder.addLimiterCalls, recorder.deleteLimiterCalls)
+			}
+			if recorder.activeLimiterTags[tag] {
+				t.Fatal("failed initial limiter remained published")
+			}
+			if nodeType == "V2ray" {
+				wantKey := tag + "|next@example.test|2"
+				if len(recorder.removedUsers) != 1 || !reflect.DeepEqual(recorder.removedUsers[0], []string{wantKey}) {
+					t.Fatalf("candidate runtime removals = %#v, want %q", recorder.removedUsers, wantKey)
+				}
+			} else {
+				if recorder.addUserCalls != 2 {
+					t.Fatalf("embedded runtime rebuild calls = %d, want candidate and empty restore", recorder.addUserCalls)
+				}
+				if len(recorder.addedUserPayloads[1]) != 0 {
+					t.Fatalf("embedded runtime restore users = %#v, want empty", recorder.addedUserPayloads[1])
+				}
+			}
+			_, _, appliedUsers := controller.getStateSnapshot()
+			if appliedUsers != nil {
+				t.Fatalf("failed initial user sync published applied users: %#v", appliedUsers)
+			}
+		})
 	}
 }
 
@@ -1683,7 +1884,7 @@ func TestSyncApply_UserDiffPayloadOrder(t *testing.T) {
 	if len(recorder.updatedLimiterPayloads) != 1 {
 		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
 	}
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{addedUser, runtimeNext, limitNext})
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], nextUsers)
 	if len(recorder.removedUsers) != 1 {
 		t.Fatalf("expected one runtime remove batch, got %#v", recorder.removedUsers)
 	}
@@ -1962,4 +2163,150 @@ func TestSyncApply_SameTagRebuildAddFailureRestoresOldRuntimeState(t *testing.T)
 	if got := controller.getAppliedRuleTag(); got != currentTag {
 		t.Fatalf("expected rule state to remain bound to old tag %q after same-tag failure, got %q", currentTag, got)
 	}
+}
+
+func TestSyncApply_NodeUserReadinessFailureRestoresRealLimiterAdmission(t *testing.T) {
+	oldUser := api.UserInfo{UID: 1, Email: "old@example.test", UUID: "old-uuid", SpeedLimit: 100, DeviceLimit: 2}
+	newUser := api.UserInfo{UID: 2, Email: "new@example.test", UUID: "new-uuid", SpeedLimit: 200, DeviceLimit: 2}
+	oldUsers := []api.UserInfo{oldUser}
+	newUsers := []api.UserInfo{newUser}
+	oldNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	newNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 2, Port: 8443}
+	client := &fakeSyncApplyAPI{nodeInfo: newNode, userList: &newUsers}
+	controller, recorder := newTestSyncApplyController(client)
+	controller.config.CertConfig = nil
+	controller.config.DisableGetRule = true
+	oldTag := controller.buildNodeTagFrom(oldNode)
+	newTag := controller.buildNodeTagFrom(newNode)
+	controller.setNodeState(oldNode, oldTag)
+	controller.setUserList(&oldUsers)
+	recorder.activeRuntimes = map[string]*api.NodeInfo{oldTag: cloneRecordedNodeInfo(oldNode)}
+
+	panelLimiter := limiter.New()
+	if err := panelLimiter.AddInboundLimiter(oldTag, oldNode.SpeedLimit, &oldUsers, nil); err != nil {
+		t.Fatalf("AddInboundLimiter() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := panelLimiter.Close(); err != nil {
+			t.Errorf("Limiter.Close() error = %v", err)
+		}
+	})
+	controller.dispatcher = &mydispatcher.DefaultDispatcher{Limiter: panelLimiter}
+	controller.syncApplyHooks.limiter = syncApplyLimiterHooks{}
+
+	readinessErr := errors.New("candidate users are not ready")
+	addUserCalls := 0
+	controller.syncApplyHooks.runtime.addUsers = func(users *[]api.UserInfo, _ *api.NodeInfo, tag string, _ *Config) error {
+		addUserCalls++
+		recorder.recordAddNewUser(tag, users)
+		if addUserCalls == 1 {
+			return readinessErr
+		}
+		return nil
+	}
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeResyncAll, syncActionSourceWS, syncActionMetadata{Trigger: "resync_all"}))
+	if !errors.Is(err, readinessErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want readiness failure", err)
+	}
+	if _, _, rejected := panelLimiter.Admit(oldTag, oldTag+"|old@example.test|1", "192.0.2.1", nil, nil); rejected {
+		t.Fatal("restored last-known-good limiter rejected the applied user")
+	}
+	if _, _, rejected := panelLimiter.Admit(oldTag, oldTag+"|new@example.test|2", "192.0.2.2", nil, nil); !rejected {
+		t.Fatal("restored last-known-good limiter admitted a candidate user")
+	}
+	if _, _, rejected := panelLimiter.Admit(newTag, newTag+"|new@example.test|2", "192.0.2.2", nil, nil); !rejected {
+		t.Fatal("failed candidate limiter remained published")
+	}
+	appliedNode, appliedTag, appliedUsers := controller.getStateSnapshot()
+	if !reflect.DeepEqual(appliedNode, oldNode) || appliedTag != oldTag || appliedUsers == nil || !reflect.DeepEqual(*appliedUsers, oldUsers) {
+		t.Fatalf("failed node apply changed controller state: node=%#v tag=%q users=%#v", appliedNode, appliedTag, appliedUsers)
+	}
+}
+
+func TestSyncApply_AuthoritativeLimiterUsersPreserveActiveAutoLimitOverlay(t *testing.T) {
+	limitedUser := api.UserInfo{UID: 1, Email: "limited@example.com", UUID: "limited-uuid", SpeedLimit: 100}
+	removedUser := api.UserInfo{UID: 2, Email: "removed@example.com", UUID: "removed-uuid", SpeedLimit: 200}
+	addedUser := api.UserInfo{UID: 3, Email: "added@example.com", UUID: "added-uuid", SpeedLimit: 300}
+	currentUsers := []api.UserInfo{limitedUser, removedUser}
+	nextUsers := []api.UserInfo{limitedUser, addedUser}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	controller.setUserList(&currentUsers)
+	controller.limitedUsers = map[api.UserInfo]LimitInfo{
+		limitedUser: {
+			end:               time.Now().Add(time.Minute).Unix(),
+			currentSpeedLimit: 8,
+			originSpeedLimit:  limitedUser.SpeedLimit,
+		},
+	}
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+	if len(recorder.updatedLimiterPayloads) != 1 {
+		t.Fatalf("limiter replacement payloads = %d, want 1", len(recorder.updatedLimiterPayloads))
+	}
+	wantLimited := limitedUser
+	wantLimited.SpeedLimit = 1_000_000
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{wantLimited, addedUser})
+	if info, exists := controller.limitedUsers[limitedUser]; !exists || info.currentSpeedLimit != 8 {
+		t.Fatalf("active auto-limit overlay changed during user replacement: %#v", controller.limitedUsers)
+	}
+}
+
+func TestSyncApply_RuntimeRemoveFailurePreservesAppliedAutoLimitOverlay(t *testing.T) {
+	kept := api.UserInfo{UID: 1, Email: "kept@example.com", UUID: "kept-uuid", SpeedLimit: 100}
+	removed := api.UserInfo{UID: 2, Email: "removed@example.com", UUID: "removed-uuid", SpeedLimit: 200}
+	keptNext := kept
+	keptNext.SpeedLimit = 300
+	currentUsers := []api.UserInfo{kept, removed}
+	nextUsers := []api.UserInfo{keptNext}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	controller.setUserList(&currentUsers)
+	recorder.removeUsersErr = errors.New("remove user failed")
+	appliedLimited := map[api.UserInfo]LimitInfo{
+		kept:    {end: 1000, currentSpeedLimit: 8, originSpeedLimit: kept.SpeedLimit},
+		removed: {end: 2000, currentSpeedLimit: 16, originSpeedLimit: removed.SpeedLimit},
+	}
+	appliedWarned := map[api.UserInfo]int{kept: 1, removed: 2}
+	controller.limitedUsers = cloneMap(appliedLimited)
+	controller.warnedUsers = cloneMap(appliedWarned)
+
+	err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}))
+	if !errors.Is(err, recorder.removeUsersErr) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want runtime remove failure", err)
+	}
+	if !reflect.DeepEqual(controller.limitedUsers, appliedLimited) {
+		t.Fatalf("failed apply changed active auto-limit state:\n got: %#v\nwant: %#v", controller.limitedUsers, appliedLimited)
+	}
+	if !reflect.DeepEqual(controller.warnedUsers, appliedWarned) {
+		t.Fatalf("failed apply changed warning state:\n got: %#v\nwant: %#v", controller.warnedUsers, appliedWarned)
+	}
+}
+
+func TestSyncApply_UserDeletionReplacesLimiterWithAuthoritativeUsers(t *testing.T) {
+	kept := api.UserInfo{UID: 1, Email: "kept@example.test", UUID: "kept-uuid", SpeedLimit: 100}
+	removed := api.UserInfo{UID: 2, Email: "removed@example.test", UUID: "removed-uuid", SpeedLimit: 200}
+	currentUsers := []api.UserInfo{kept, removed}
+	nextUsers := []api.UserInfo{kept}
+	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
+	tag := controller.buildNodeTagFrom(node)
+	controller.setNodeState(node, tag)
+	controller.setUserList(&currentUsers)
+
+	if err := controller.ExecuteSyncAction(context.Background(), newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"})); err != nil {
+		t.Fatalf("ExecuteSyncAction() error = %v", err)
+	}
+
+	if recorder.updateLimiterCalls != 1 || len(recorder.updatedLimiterPayloads) != 1 {
+		t.Fatalf("limiter replacements = calls:%d payloads:%d, want one", recorder.updateLimiterCalls, len(recorder.updatedLimiterPayloads))
+	}
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], nextUsers)
 }

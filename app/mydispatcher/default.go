@@ -164,8 +164,11 @@ func (*DefaultDispatcher) Start() error {
 }
 
 // Close implements common.Closable.
-func (*DefaultDispatcher) Close() error {
-	return nil
+func (d *DefaultDispatcher) Close() error {
+	if d == nil || d.Limiter == nil {
+		return nil
+	}
+	return d.Limiter.Close()
 }
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, error) {

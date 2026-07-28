@@ -54,40 +54,41 @@ type preparedCertificateRenewal interface {
 type prepareCertificateRenewalFunc func(*mylego.CertConfig) (preparedCertificateRenewal, error)
 
 type Controller struct {
-	server                 *core.Instance
-	config                 *Config
-	clientInfo             api.ClientInfo
-	apiClient              PanelClient
-	reloadMu               sync.Mutex
-	periodicMu             sync.Mutex
-	periodicJoinWG         sync.WaitGroup
-	periodicGeneration     uint64
-	periodicAsyncErrs      []error
-	periodicClosed         bool
-	periodicCloseDone      chan struct{}
-	periodicCloseErr       error
-	stateMu                sync.RWMutex
-	runtimeState           nodeRuntimeState
-	syncApplyHooks         syncApplyHooks
-	tasks                  []periodicTask
-	limitedUsers           map[api.UserInfo]LimitInfo
-	warnedUsers            map[api.UserInfo]int
-	panelType              string
-	ibm                    inbound.Manager
-	obm                    outbound.Manager
-	stm                    stats.Manager
-	pm                     policy.Manager
-	dispatcher             *mydispatcher.DefaultDispatcher
-	startAt                time.Time
-	logger                 *log.Entry
-	syncCoordinator        syncCoordinatorLifecycle
-	wsRuntime              wsRuntimeLifecycle
-	deviceReportState      *deviceReportState
-	syncExecutionState     *syncExecutionState
-	prepareRenewal         prepareCertificateRenewalFunc
-	newPeriodicTask        periodicTaskFactory
-	syncCoordinatorFactory func(syncActionExecutor) syncCoordinatorLifecycle
-	wsRuntimeFactory       func(syncActionSubmitter) (wsRuntimeLifecycle, error)
+	server                         *core.Instance
+	config                         *Config
+	clientInfo                     api.ClientInfo
+	apiClient                      PanelClient
+	reloadMu                       sync.Mutex
+	periodicMu                     sync.Mutex
+	periodicJoinWG                 sync.WaitGroup
+	periodicGeneration             uint64
+	periodicAsyncErrs              []error
+	periodicClosed                 bool
+	periodicCloseDone              chan struct{}
+	periodicCloseErr               error
+	stateMu                        sync.RWMutex
+	runtimeState                   nodeRuntimeState
+	syncApplyHooks                 syncApplyHooks
+	tasks                          []periodicTask
+	limitedUsers                   map[api.UserInfo]LimitInfo
+	warnedUsers                    map[api.UserInfo]int
+	panelType                      string
+	ibm                            inbound.Manager
+	obm                            outbound.Manager
+	stm                            stats.Manager
+	pm                             policy.Manager
+	dispatcher                     *mydispatcher.DefaultDispatcher
+	startAt                        time.Time
+	logger                         *log.Entry
+	syncCoordinator                syncCoordinatorLifecycle
+	wsRuntime                      wsRuntimeLifecycle
+	deviceReportState              *deviceReportState
+	syncExecutionState             *syncExecutionState
+	beforeUserMonitorLimiterUpdate func()
+	prepareRenewal                 prepareCertificateRenewalFunc
+	newPeriodicTask                periodicTaskFactory
+	syncCoordinatorFactory         func(syncActionExecutor) syncCoordinatorLifecycle
+	wsRuntimeFactory               func(syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
 
 type periodicTask = controllerPeriodicTask
@@ -836,6 +837,52 @@ func compareUserList(old, new *[]api.UserInfo) (deleted, added []api.UserInfo) {
 	return deleted, added
 }
 
+func speedLimitBytes(megabitsPerSecond int) uint64 {
+	return uint64((megabitsPerSecond * 1_000_000) / 8)
+}
+
+type limiterUserOverlayCandidate struct {
+	limiterUsers *[]api.UserInfo
+	limitedUsers map[api.UserInfo]LimitInfo
+	warnedUsers  map[api.UserInfo]int
+}
+
+func (c *Controller) buildLimiterUserOverlayCandidate(users *[]api.UserInfo) limiterUserOverlayCandidate {
+	if users == nil {
+		return limiterUserOverlayCandidate{}
+	}
+	result := cloneSlice(*users)
+
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	limitedByIdentity := make(map[userIdentityKey]LimitInfo, len(c.limitedUsers))
+	for user, info := range c.limitedUsers {
+		limitedByIdentity[userIdentityKey{UID: user.UID, Email: user.Email}] = info
+	}
+	warnedByIdentity := make(map[userIdentityKey]int, len(c.warnedUsers))
+	for user, count := range c.warnedUsers {
+		warnedByIdentity[userIdentityKey{UID: user.UID, Email: user.Email}] = count
+	}
+
+	nextLimited := make(map[api.UserInfo]LimitInfo, len(limitedByIdentity))
+	nextWarned := make(map[api.UserInfo]int, len(warnedByIdentity))
+	for index, user := range result {
+		identity := userIdentityKey{UID: user.UID, Email: user.Email}
+		if info, limited := limitedByIdentity[identity]; limited {
+			info.originSpeedLimit = user.SpeedLimit
+			nextLimited[user] = info
+			result[index].SpeedLimit = speedLimitBytes(info.currentSpeedLimit)
+		}
+		if count, warned := warnedByIdentity[identity]; warned {
+			nextWarned[user] = count
+		}
+	}
+	return limiterUserOverlayCandidate{
+		limiterUsers: &result,
+		limitedUsers: nextLimited,
+		warnedUsers:  nextWarned,
+	}
+}
 func limitUser(c *Controller, user api.UserInfo, tag string, silentUsers *[]api.UserInfo) {
 	c.limitedUsers[user] = LimitInfo{
 		end:               time.Now().Unix() + int64(c.config.AutoSpeedLimitConfig.LimitDuration*60),
@@ -844,18 +891,20 @@ func limitUser(c *Controller, user api.UserInfo, tag string, silentUsers *[]api.
 	}
 	userTag := c.buildUserTagFrom(user, tag)
 	c.logger.Printf("Limit User: %s Speed: %d End: %s", userTag, c.config.AutoSpeedLimitConfig.LimitSpeed, time.Unix(c.limitedUsers[user].end, 0).Format("01-02 15:04:05"))
-	user.SpeedLimit = uint64((c.config.AutoSpeedLimitConfig.LimitSpeed * 1000000) / 8)
+	user.SpeedLimit = speedLimitBytes(c.config.AutoSpeedLimitConfig.LimitSpeed)
 	*silentUsers = append(*silentUsers, user)
+}
+
+func (c *Controller) updateInboundLimiterFromUserMonitor(tag string, users *[]api.UserInfo) error {
+	if c.beforeUserMonitorLimiterUpdate != nil {
+		c.beforeUserMonitorLimiterUpdate()
+	}
+	return c.UpdateInboundLimiter(tag, users)
 }
 
 func (c *Controller) userInfoMonitor() (err error) {
 	// delay to start
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
-		return nil
-	}
-
-	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
-	if currentNodeInfo == nil || currentUserList == nil {
 		return nil
 	}
 
@@ -875,13 +924,24 @@ func (c *Controller) userInfoMonitor() (err error) {
 		c.logger.Print(err)
 	}
 
+	c.reloadMu.Lock()
+	currentNodeInfo, currentTag, currentUserList := c.getStateSnapshot()
+	if currentNodeInfo == nil || currentUserList == nil {
+		c.reloadMu.Unlock()
+		return nil
+	}
+
 	var (
-		toReleaseUsers []api.UserInfo
-		limitedCount   int
+		toReleaseUsers      []api.UserInfo
+		limitedCount        int
+		appliedLimitedUsers map[api.UserInfo]LimitInfo
+		appliedWarnedUsers  map[api.UserInfo]int
 	)
 	// Unlock users
 	if c.config.AutoSpeedLimitConfig.Limit > 0 {
 		c.withStateLock(func() {
+			appliedLimitedUsers = cloneMap(c.limitedUsers)
+			appliedWarnedUsers = cloneMap(c.warnedUsers)
 			if len(c.limitedUsers) == 0 {
 				limitedCount = 0
 				return
@@ -897,12 +957,6 @@ func (c *Controller) userInfoMonitor() (err error) {
 			}
 			limitedCount = len(c.limitedUsers)
 		})
-		if len(toReleaseUsers) > 0 {
-			c.logger.Printf("Releasing %d speed-limited users, %d still limited", len(toReleaseUsers), limitedCount)
-			if err := c.UpdateInboundLimiter(currentTag, &toReleaseUsers); err != nil {
-				c.logger.Print(err)
-			}
-		}
 	}
 
 	// Get User traffic — optimized: pre-allocate and batch
@@ -958,11 +1012,24 @@ func (c *Controller) userInfoMonitor() (err error) {
 			}
 		}
 	}
-	if len(limitedUsers) > 0 {
-		if err := c.UpdateInboundLimiter(currentTag, &limitedUsers); err != nil {
-			c.logger.Print(err)
+	limitUpdates := make([]api.UserInfo, 0, len(toReleaseUsers)+len(limitedUsers))
+	limitUpdates = append(limitUpdates, toReleaseUsers...)
+	limitUpdates = append(limitUpdates, limitedUsers...)
+	if len(limitUpdates) > 0 {
+		if err := c.updateInboundLimiterFromUserMonitor(currentTag, &limitUpdates); err != nil {
+			c.withStateLock(func() {
+				c.limitedUsers = appliedLimitedUsers
+				c.warnedUsers = appliedWarnedUsers
+			})
+			c.reloadMu.Unlock()
+			return fmt.Errorf("apply automatic speed-limit changes: %w", err)
 		}
 	}
+	if len(toReleaseUsers) > 0 {
+		c.logger.Printf("Releasing %d speed-limited users, %d still limited", len(toReleaseUsers), limitedCount)
+	}
+	c.reloadMu.Unlock()
+
 	if len(userTraffic) > 0 {
 		c.logger.Printf("Reporting %d user(s) traffic to panel; example: UID=%d up=%d down=%d", len(userTraffic), userTraffic[0].UID, userTraffic[0].Upload, userTraffic[0].Download)
 		var reportErr error

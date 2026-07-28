@@ -57,6 +57,27 @@ func (c *Controller) commitRuntimeState(state nodeRuntimeState) {
 	c.stateMu.Unlock()
 }
 
+func (c *Controller) commitRuntimeStateWithUserOverlay(state nodeRuntimeState, overlay limiterUserOverlayCandidate) {
+	c.stateMu.Lock()
+	c.runtimeState = cloneNodeRuntimeState(state)
+	c.limitedUsers = overlay.limitedUsers
+	c.warnedUsers = overlay.warnedUsers
+	c.stateMu.Unlock()
+}
+
+func (c *Controller) commitUserListWithOverlay(userList *[]api.UserInfo, overlay limiterUserOverlayCandidate) {
+	c.stateMu.Lock()
+	c.runtimeState.userListSet = userList != nil
+	if userList == nil {
+		c.runtimeState.userList = nil
+	} else {
+		c.runtimeState.userList = cloneSlice(*userList)
+	}
+	c.limitedUsers = overlay.limitedUsers
+	c.warnedUsers = overlay.warnedUsers
+	c.stateMu.Unlock()
+}
+
 func (c *Controller) getStateSnapshot() (nodeInfo *api.NodeInfo, tag string, userList *[]api.UserInfo) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()

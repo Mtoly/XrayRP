@@ -176,25 +176,25 @@ func TestLimiterUsesFreshGlobalAdmissionWithoutLocalOnlyRejection(t *testing.T) 
 	}
 
 	userKey := "inbound|user@example.com|1"
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "203.0.113.1"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "203.0.113.1"); rejected {
 		t.Fatal("expected first local IP to be allowed")
 	}
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "203.0.113.2"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "203.0.113.2"); rejected {
 		t.Fatal("expected second local IP to be allowed")
 	}
 	if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: []string{"198.51.100.1"}}); err != nil {
 		t.Fatalf("UpdateGlobalDevices failed: %v", err)
 	}
 
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "192.0.2.1"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "192.0.2.1"); rejected {
 		t.Fatal("expected fresh global deterministic admission to allow candidate without old local-only rejection")
 	}
 
-	value, ok := l.InboundInfo.Load("inbound")
+	value, ok := l.inboundInfo.Load("inbound")
 	if !ok {
 		t.Fatal("expected inbound to exist")
 	}
-	entryValue, ok := value.(*InboundInfo).UserOnlineIP.Load(userKey)
+	entryValue, ok := value.(*inboundState).onlineUsers.Load(userKey)
 	if !ok || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
 		t.Fatal("expected globally admitted IP to be recorded locally")
 	}
@@ -208,7 +208,7 @@ func TestLimiterSerializesConcurrentFreshGlobalAdmission(t *testing.T) {
 	}
 
 	userKey := "inbound|user@example.com|1"
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "192.0.2.1"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "192.0.2.1"); rejected {
 		t.Fatal("expected initial local IP to be allowed")
 	}
 	if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: []string{"203.0.113.200"}}); err != nil {
@@ -233,7 +233,7 @@ func TestLimiterSerializesConcurrentFreshGlobalAdmission(t *testing.T) {
 			defer wg.Done()
 			ready <- struct{}{}
 			<-start
-			if _, _, rejected := l.GetUserBucket("inbound", userKey, candidate); rejected {
+			if _, _, rejected := l.getUserBucket("inbound", userKey, candidate); rejected {
 				atomic.AddInt32(&rejectedCount, 1)
 			}
 		}()
@@ -252,11 +252,11 @@ func TestLimiterSerializesConcurrentFreshGlobalAdmission(t *testing.T) {
 		t.Fatal("expected at least one concurrent candidate to be admitted")
 	}
 
-	value, ok := l.InboundInfo.Load("inbound")
+	value, ok := l.inboundInfo.Load("inbound")
 	if !ok {
 		t.Fatal("expected inbound to exist")
 	}
-	entryValue, ok := value.(*InboundInfo).UserOnlineIP.Load(userKey)
+	entryValue, ok := value.(*inboundState).onlineUsers.Load(userKey)
 	if !ok {
 		t.Fatal("expected user online entry to exist")
 	}
@@ -281,16 +281,16 @@ func TestLimiterFallsBackToLocalAdmissionWhenGlobalStateIsStale(t *testing.T) {
 		t.Fatalf("AddInboundLimiter failed: %v", err)
 	}
 
-	value, ok := l.InboundInfo.Load("inbound")
+	value, ok := l.inboundInfo.Load("inbound")
 	if !ok {
 		t.Fatal("expected inbound to exist")
 	}
-	globalDevices := value.(*InboundInfo).GlobalDevices
+	globalDevices := value.(*inboundState).globalDevices
 	globalDevices.ttl = time.Second
 	globalDevices.now = func() time.Time { return current }
 
 	userKey := "inbound|user@example.com|1"
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "192.0.2.1"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "192.0.2.1"); rejected {
 		t.Fatal("expected first local IP to be allowed")
 	}
 	if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: []string{"203.0.113.1"}}); err != nil {
@@ -298,7 +298,7 @@ func TestLimiterFallsBackToLocalAdmissionWhenGlobalStateIsStale(t *testing.T) {
 	}
 
 	current = base.Add(2 * time.Second)
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "198.51.100.1"); !rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "198.51.100.1"); !rejected {
 		t.Fatal("expected stale global state to fall back to local-only admission and reject at local limit")
 	}
 }
@@ -311,7 +311,7 @@ func TestLimiterFallsBackToLocalAdmissionWhenGlobalStateIsCleared(t *testing.T) 
 	}
 
 	userKey := "inbound|user@example.com|1"
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "192.0.2.1"); rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "192.0.2.1"); rejected {
 		t.Fatal("expected first local IP to be allowed")
 	}
 	if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: []string{"203.0.113.1"}}); err != nil {
@@ -321,8 +321,27 @@ func TestLimiterFallsBackToLocalAdmissionWhenGlobalStateIsCleared(t *testing.T) 
 		t.Fatalf("ClearGlobalDevices failed: %v", err)
 	}
 
-	if _, _, rejected := l.GetUserBucket("inbound", userKey, "198.51.100.1"); !rejected {
+	if _, _, rejected := l.getUserBucket("inbound", userKey, "198.51.100.1"); !rejected {
 		t.Fatal("expected cleared global state to fall back to local-only admission and reject at local limit")
+	}
+}
+
+func TestAddInboundLimiterReplacementPreservesFreshGlobalDevices(t *testing.T) {
+	l := New()
+	users := []api.UserInfo{{UID: 1, Email: "user@example.com", DeviceLimit: 1}}
+	if err := l.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("initial AddInboundLimiter() error = %v", err)
+	}
+	if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: {"192.0.2.1"}}); err != nil {
+		t.Fatalf("UpdateGlobalDevices() error = %v", err)
+	}
+
+	if err := l.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("replacement AddInboundLimiter() error = %v", err)
+	}
+	userKey := "inbound|user@example.com|1"
+	if _, _, rejected := l.Admit("inbound", userKey, "203.0.113.8", nil, nil); !rejected {
+		t.Fatal("same-tag replacement discarded the fresh global device snapshot")
 	}
 }
 
@@ -339,20 +358,20 @@ func TestLimiterSnapshotRestoreInboundLimiterState(t *testing.T) {
 	}
 
 	userKey := "tag|u@example.com|1"
-	if bucket, speedLimited, rejected := l.GetUserBucket("tag", userKey, "192.0.2.1"); rejected || !speedLimited || bucket == nil {
+	if bucket, speedLimited, rejected := l.getUserBucket("tag", userKey, "192.0.2.1"); rejected || !speedLimited || bucket == nil {
 		t.Fatalf("expected initial user bucket, speedLimited=%v rejected=%v bucket=%v", speedLimited, rejected, bucket)
 	}
 
-	value, ok := l.InboundInfo.Load("tag")
+	value, ok := l.inboundInfo.Load("tag")
 	if !ok {
 		t.Fatal("expected inbound to exist")
 	}
-	originalInboundInfo := value.(*InboundInfo)
-	originalUserInfo := originalInboundInfo.UserInfo
-	originalBucketHub := originalInboundInfo.BucketHub
-	originalUserOnlineIP := originalInboundInfo.UserOnlineIP
-	originalGlobalDevices := originalInboundInfo.GlobalDevices
-	originalGlobalLimit := originalInboundInfo.GlobalLimit
+	originalInboundInfo := value.(*inboundState)
+	originalUserInfo := originalInboundInfo.users
+	originalBucketHub := originalInboundInfo.buckets
+	originalUserOnlineIP := originalInboundInfo.onlineUsers
+	originalGlobalDevices := originalInboundInfo.globalDevices
+	originalGlobalLimit := originalInboundInfo.globalLimit
 
 	if err := l.UpdateGlobalDevices("tag", map[int][]string{1: []string{"203.0.113.7"}}); err != nil {
 		t.Fatalf("UpdateGlobalDevices failed: %v", err)
@@ -380,47 +399,47 @@ func TestLimiterSnapshotRestoreInboundLimiterState(t *testing.T) {
 		t.Fatalf("RestoreInboundLimiterState failed: %v", err)
 	}
 
-	value, ok = l.InboundInfo.Load("tag")
+	value, ok = l.inboundInfo.Load("tag")
 	if !ok {
 		t.Fatal("expected inbound to exist")
 	}
-	inboundInfo := value.(*InboundInfo)
-	if inboundInfo == originalInboundInfo {
-		t.Fatal("expected restore to publish a replacement inbound info")
+	inboundInfo := value.(*inboundState)
+	if inboundInfo != originalInboundInfo {
+		t.Fatal("expected restore to republish the exact applied inbound generation")
 	}
-	if inboundInfo.UserInfo == originalUserInfo {
-		t.Fatal("expected restore to replace UserInfo with a fresh map")
+	if inboundInfo.users != originalUserInfo {
+		t.Fatal("expected restore to preserve the applied user policy map")
 	}
-	if inboundInfo.BucketHub == originalBucketHub {
-		t.Fatal("expected restore to replace BucketHub with a fresh map")
+	if inboundInfo.buckets != originalBucketHub {
+		t.Fatal("expected restore to preserve the applied token buckets")
 	}
-	if inboundInfo.UserOnlineIP != originalUserOnlineIP {
+	if inboundInfo.onlineUsers != originalUserOnlineIP {
 		t.Fatal("expected restore to preserve UserOnlineIP state")
 	}
-	if inboundInfo.GlobalDevices != originalGlobalDevices {
+	if inboundInfo.globalDevices != originalGlobalDevices {
 		t.Fatal("expected restore to preserve GlobalDevices state")
 	}
-	if inboundInfo.GlobalLimit != originalGlobalLimit {
+	if inboundInfo.globalLimit != originalGlobalLimit {
 		t.Fatal("expected restore to preserve GlobalLimit state")
 	}
-	entryValue, ok := inboundInfo.UserOnlineIP.Load(userKey)
+	entryValue, ok := inboundInfo.onlineUsers.Load(userKey)
 	if !ok || !entryValue.(*userOnlineEntry).hasIP("192.0.2.1") {
 		t.Fatal("expected restore to preserve existing online IP state")
 	}
-	if !inboundInfo.GlobalDevices.ShouldReject(1, "203.0.113.8", 1, nil) {
+	if !inboundInfo.globalDevices.ShouldReject(1, "203.0.113.8", 1, nil) {
 		t.Fatal("expected restore to preserve global device state")
 	}
 
-	restoredValue, ok := inboundInfo.UserInfo.Load(userKey)
+	restoredValue, ok := inboundInfo.users.Load(userKey)
 	if !ok {
 		t.Fatalf("expected restored user info for key %s", userKey)
 	}
-	restored := restoredValue.(UserInfo)
+	restored := restoredValue.(userPolicy)
 	if restored.SpeedLimit != 100 || restored.DeviceLimit != 1 {
 		t.Fatalf("restored user info = %#v, want SpeedLimit=100 DeviceLimit=1", restored)
 	}
 
-	bucketValue, ok := inboundInfo.BucketHub.Load(userKey)
+	bucketValue, ok := inboundInfo.buckets.Load(userKey)
 	if !ok {
 		t.Fatalf("expected restored bucket for key %s", userKey)
 	}

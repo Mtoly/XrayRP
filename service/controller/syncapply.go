@@ -38,7 +38,7 @@ type syncApplyRuntimeHooks struct {
 type syncApplyLimiterHooks struct {
 	addInbound         func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
 	deleteInbound      func(string) error
-	updateInbound      func(string, *[]api.UserInfo) error
+	replaceInbound     func(string, *[]api.UserInfo) error
 	snapshotInbound    func(string) (*limiter.InboundLimiterStateSnapshot, error)
 	restoreInbound     func(string, *limiter.InboundLimiterStateSnapshot) error
 	applyGlobalDevices func(string, globalDeviceApply) error
@@ -324,15 +324,14 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 	if effectiveUsers == nil {
 		effectiveUsers = currentUserList
 	}
+	var userOverlay limiterUserOverlayCandidate
+	publishUserState := false
 	if currentNodeInfo != nil && effectiveUsers != nil {
-		if err := a.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers, candidateConfig); err != nil {
+		userOverlay = c.buildLimiterUserOverlayCandidate(effectiveUsers)
+		if err := a.applyUserSnapshot(nodeChanged, currentNodeInfo, currentTag, currentUserList, effectiveUsers, userOverlay.limiterUsers, candidateConfig); err != nil {
 			return rollbackPendingNode(err)
 		}
-		if nodeChanged || snapshot.UserList != nil {
-			if !pendingNodePublication {
-				c.setUserList(effectiveUsers)
-			}
-		}
+		publishUserState = nodeChanged || snapshot.UserList != nil
 	}
 
 	if pendingNodePublication {
@@ -355,7 +354,13 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 			c.config.CertConfig = cloneRuntimeCertConfig(candidateConfig.CertConfig)
 			certPublishedWithRuntime = true
 		}
-		c.commitRuntimeState(candidateState)
+		if publishUserState {
+			c.commitRuntimeStateWithUserOverlay(candidateState, userOverlay)
+		} else {
+			c.commitRuntimeState(candidateState)
+		}
+	} else if publishUserState {
+		c.commitUserListWithOverlay(effectiveUsers, userOverlay)
 	}
 	if candidateRuleStateChanged &&
 		appliedRuleTag != "" &&
@@ -530,6 +535,7 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
 	nodeInfo *api.NodeInfo,
 	tag string,
 	currentUserList, nextUserList *[]api.UserInfo,
+	limiterUsers *[]api.UserInfo,
 	config *Config,
 ) error {
 	c := a.controller
@@ -537,32 +543,69 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
 	if nodeInfo == nil || nextUserList == nil {
 		return nil
 	}
-	if nodeChanged || currentUserList == nil {
+	if nodeChanged {
 		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
 			return err
 		}
-		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
+		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, limiterUsers, c.config.GlobalDeviceLimitConfig)
+	}
+	if currentUserList == nil {
+		rollbackRuntime := func(applyErr error) error {
+			var rollbackErr error
+			if nodeInfo.NodeType == "Socks" || nodeInfo.NodeType == "HTTP" {
+				emptyUsers := []api.UserInfo{}
+				rollbackErr = hooks.runtime.addUsers(&emptyUsers, nodeInfo, tag, config)
+			} else {
+				rollbackErr = a.removeRuntimeUsersBestEffort(tag, *nextUserList)
+			}
+			if rollbackErr != nil {
+				return errors.Join(applyErr, fmt.Errorf("remove initial candidate runtime users: %w", rollbackErr))
+			}
+			return applyErr
+		}
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
+			return rollbackRuntime(err)
+		}
+		if err := hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, limiterUsers, c.config.GlobalDeviceLimitConfig); err != nil {
+			if cleanupErr := hooks.limiter.deleteInbound(tag); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("delete failed initial limiter: %w", cleanupErr))
+			}
+			return rollbackRuntime(err)
+		}
+		return nil
 	}
 	if reflect.DeepEqual(currentUserList, nextUserList) {
 		return nil
 	}
 
 	if nodeInfo.NodeType == "Socks" || nodeInfo.NodeType == "HTTP" {
-		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
+		limiterSnapshot, err := hooks.limiter.snapshotInbound(tag)
+		if err != nil {
 			return err
 		}
-		return hooks.limiter.addInbound(tag, nodeInfo.SpeedLimit, nextUserList, c.config.GlobalDeviceLimitConfig)
+		restoreRuntime := func(applyErr error) error {
+			if restoreErr := hooks.runtime.addUsers(currentUserList, nodeInfo, tag, config); restoreErr != nil {
+				return errors.Join(applyErr, fmt.Errorf("restore embedded runtime users: %w", restoreErr))
+			}
+			return applyErr
+		}
+		if err := hooks.runtime.addUsers(nextUserList, nodeInfo, tag, config); err != nil {
+			return restoreRuntime(err)
+		}
+		if err := hooks.limiter.replaceInbound(tag, limiterUsers); err != nil {
+			err = restoreRuntime(err)
+			if restoreErr := hooks.limiter.restoreInbound(tag, limiterSnapshot); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore inbound limiter: %w", restoreErr))
+			}
+			return err
+		}
+		return nil
 	}
 
 	diff := diffUserList(currentUserList, nextUserList)
 	if len(diff.Deleted) == 0 && len(diff.Added) == 0 && len(diff.LimitOnly) == 0 && len(diff.RuntimeUpdated) == 0 {
 		return nil
 	}
-
-	limiterUpdates := make([]api.UserInfo, 0, len(diff.Added)+len(diff.RuntimeUpdated)+len(diff.LimitOnly))
-	limiterUpdates = append(limiterUpdates, diff.Added...)
-	limiterUpdates = append(limiterUpdates, diff.RuntimeUpdated...)
-	limiterUpdates = append(limiterUpdates, diff.LimitOnly...)
 
 	limiterSnapshot, err := hooks.limiter.snapshotInbound(tag)
 	if err != nil {
@@ -573,10 +616,6 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
 			return errors.Join(applyErr, fmt.Errorf("restore inbound limiter: %w", restoreErr))
 		}
 		return applyErr
-	}
-
-	if err := hooks.limiter.updateInbound(tag, &limiterUpdates); err != nil {
-		return restoreLimiter(err)
 	}
 
 	usersToRemove := make([]api.UserInfo, 0, len(diff.Deleted)+len(diff.RuntimeUpdated))
@@ -605,6 +644,12 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
 			}
 			return restoreLimiter(err)
 		}
+	}
+	if err := hooks.limiter.replaceInbound(tag, limiterUsers); err != nil {
+		if rollbackErr := a.rollbackRuntimeUsersAfterAddFailure(nodeInfo, tag, usersToRestore, usersToAdd, config); rollbackErr != nil {
+			err = errors.Join(err, rollbackErr)
+		}
+		return restoreLimiter(err)
 	}
 	return nil
 }
@@ -912,8 +957,8 @@ func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
 	if hooks.limiter.deleteInbound == nil {
 		hooks.limiter.deleteInbound = c.DeleteInboundLimiter
 	}
-	if hooks.limiter.updateInbound == nil {
-		hooks.limiter.updateInbound = c.UpdateInboundLimiter
+	if hooks.limiter.replaceInbound == nil {
+		hooks.limiter.replaceInbound = c.replaceInboundLimiterUsers
 	}
 	if hooks.limiter.snapshotInbound == nil {
 		hooks.limiter.snapshotInbound = c.snapshotInboundLimiter

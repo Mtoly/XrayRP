@@ -137,14 +137,14 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 
 			// Device limit and rate limit are owned by the active node wrapper.
 			if w.limiter != nil {
-				if bucket, ok, reject := w.limiter.GetUserBucket(nodeTag, email, srcIP); reject {
+				reader, writer, reject := w.limiter.Admit(nodeTag, email, srcIP, link.Reader, link.Writer)
+				if reject {
 					common.Close(link.Writer)
 					common.Interrupt(link.Reader)
 					return
-				} else if ok && bucket != nil {
-					link.Reader = w.limiter.RateReader(link.Reader, bucket)
-					link.Writer = w.limiter.RateWriter(link.Writer, bucket)
 				}
+				link.Reader = reader
+				link.Writer = writer
 			}
 		}
 	}
@@ -295,6 +295,11 @@ func (c *Controller) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userLi
 
 func (c *Controller) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserInfo) error {
 	err := c.dispatcher.Limiter.UpdateInboundLimiter(tag, updatedUserList)
+	return err
+}
+
+func (c *Controller) replaceInboundLimiterUsers(tag string, userList *[]api.UserInfo) error {
+	err := c.dispatcher.Limiter.ReplaceInboundUsers(tag, userList)
 	return err
 }
 

@@ -3,9 +3,10 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,26 +18,23 @@ import (
 	redisStore "github.com/eko/gocache/store/redis/v4"
 	goCache "github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
-	"github.com/xtls/xray-core/common/errors"
+	xrayerrors "github.com/xtls/xray-core/common/errors"
 	"golang.org/x/time/rate"
 
 	"github.com/Mtoly/XrayRP/api"
 )
 
-type UserInfo struct {
+type userPolicy struct {
 	UID         int
 	SpeedLimit  uint64
 	DeviceLimit int
 }
 
 type InboundLimiterStateSnapshot struct {
-	UserInfo map[string]UserInfo
-	Buckets  map[string]bucketStateSnapshot
-}
-
-type bucketStateSnapshot struct {
-	Limit rate.Limit
-	Burst int
+	state         *inboundState
+	policyVersion uint64
+	users         map[string]userPolicy
+	buckets       map[string]*rate.Limiter
 }
 
 // connIP tracks a single online IP with its UID and last-seen timestamp.
@@ -48,9 +46,10 @@ type connIP struct {
 // userOnlineEntry stores per-user IP tracking with an atomic device counter
 // to avoid O(N) Range() for device counting.
 type userOnlineEntry struct {
-	mu    sync.Mutex
-	ips   sync.Map // Key: IP string -> connIP
-	count int32    // atomic device count — avoids Range() for counting
+	mu      sync.Mutex
+	ips     sync.Map // Key: IP string -> connIP
+	count   int32    // atomic device count — avoids Range() for counting
+	retired bool
 }
 
 func newUserOnlineEntry() *userOnlineEntry {
@@ -105,27 +104,30 @@ func (e *userOnlineEntry) pruneToAdmitted(admitted map[string]struct{}) {
 	})
 }
 
-func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDevices *globalDeviceState) (reject bool) {
+func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDevices *globalDeviceState) (reject bool, retry bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.retired {
+		return false, true
+	}
 
 	if e.hasIP(ip) {
 		e.touchIP(ip, uid)
-		return false
+		return false, false
 	}
 
 	localIPs := e.snapshotIPs()
 	reject, usedFreshGlobal, admitted := globalDevices.admissionDecisionFresh(uid, ip, deviceLimit, localIPs)
 	if usedFreshGlobal {
 		if reject {
-			return true
+			return true, false
 		}
 		e.pruneToAdmitted(admitted)
 		e.touchIP(ip, uid)
-		return false
+		return false, false
 	}
 
-	return e.addIP(ip, uid, deviceLimit)
+	return e.addIP(ip, uid, deviceLimit), false
 }
 
 // addIP records an IP for this user. Returns false (reject) if device limit exceeded.
@@ -154,10 +156,10 @@ func (e *userOnlineEntry) addIP(ip string, uid int, deviceLimit int) (reject boo
 
 // cleanStale removes IPs not seen within ttl and returns remaining count.
 func (e *userOnlineEntry) cleanStale(ttl int64) int32 {
-	return e.cleanStaleAndCollect(ttl, nil)
+	return e.cleanStaleAndCollect(ttl, nil, false)
 }
 
-func (e *userOnlineEntry) cleanStaleAndCollect(ttl int64, out *[]api.OnlineUser) int32 {
+func (e *userOnlineEntry) cleanStaleAndCollect(ttl int64, out *[]api.OnlineUser, retireEmpty bool) int32 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -173,7 +175,11 @@ func (e *userOnlineEntry) cleanStaleAndCollect(ttl int64, out *[]api.OnlineUser)
 		}
 		return true
 	})
-	return atomic.LoadInt32(&e.count)
+	remaining := atomic.LoadInt32(&e.count)
+	if remaining == 0 && retireEmpty {
+		e.retired = true
+	}
+	return remaining
 }
 
 // collectOnline gathers all online user records efficiently.
@@ -188,204 +194,620 @@ func (e *userOnlineEntry) collectOnline(out *[]api.OnlineUser) {
 	})
 }
 
-type InboundInfo struct {
-	Tag            string
-	NodeSpeedLimit uint64
-	UserInfo       *sync.Map // Key: user tag (buildUserTag) -> UserInfo
-	BucketHub      *sync.Map // Key: user tag -> *rate.Limiter
-	UserOnlineIP   *sync.Map // Key: user tag -> *userOnlineEntry
-	GlobalDevices  *globalDeviceState
-	GlobalLimit    *globalLimitState
+type inboundState struct {
+	admissionMu         sync.RWMutex
+	retired             bool
+	replacementReady    chan struct{}
+	replacementNotified bool
+	policyVersion       uint64
+	tag                 string
+	nodeSpeedLimit      uint64
+	users               *sync.Map // Key: user tag (buildUserTag) -> userPolicy
+	buckets             *sync.Map // Key: user tag -> *rate.Limiter
+	onlineUsers         *sync.Map // Key: user tag -> *userOnlineEntry
+	globalDevices       *globalDeviceState
+	globalLimit         *globalLimitState
+}
+
+func (i *inboundState) beginAdmission() (bool, <-chan struct{}) {
+	if i == nil {
+		return false, nil
+	}
+	i.admissionMu.RLock()
+	if i.retired {
+		replacementReady := i.replacementReady
+		i.admissionMu.RUnlock()
+		return false, replacementReady
+	}
+	return true, nil
+}
+
+func (i *inboundState) endAdmission() {
+	i.admissionMu.RUnlock()
+}
+
+func (i *inboundState) retireAdmissions() {
+	if i == nil {
+		return
+	}
+	i.admissionMu.Lock()
+	if !i.retired {
+		i.retired = true
+		i.replacementReady = make(chan struct{})
+		i.replacementNotified = false
+	}
+	i.admissionMu.Unlock()
+}
+
+func (i *inboundState) activateAdmissions() {
+	if i == nil {
+		return
+	}
+	i.admissionMu.Lock()
+	if i.retired && !i.replacementNotified {
+		close(i.replacementReady)
+	}
+	i.retired = false
+	i.replacementReady = nil
+	i.replacementNotified = false
+	i.admissionMu.Unlock()
+}
+
+func (i *inboundState) notifyReplacement() {
+	if i == nil {
+		return
+	}
+	i.admissionMu.Lock()
+	if i.retired && !i.replacementNotified {
+		close(i.replacementReady)
+		i.replacementNotified = true
+	}
+	i.admissionMu.Unlock()
+}
+
+type globalLimitBackend struct {
+	globalOnlineIP *marshaler.Marshaler
+	closer         io.Closer
+}
+
+func newGlobalLimitBackend(config *GlobalDeviceLimitConfig) globalLimitBackend {
+	gs := goCacheStore.NewGoCache(goCache.New(time.Duration(config.Expiry)*time.Second, time.Minute))
+	client := redis.NewClient(&redis.Options{
+		Network:  config.RedisNetwork,
+		Addr:     config.RedisAddr,
+		Username: config.RedisUsername,
+		Password: config.RedisPassword,
+		DB:       config.RedisDB,
+	})
+	rs := redisStore.NewRedis(client, store.WithExpiration(time.Duration(config.Expiry)*time.Second))
+	cacheManager := cache.NewChain[any](cache.New[any](gs), cache.New[any](rs))
+	return globalLimitBackend{
+		globalOnlineIP: marshaler.New(cacheManager),
+		closer:         client,
+	}
 }
 
 type globalLimitState struct {
 	config         *GlobalDeviceLimitConfig
 	globalOnlineIP *marshaler.Marshaler
+	closer         io.Closer
+	useMu          sync.RWMutex
 	keyLocks       sync.Map // Key: user tag -> *sync.Mutex, serializes global-limit cache updates per user
+	closeOnce      sync.Once
+	closeErr       error
+	closed         bool
+}
+
+func (s *globalLimitState) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.useMu.Lock()
+		defer s.useMu.Unlock()
+		s.closed = true
+		if s.closer != nil {
+			s.closeErr = s.closer.Close()
+		}
+	})
+	return s.closeErr
+}
+
+func (s *globalLimitState) restoreConfigIfClosed() (*GlobalDeviceLimitConfig, bool) {
+	if s == nil {
+		return nil, true
+	}
+	s.useMu.RLock()
+	defer s.useMu.RUnlock()
+	if !s.closed {
+		return nil, false
+	}
+	if s.config == nil {
+		return nil, true
+	}
+	config := *s.config
+	return &config, true
+}
+
+func (s *globalLimitState) pruneKeyLocks(activeUsers *sync.Map) {
+	if s == nil || s.config == nil || !s.config.Enable {
+		return
+	}
+
+	s.useMu.Lock()
+	defer s.useMu.Unlock()
+	s.keyLocks.Range(func(key, value interface{}) bool {
+		if activeUsers == nil {
+			s.keyLocks.Delete(key)
+			return true
+		}
+		if _, active := activeUsers.Load(key); !active {
+			s.keyLocks.Delete(key)
+		}
+		return true
+	})
+}
+
+func (i *inboundState) Close() error {
+	if i == nil {
+		return nil
+	}
+	i.retireAdmissions()
+	err := i.globalLimit.Close()
+	i.notifyReplacement()
+	return err
+}
+
+type ownedOperations struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	ctx    context.Context
+	cancel context.CancelFunc
+	active int
+	closed bool
+}
+
+func newOwnedOperations() *ownedOperations {
+	ctx, cancel := context.WithCancel(context.Background())
+	operations := &ownedOperations{ctx: ctx, cancel: cancel}
+	operations.cond = sync.NewCond(&operations.mu)
+	return operations
+}
+
+func (o *ownedOperations) begin() (context.Context, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return o.ctx, false
+	}
+	o.active++
+	return o.ctx, true
+}
+
+func (o *ownedOperations) end() {
+	o.mu.Lock()
+	o.active--
+	if o.active == 0 {
+		o.cond.Broadcast()
+	}
+	o.mu.Unlock()
+}
+
+func (o *ownedOperations) Close() {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	if !o.closed {
+		o.closed = true
+		o.cancel()
+	}
+	for o.active > 0 {
+		o.cond.Wait()
+	}
+	o.mu.Unlock()
 }
 
 type Limiter struct {
-	InboundInfo *sync.Map // Key: Tag, Value: *InboundInfo
+	lifecycleMu sync.Mutex
+	inboundInfo *sync.Map // Key: Tag, Value: *inboundState
+	closed      atomic.Bool
+	closeErr    error
+	cleanupErrs []error
+	operations  *ownedOperations
+
+	buildGlobalLimitBackend func(*GlobalDeviceLimitConfig) globalLimitBackend
+
+	onAdmissionEntered      func()
+	onAdmissionDrainStarted func()
+	onAdmissionWaiting      func()
+	onRateWaitEntered       func()
+	onCloseDrainEntered     func()
 }
 
 func New() *Limiter {
 	return &Limiter{
-		InboundInfo: new(sync.Map),
+		inboundInfo:             new(sync.Map),
+		operations:              newOwnedOperations(),
+		buildGlobalLimitBackend: newGlobalLimitBackend,
 	}
+}
+
+func (l *Limiter) beginMutation() error {
+	if l == nil {
+		return fmt.Errorf("limiter is nil")
+	}
+	l.lifecycleMu.Lock()
+	if l.closed.Load() {
+		l.lifecycleMu.Unlock()
+		return fmt.Errorf("limiter is closed")
+	}
+	return nil
+}
+
+func (l *Limiter) endMutation() {
+	l.lifecycleMu.Unlock()
+}
+
+func (l *Limiter) beginOwnedOperation() (context.Context, bool) {
+	if l == nil || l.closed.Load() {
+		return context.Background(), false
+	}
+	if l.operations == nil {
+		return context.Background(), true
+	}
+	return l.operations.begin()
+}
+
+func (l *Limiter) endOwnedOperation() {
+	if l != nil && l.operations != nil {
+		l.operations.end()
+	}
+}
+
+func (l *Limiter) drainAdmissions(state *inboundState) {
+	if l.onAdmissionDrainStarted != nil {
+		l.onAdmissionDrainStarted()
+	}
+	state.retireAdmissions()
+}
+
+func (l *Limiter) recordCleanupError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	wrapped := fmt.Errorf("%s: %w", operation, err)
+	l.cleanupErrs = append(l.cleanupErrs, wrapped)
+	xrayerrors.LogErrorInner(context.Background(), wrapped, "limiter cleanup")
+	return wrapped
+}
+
+func (l *Limiter) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.lifecycleMu.Lock()
+	defer l.lifecycleMu.Unlock()
+	if l.closed.Load() {
+		return l.closeErr
+	}
+	l.closed.Store(true)
+	if l.onCloseDrainEntered != nil {
+		l.onCloseDrainEntered()
+	}
+	if l.operations != nil {
+		l.operations.Close()
+	}
+
+	closeErrs := append([]error(nil), l.cleanupErrs...)
+	l.inboundInfo.Range(func(key, value interface{}) bool {
+		l.inboundInfo.Delete(key)
+		if err := value.(*inboundState).Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
+		return true
+	})
+	l.closeErr = errors.Join(closeErrs...)
+	return l.closeErr
 }
 
 func newInboundLimiterStateSnapshot() *InboundLimiterStateSnapshot {
-	return &InboundLimiterStateSnapshot{
-		UserInfo: make(map[string]UserInfo),
-		Buckets:  make(map[string]bucketStateSnapshot),
+	return &InboundLimiterStateSnapshot{}
+}
+
+func snapshotInboundPolicies(state *inboundState) (map[string]userPolicy, map[string]*rate.Limiter) {
+	users := make(map[string]userPolicy)
+	buckets := make(map[string]*rate.Limiter)
+	if state == nil {
+		return users, buckets
 	}
+	state.users.Range(func(key, value interface{}) bool {
+		users[key.(string)] = value.(userPolicy)
+		return true
+	})
+	state.buckets.Range(func(key, value interface{}) bool {
+		buckets[key.(string)] = value.(*rate.Limiter)
+		return true
+	})
+	return users, buckets
+}
+
+func clearSyncMap(values *sync.Map) {
+	if values == nil {
+		return
+	}
+	values.Range(func(key, _ interface{}) bool {
+		values.Delete(key)
+		return true
+	})
+}
+
+func restoreInboundPolicies(state *inboundState, snapshot *InboundLimiterStateSnapshot) {
+	if state == nil || snapshot == nil {
+		return
+	}
+	compatibleCurrentBuckets := make(map[string]*rate.Limiter)
+	state.buckets.Range(func(key, value interface{}) bool {
+		compatibleCurrentBuckets[key.(string)] = value.(*rate.Limiter)
+		return true
+	})
+
+	clearSyncMap(state.users)
+	for userKey, user := range snapshot.users {
+		state.users.Store(userKey, user)
+	}
+	clearSyncMap(state.buckets)
+	for userKey, bucket := range snapshot.buckets {
+		state.buckets.Store(userKey, bucket)
+	}
+	for userKey, user := range snapshot.users {
+		if _, restored := snapshot.buckets[userKey]; restored {
+			continue
+		}
+		bucket, exists := compatibleCurrentBuckets[userKey]
+		limit := determineRate(state.nodeSpeedLimit, user.SpeedLimit)
+		if !exists || limit == 0 || bucket.Limit() != rate.Limit(limit) || bucket.Burst() != int(limit) {
+			continue
+		}
+		state.buckets.Store(userKey, bucket)
+	}
+	state.onlineUsers.Range(func(key, _ interface{}) bool {
+		if _, applied := snapshot.users[key.(string)]; !applied {
+			state.onlineUsers.Delete(key)
+		}
+		return true
+	})
+	state.policyVersion = snapshot.policyVersion
+}
+
+func (l *Limiter) newGlobalLimitState(config *GlobalDeviceLimitConfig) *globalLimitState {
+	state := &globalLimitState{}
+	if config == nil || !config.Enable {
+		return state
+	}
+	appliedConfig := *config
+	buildBackend := l.buildGlobalLimitBackend
+	if buildBackend == nil {
+		buildBackend = newGlobalLimitBackend
+	}
+	backend := buildBackend(&appliedConfig)
+	state.config = &appliedConfig
+	state.globalOnlineIP = backend.globalOnlineIP
+	state.closer = backend.closer
+	return state
+}
+
+func inheritCompatibleAdmissionState(candidate, applied *inboundState) {
+	if candidate == nil || applied == nil {
+		return
+	}
+	if applied.globalDevices != nil {
+		candidate.globalDevices = applied.globalDevices
+	}
+	candidate.users.Range(func(key, value interface{}) bool {
+		if online, exists := applied.onlineUsers.Load(key); exists {
+			candidate.onlineUsers.Store(key, online)
+		}
+		user := value.(userPolicy)
+		limit := determineRate(candidate.nodeSpeedLimit, user.SpeedLimit)
+		if limit == 0 {
+			return true
+		}
+		if existing, exists := applied.buckets.Load(key); exists {
+			bucket := existing.(*rate.Limiter)
+			if bucket.Limit() == rate.Limit(limit) && bucket.Burst() == int(limit) {
+				candidate.buckets.Store(key, bucket)
+			}
+		}
+		return true
+	})
 }
 
 func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalLimit *GlobalDeviceLimitConfig) error {
-	inboundInfo := &InboundInfo{
-		Tag:            tag,
-		NodeSpeedLimit: nodeSpeedLimit,
-		BucketHub:      new(sync.Map),
-		UserOnlineIP:   new(sync.Map),
-		GlobalDevices:  newGlobalDeviceState(),
-		GlobalLimit:    &globalLimitState{},
+	if err := l.beginMutation(); err != nil {
+		return err
 	}
-
-	if globalLimit != nil && globalLimit.Enable {
-		inboundInfo.GlobalLimit.config = globalLimit
-
-		// init local store
-		gs := goCacheStore.NewGoCache(goCache.New(time.Duration(globalLimit.Expiry)*time.Second, 1*time.Minute))
-
-		// init redis store
-		rs := redisStore.NewRedis(redis.NewClient(
-			&redis.Options{
-				Network:  globalLimit.RedisNetwork,
-				Addr:     globalLimit.RedisAddr,
-				Username: globalLimit.RedisUsername,
-				Password: globalLimit.RedisPassword,
-				DB:       globalLimit.RedisDB,
-			}),
-			store.WithExpiration(time.Duration(globalLimit.Expiry)*time.Second))
-
-		// init chained cache. First use local go-cache, if go-cache is nil, then use redis cache
-		cacheManager := cache.NewChain[any](
-			cache.New[any](gs), // go-cache is priority
-			cache.New[any](rs),
-		)
-		inboundInfo.GlobalLimit.globalOnlineIP = marshaler.New(cacheManager)
+	defer l.endMutation()
+	candidate := &inboundState{
+		tag:            tag,
+		nodeSpeedLimit: nodeSpeedLimit,
+		buckets:        new(sync.Map),
+		onlineUsers:    new(sync.Map),
+		globalDevices:  newGlobalDeviceState(),
+		globalLimit:    l.newGlobalLimitState(globalLimit),
 	}
 
 	userMap := new(sync.Map)
 	for _, u := range *userList {
 		userKey := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
-		userMap.Store(userKey, UserInfo{
+		userMap.Store(userKey, userPolicy{
 			UID:         u.UID,
 			SpeedLimit:  u.SpeedLimit,
 			DeviceLimit: u.DeviceLimit,
 		})
 	}
-	inboundInfo.UserInfo = userMap
-	l.InboundInfo.Store(tag, inboundInfo) // Replace the old inbound info
+	candidate.users = userMap
+	if value, replaced := l.inboundInfo.Load(tag); replaced {
+		applied := value.(*inboundState)
+		l.drainAdmissions(applied)
+		inheritCompatibleAdmissionState(candidate, applied)
+		l.inboundInfo.Store(tag, candidate)
+		applied.notifyReplacement()
+		if err := applied.globalLimit.Close(); err != nil {
+			l.recordCleanupError(fmt.Sprintf("close replaced inbound limiter %q", tag), err)
+		}
+		return nil
+	}
+	l.inboundInfo.Store(tag, candidate)
 	return nil
 }
 
 func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserInfo) error {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
-		// Update User info
-		for _, u := range *updatedUserList {
-			userKey := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
-			inboundInfo.UserInfo.Store(userKey, UserInfo{
-				UID:         u.UID,
-				SpeedLimit:  u.SpeedLimit,
-				DeviceLimit: u.DeviceLimit,
-			})
-			// Update old limiter bucket
-			limit := determineRate(inboundInfo.NodeSpeedLimit, u.SpeedLimit)
-			if limit > 0 {
-				if bucket, ok := inboundInfo.BucketHub.Load(userKey); ok {
-					limiter := bucket.(*rate.Limiter)
-					limiter.SetLimit(rate.Limit(limit))
-					limiter.SetBurst(int(limit))
-				}
-			} else {
-				inboundInfo.BucketHub.Delete(userKey)
-			}
-		}
-	} else {
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+
+	value, ok := l.inboundInfo.Load(tag)
+	if !ok {
 		return fmt.Errorf("no such inbound in limiter: %s", tag)
 	}
+	inboundInfo := value.(*inboundState)
+	l.drainAdmissions(inboundInfo)
+	defer inboundInfo.activateAdmissions()
+
+	if updatedUserList != nil {
+		for _, user := range *updatedUserList {
+			userKey := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+			inboundInfo.users.Store(userKey, userPolicy{
+				UID:         user.UID,
+				SpeedLimit:  user.SpeedLimit,
+				DeviceLimit: user.DeviceLimit,
+			})
+
+			limit := determineRate(inboundInfo.nodeSpeedLimit, user.SpeedLimit)
+			if limit == 0 {
+				inboundInfo.buckets.Delete(userKey)
+				continue
+			}
+			if existing, exists := inboundInfo.buckets.Load(userKey); exists {
+				bucket := existing.(*rate.Limiter)
+				if bucket.Limit() == rate.Limit(limit) && bucket.Burst() == int(limit) {
+					continue
+				}
+			}
+			inboundInfo.buckets.Store(userKey, rate.NewLimiter(rate.Limit(limit), int(limit)))
+		}
+	}
+
+	inboundInfo.policyVersion++
+	inboundInfo.globalLimit.pruneKeyLocks(inboundInfo.users)
 	return nil
 }
 
 func (l *Limiter) SnapshotInboundLimiterState(tag string) (*InboundLimiterStateSnapshot, error) {
 	snapshot := newInboundLimiterStateSnapshot()
-	if l == nil || l.InboundInfo == nil {
+	if l == nil || l.inboundInfo == nil {
 		return snapshot, nil
 	}
+	if err := l.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer l.endMutation()
 
-	value, ok := l.InboundInfo.Load(tag)
+	value, ok := l.inboundInfo.Load(tag)
 	if !ok {
 		return snapshot, fmt.Errorf("no such inbound in limiter: %s", tag)
 	}
-
-	inboundInfo := value.(*InboundInfo)
-	if inboundInfo.UserInfo != nil {
-		inboundInfo.UserInfo.Range(func(key, value interface{}) bool {
-			snapshot.UserInfo[key.(string)] = value.(UserInfo)
-			return true
-		})
-	}
-	if inboundInfo.BucketHub != nil {
-		inboundInfo.BucketHub.Range(func(key, value interface{}) bool {
-			bucket := value.(*rate.Limiter)
-			snapshot.Buckets[key.(string)] = bucketStateSnapshot{
-				Limit: bucket.Limit(),
-				Burst: bucket.Burst(),
-			}
-			return true
-		})
-	}
+	snapshot.state = value.(*inboundState)
+	snapshot.policyVersion = snapshot.state.policyVersion
+	snapshot.users, snapshot.buckets = snapshotInboundPolicies(snapshot.state)
 	return snapshot, nil
 }
 
 func (l *Limiter) RestoreInboundLimiterState(tag string, snapshot *InboundLimiterStateSnapshot) error {
-	if l == nil || l.InboundInfo == nil || snapshot == nil {
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	if l == nil || l.inboundInfo == nil || snapshot == nil || snapshot.state == nil {
 		return nil
 	}
 
-	value, ok := l.InboundInfo.Load(tag)
-	if !ok {
-		return fmt.Errorf("no such inbound in limiter: %s", tag)
+	var candidate *inboundState
+	if value, ok := l.inboundInfo.Load(tag); ok {
+		candidate = value.(*inboundState)
+	}
+	if candidate == snapshot.state {
+		if candidate.policyVersion != snapshot.policyVersion {
+			candidate.retireAdmissions()
+			restoreInboundPolicies(candidate, snapshot)
+		}
+		snapshot.state.activateAdmissions()
+		snapshot.state.globalLimit.pruneKeyLocks(snapshot.state.users)
+		return nil
+	}
+	if candidate != nil {
+		candidate.retireAdmissions()
 	}
 
-	userInfo := new(sync.Map)
-	for key, value := range snapshot.UserInfo {
-		userInfo.Store(key, value)
+	originalGlobalLimit := snapshot.state.globalLimit
+	if config, closed := originalGlobalLimit.restoreConfigIfClosed(); closed {
+		snapshot.state.globalLimit = l.newGlobalLimitState(config)
 	}
+	l.inboundInfo.Store(tag, snapshot.state)
+	snapshot.state.activateAdmissions()
+	if candidate != nil {
+		candidate.notifyReplacement()
+	}
+	snapshot.state.globalLimit.pruneKeyLocks(snapshot.state.users)
 
-	bucketHub := new(sync.Map)
-	for key, value := range snapshot.Buckets {
-		bucketHub.Store(key, rate.NewLimiter(value.Limit, value.Burst))
+	if candidate != nil && candidate.globalLimit != originalGlobalLimit {
+		if err := candidate.globalLimit.Close(); err != nil {
+			return l.recordCleanupError(fmt.Sprintf("close rolled-back candidate inbound limiter %q", tag), err)
+		}
 	}
-
-	inboundInfo := value.(*InboundInfo)
-	replacement := &InboundInfo{
-		Tag:            inboundInfo.Tag,
-		NodeSpeedLimit: inboundInfo.NodeSpeedLimit,
-		UserInfo:       userInfo,
-		BucketHub:      bucketHub,
-		UserOnlineIP:   inboundInfo.UserOnlineIP,
-		GlobalDevices:  inboundInfo.GlobalDevices,
-		GlobalLimit:    inboundInfo.GlobalLimit,
-	}
-	l.InboundInfo.Store(tag, replacement)
 	return nil
 }
 
 func (l *Limiter) DeleteInboundLimiter(tag string) error {
-	l.InboundInfo.Delete(tag)
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	if value, loaded := l.inboundInfo.LoadAndDelete(tag); loaded {
+		if err := value.(*inboundState).Close(); err != nil {
+			l.recordCleanupError(fmt.Sprintf("close deleted inbound limiter %q", tag), err)
+		}
+	}
 	return nil
 }
 
 func (l *Limiter) UpdateGlobalDevices(tag string, devices map[int][]string) error {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
-		if inboundInfo.GlobalDevices == nil {
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	if value, ok := l.inboundInfo.Load(tag); ok {
+		inboundInfo := value.(*inboundState)
+		if inboundInfo.globalDevices == nil {
 			return fmt.Errorf("global device state is not initialized for inbound: %s", tag)
 		}
-		inboundInfo.GlobalDevices.Replace(devices)
+		inboundInfo.globalDevices.Replace(devices)
 		return nil
 	}
 	return fmt.Errorf("no such inbound in limiter: %s", tag)
 }
 
 func (l *Limiter) ClearGlobalDevices(tag string) error {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
-		if inboundInfo.GlobalDevices != nil {
-			inboundInfo.GlobalDevices.Clear()
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	if value, ok := l.inboundInfo.Load(tag); ok {
+		inboundInfo := value.(*inboundState)
+		if inboundInfo.globalDevices != nil {
+			inboundInfo.globalDevices.Clear()
 		}
 		return nil
 	}
@@ -397,22 +819,24 @@ func (l *Limiter) ClearGlobalDevices(tag string) error {
 const ipTTL int64 = 120 // seconds
 
 func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
+	if err := l.beginMutation(); err != nil {
+		return nil, err
+	}
+	defer l.endMutation()
+	if value, ok := l.inboundInfo.Load(tag); ok {
+		inboundInfo := value.(*inboundState)
 		// Pre-allocate with a reasonable capacity to reduce slice growth
 		onlineUser := make([]api.OnlineUser, 0, 256)
 
 		// Single pass: collect online IPs and clean stale entries
-		inboundInfo.UserOnlineIP.Range(func(userKey, value interface{}) bool {
+		inboundInfo.onlineUsers.Range(func(userKey, value interface{}) bool {
 			entry := value.(*userOnlineEntry)
 			// Clean stale IPs (not seen within TTL) and collect the fresh snapshot
 			// while holding the per-user entry lock, so pruning/admission cannot
 			// race the count bookkeeping.
-			remaining := entry.cleanStaleAndCollect(ipTTL, &onlineUser)
-			if remaining == 0 {
-				// No IPs left — remove the entry and its rate bucket
-				inboundInfo.UserOnlineIP.Delete(userKey)
-				inboundInfo.BucketHub.Delete(userKey)
+			if entry.cleanStaleAndCollect(ipTTL, &onlineUser, true) == 0 {
+				inboundInfo.onlineUsers.CompareAndDelete(userKey, entry)
+				inboundInfo.buckets.Delete(userKey)
 			}
 			return true
 		})
@@ -424,8 +848,12 @@ func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 
 // SyncAliveList synchronizes the alive list from panel to local tracking
 func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		inboundInfo := value.(*InboundInfo)
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	if value, ok := l.inboundInfo.Load(tag); ok {
+		inboundInfo := value.(*inboundState)
 
 		// Build a complete authoritative panel snapshot for quick lookup.
 		panelIPs := make(map[string]map[string]bool)
@@ -454,44 +882,35 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 				entry.touchIP(ip, uid)
 			}
 		}
-		inboundInfo.UserOnlineIP.Range(func(userKey, value interface{}) bool {
+		inboundInfo.onlineUsers.Range(func(userKey, value interface{}) bool {
 			entry := value.(*userOnlineEntry)
 			userKeyStr := userKey.(string)
 			processedUserKeys[userKeyStr] = struct{}{}
 
-			// Extract UID from userKey (format: "tag|email|uid")
-			parts := strings.Split(userKeyStr, "|")
-			if len(parts) != 3 {
-				return true // Skip invalid format
-			}
-			uidStr := parts[2]
-
-			if uidStr == "" {
+			userValue, exists := inboundInfo.users.Load(userKey)
+			if !exists {
 				return true
 			}
-			uidInt, err := strconv.Atoi(uidStr)
-			if err != nil {
-				return true // Skip if UID is not a valid integer
-			}
-
+			uidInt := userValue.(userPolicy).UID
+			uidStr := strconv.Itoa(uidInt)
 			syncEntry(entry, uidInt, panelIPs[uidStr])
 			return true
 		})
 
 		// Seed panel-confirmed devices for known users even if this process has
 		// not observed a local connection for them yet.
-		inboundInfo.UserInfo.Range(func(userKey, value interface{}) bool {
+		inboundInfo.users.Range(func(userKey, value interface{}) bool {
 			userKeyStr := userKey.(string)
 			if _, processed := processedUserKeys[userKeyStr]; processed {
 				return true
 			}
-			user := value.(UserInfo)
+			user := value.(userPolicy)
 			admitted, present := panelIPs[strconv.Itoa(user.UID)]
 			if !present {
 				return true
 			}
 			entry := newUserOnlineEntry()
-			if existing, loaded := inboundInfo.UserOnlineIP.LoadOrStore(userKey, entry); loaded {
+			if existing, loaded := inboundInfo.onlineUsers.LoadOrStore(userKey, entry); loaded {
 				entry = existing.(*userOnlineEntry)
 			}
 			syncEntry(entry, user.UID, admitted)
@@ -503,68 +922,113 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 	return fmt.Errorf("no such inbound in limiter: %s", tag)
 }
 
-func (l *Limiter) GetUserBucket(tag string, userKey string, ip string) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
-	if value, ok := l.InboundInfo.Load(tag); ok {
-		var (
-			userLimit        uint64
-			deviceLimit, uid int
-		)
-
-		inboundInfo := value.(*InboundInfo)
-		nodeLimit := inboundInfo.NodeSpeedLimit
-
-		if v, ok := inboundInfo.UserInfo.Load(userKey); ok {
-			u := v.(UserInfo)
-			uid = u.UID
-			userLimit = u.SpeedLimit
-			deviceLimit = u.DeviceLimit
-		}
-
-		entryValue, ok := inboundInfo.UserOnlineIP.Load(userKey)
-		if !ok {
-			entryValue, _ = inboundInfo.UserOnlineIP.LoadOrStore(userKey, newUserOnlineEntry())
-		}
-		entry := entryValue.(*userOnlineEntry)
-		if entry.admitIP(ip, uid, deviceLimit, inboundInfo.GlobalDevices) {
+func (l *Limiter) getUserBucket(tag string, userKey string, ip string) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
+	if l == nil {
+		return nil, false, true
+	}
+	for {
+		if l.closed.Load() {
 			return nil, false, true
 		}
-
-		if inboundInfo.GlobalLimit != nil && inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
-			if reject := globalLimit(inboundInfo, userKey, uid, ip, deviceLimit); reject {
+		value, ok := l.inboundInfo.Load(tag)
+		if !ok {
+			xrayerrors.LogDebug(context.Background(), "Get Inbound Limiter information failed")
+			return nil, false, true
+		}
+		inboundInfo := value.(*inboundState)
+		admitted, replacementReady := inboundInfo.beginAdmission()
+		if !admitted {
+			if replacementReady == nil {
 				return nil, false, true
 			}
+			if l.onAdmissionWaiting != nil {
+				l.onAdmissionWaiting()
+			}
+			<-replacementReady
+			continue
 		}
+		if l.onAdmissionEntered != nil {
+			l.onAdmissionEntered()
+		}
+		bucket, speedLimited, rejected := getUserBucketFromState(inboundInfo, userKey, ip)
+		inboundInfo.endAdmission()
+		return bucket, speedLimited, rejected
+	}
+}
 
-		limit := determineRate(nodeLimit, userLimit)
-		if limit > 0 {
-			// Reuse existing bucket if available; only create new one on first access
-			if v, ok := inboundInfo.BucketHub.Load(userKey); ok {
-				return v.(*rate.Limiter), true, false
-			}
-			newLimiter := rate.NewLimiter(rate.Limit(limit), int(limit))
-			if v, loaded := inboundInfo.BucketHub.LoadOrStore(userKey, newLimiter); loaded {
-				return v.(*rate.Limiter), true, false
-			}
-			return newLimiter, true, false
+func getUserBucketFromState(inboundInfo *inboundState, userKey string, ip string) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
+	var (
+		userLimit        uint64
+		deviceLimit, uid int
+	)
+	nodeLimit := inboundInfo.nodeSpeedLimit
+
+	value, exists := inboundInfo.users.Load(userKey)
+	if !exists {
+		return nil, false, true
+	}
+	u := value.(userPolicy)
+	uid = u.UID
+	userLimit = u.SpeedLimit
+	deviceLimit = u.DeviceLimit
+
+	for {
+		entryValue, ok := inboundInfo.onlineUsers.Load(userKey)
+		if !ok {
+			entryValue, _ = inboundInfo.onlineUsers.LoadOrStore(userKey, newUserOnlineEntry())
 		}
-		return nil, false, false
+		entry := entryValue.(*userOnlineEntry)
+		reject, retry := entry.admitIP(ip, uid, deviceLimit, inboundInfo.globalDevices)
+		if retry {
+			continue
+		}
+		if reject {
+			return nil, false, true
+		}
+		break
 	}
 
-	errors.LogDebug(context.Background(), "Get Inbound Limiter information failed")
+	if inboundInfo.globalLimit != nil && inboundInfo.globalLimit.config != nil && inboundInfo.globalLimit.config.Enable {
+		if reject := globalLimit(inboundInfo, userKey, uid, ip, deviceLimit); reject {
+			return nil, false, true
+		}
+	}
+
+	limit := determineRate(nodeLimit, userLimit)
+	if limit > 0 {
+		if v, ok := inboundInfo.buckets.Load(userKey); ok {
+			return v.(*rate.Limiter), true, false
+		}
+		newLimiter := rate.NewLimiter(rate.Limit(limit), int(limit))
+		if v, loaded := inboundInfo.buckets.LoadOrStore(userKey, newLimiter); loaded {
+			return v.(*rate.Limiter), true, false
+		}
+		return newLimiter, true, false
+	}
 	return nil, false, false
 }
 
-func getGlobalLimitLock(inboundInfo *InboundInfo, uniqueKey string) *sync.Mutex {
+func getGlobalLimitLock(inboundInfo *inboundState, uniqueKey string) *sync.Mutex {
 	lock := &sync.Mutex{}
-	if v, loaded := inboundInfo.GlobalLimit.keyLocks.LoadOrStore(uniqueKey, lock); loaded {
+	if v, loaded := inboundInfo.globalLimit.keyLocks.LoadOrStore(uniqueKey, lock); loaded {
 		return v.(*sync.Mutex)
 	}
 	return lock
 }
 
 // Global device limit
-func globalLimit(inboundInfo *InboundInfo, userKey string, uid int, ip string, deviceLimit int) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(inboundInfo.GlobalLimit.config.Timeout)*time.Second)
+func globalLimit(inboundInfo *inboundState, userKey string, uid int, ip string, deviceLimit int) bool {
+	state := inboundInfo.globalLimit
+	state.useMu.RLock()
+	defer state.useMu.RUnlock()
+	if state.closed {
+		return true
+	}
+
+	if state.globalOnlineIP == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(inboundInfo.globalLimit.config.Timeout)*time.Second)
 	defer cancel()
 
 	uniqueKey := userKey
@@ -572,16 +1036,16 @@ func globalLimit(inboundInfo *InboundInfo, userKey string, uid int, ip string, d
 	lock.Lock()
 	defer lock.Unlock()
 
-	v, err := inboundInfo.GlobalLimit.globalOnlineIP.Get(ctx, uniqueKey, new(map[string]int))
+	v, err := inboundInfo.globalLimit.globalOnlineIP.Get(ctx, uniqueKey, new(map[string]int))
 	if err != nil {
 		if _, ok := err.(*store.NotFound); ok {
 			ipMap := map[string]int{ip: uid}
 			if err := pushIP(ctx, inboundInfo, uniqueKey, &ipMap); err != nil {
-				errors.LogErrorInner(context.Background(), err, "cache service")
+				xrayerrors.LogErrorInner(context.Background(), err, "cache service")
 			}
 			return false
 		}
-		errors.LogErrorInner(context.Background(), err, "cache service")
+		xrayerrors.LogErrorInner(context.Background(), err, "cache service")
 		return false
 	}
 
@@ -601,15 +1065,15 @@ func globalLimit(inboundInfo *InboundInfo, userKey string, uid int, ip string, d
 
 	current[ip] = uid
 	if err := pushIP(ctx, inboundInfo, uniqueKey, &current); err != nil {
-		errors.LogErrorInner(context.Background(), err, "cache service")
+		xrayerrors.LogErrorInner(context.Background(), err, "cache service")
 	}
 
 	return false
 }
 
 // push the ip to cache
-func pushIP(ctx context.Context, inboundInfo *InboundInfo, uniqueKey string, ipMap *map[string]int) error {
-	return inboundInfo.GlobalLimit.globalOnlineIP.Set(ctx, uniqueKey, ipMap)
+func pushIP(ctx context.Context, inboundInfo *inboundState, uniqueKey string, ipMap *map[string]int) error {
+	return inboundInfo.globalLimit.globalOnlineIP.Set(ctx, uniqueKey, ipMap)
 }
 
 // determineRate returns the minimum non-zero rate
@@ -627,4 +1091,62 @@ func determineRate(nodeLimit, userLimit uint64) (limit uint64) {
 		return nodeLimit
 	}
 	return userLimit
+}
+
+// ReplaceInboundUsers applies an authoritative user policy snapshot for one
+// inbound. State for users absent from the replacement is not retained.
+func (l *Limiter) ReplaceInboundUsers(tag string, userList *[]api.UserInfo) error {
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+	value, ok := l.inboundInfo.Load(tag)
+	if !ok {
+		return fmt.Errorf("no such inbound in limiter: %s", tag)
+	}
+
+	inboundInfo := value.(*inboundState)
+	l.drainAdmissions(inboundInfo)
+	userInfo := new(sync.Map)
+	bucketHub := new(sync.Map)
+	userOnlineIP := new(sync.Map)
+	if userList != nil {
+		for _, user := range *userList {
+			userKey := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+			userInfo.Store(userKey, userPolicy{
+				UID:         user.UID,
+				SpeedLimit:  user.SpeedLimit,
+				DeviceLimit: user.DeviceLimit,
+			})
+			if existing, exists := inboundInfo.onlineUsers.Load(userKey); exists {
+				userOnlineIP.Store(userKey, existing)
+			}
+
+			limit := determineRate(inboundInfo.nodeSpeedLimit, user.SpeedLimit)
+			if limit == 0 {
+				continue
+			}
+			if existing, exists := inboundInfo.buckets.Load(userKey); exists {
+				bucket := existing.(*rate.Limiter)
+				if bucket.Limit() == rate.Limit(limit) && bucket.Burst() == int(limit) {
+					bucketHub.Store(userKey, bucket)
+					continue
+				}
+			}
+			bucketHub.Store(userKey, rate.NewLimiter(rate.Limit(limit), int(limit)))
+		}
+	}
+
+	l.inboundInfo.Store(tag, &inboundState{
+		tag:            inboundInfo.tag,
+		nodeSpeedLimit: inboundInfo.nodeSpeedLimit,
+		users:          userInfo,
+		buckets:        bucketHub,
+		onlineUsers:    userOnlineIP,
+		globalDevices:  inboundInfo.globalDevices,
+		globalLimit:    inboundInfo.globalLimit,
+	})
+	inboundInfo.notifyReplacement()
+	inboundInfo.globalLimit.pruneKeyLocks(userInfo)
+	return nil
 }

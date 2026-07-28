@@ -63,7 +63,7 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 			if err := panelLimiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
 				t.Fatalf("AddInboundLimiter failed: %v", err)
 			}
-			if _, _, rejected := panelLimiter.GetUserBucket("inbound", "inbound|one@example.com|1", "192.0.2.1"); rejected {
+			if _, _, rejected := panelLimiter.Admit("inbound", "inbound|one@example.com|1", "192.0.2.1", nil, nil); rejected {
 				t.Fatal("expected user IP to be accepted")
 			}
 
