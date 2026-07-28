@@ -3,6 +3,7 @@ package bunpanel
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
-	"github.com/Mtoly/XrayRP/api/internal/transportprofile"
 )
 
 type APIClient struct {
@@ -374,13 +374,22 @@ func (c *APIClient) ParseNodeInfo(nodeInfoResponse *Server) (*api.NodeInfo, erro
 	// Parse SplitHTTP/XHTTP settings
 	splithttpConfig := new(SplitHTTPSettings)
 	if nodeConfig.XHTTPSettings != nil {
+		if err := validateOptionalXPaddingBytes(nodeConfig.XHTTPSettings); err != nil {
+			return nil, err
+		}
 		if err := json.Unmarshal(nodeConfig.XHTTPSettings, splithttpConfig); err != nil {
 			return nil, fmt.Errorf("unmarshal XHTTPSettings failed: %w", err)
 		}
 	} else if nodeConfig.SplitHTTPSettings != nil {
+		if err := validateOptionalXPaddingBytes(nodeConfig.SplitHTTPSettings); err != nil {
+			return nil, err
+		}
 		if err := json.Unmarshal(nodeConfig.SplitHTTPSettings, splithttpConfig); err != nil {
 			return nil, fmt.Errorf("unmarshal SplitHTTPSettings failed: %w", err)
 		}
+	}
+	if splithttpConfig.UplinkChunkSize > math.MaxInt32 {
+		return nil, fmt.Errorf("decode uplinkChunkSize: value %d exceeds runtime maximum %d", splithttpConfig.UplinkChunkSize, math.MaxInt32)
 	}
 
 	// Parse HttpUpgrade settings
@@ -391,71 +400,92 @@ func (c *APIClient) ParseNodeInfo(nodeInfoResponse *Server) (*api.NodeInfo, erro
 		}
 	}
 
+	var host, path, serviceName string
+	var header json.RawMessage
+	var headers map[string]string
+	switch transportProtocol {
+	case "ws":
+		host = wsConfig.Headers.Host
+		path = wsConfig.Path
+	case "grpc":
+		serviceName = grpcConfig.ServiceName
+	case "tcp":
+		header = tcpConfig.Header
+	case "splithttp", "xhttp":
+		host = splithttpConfig.Host
+		path = splithttpConfig.Path
+		headers = splithttpConfig.Headers
+	case "httpupgrade":
+		host = httpupgradeConfig.Host
+		path = httpupgradeConfig.Path
+		headers = httpupgradeConfig.Headers
+	default:
+		host = wsConfig.Headers.Host
+		path = wsConfig.Path
+	}
+
 	// Create GeneralNodeInfo
 	nodeInfo := &api.NodeInfo{
-		NodeType:     c.NodeType,
-		NodeID:       c.NodeID,
-		Port:         port,
-		SpeedLimit:   speedLimit,
-		AlterID:      alterID,
-		CypherMethod: nodeConfig.Method,
+		NodeType:            c.NodeType,
+		NodeID:              c.NodeID,
+		Port:                port,
+		SpeedLimit:          speedLimit,
+		AlterID:             alterID,
+		TransportProtocol:   transportProtocol,
+		Host:                host,
+		Path:                path,
+		EnableTLS:           enableTLS,
+		EnableVless:         enableVless,
+		VlessFlow:           nodeConfig.Flow,
+		CypherMethod:        nodeConfig.Method,
+		ServiceName:         serviceName,
+		Header:              header,
+		Headers:             headers,
+		EnableREALITY:       enableREALITY,
+		REALITYConfig:       realityConfig,
+		XHTTPMode:           splithttpConfig.Mode,
+		XHTTPExtra:          splithttpConfig.Extra,
+		XPaddingBytes:       splithttpConfig.XPaddingBytes,
+		XPaddingObfsMode:    splithttpConfig.XPaddingObfsMode,
+		XPaddingKey:         splithttpConfig.XPaddingKey,
+		XPaddingHeader:      splithttpConfig.XPaddingHeader,
+		XPaddingPlacement:   splithttpConfig.XPaddingPlacement,
+		XPaddingMethod:      splithttpConfig.XPaddingMethod,
+		UplinkHTTPMethod:    splithttpConfig.UplinkHTTPMethod,
+		SessionPlacement:    splithttpConfig.SessionPlacement,
+		SessionKey:          splithttpConfig.SessionKey,
+		SeqPlacement:        splithttpConfig.SeqPlacement,
+		SeqKey:              splithttpConfig.SeqKey,
+		UplinkDataPlacement: splithttpConfig.UplinkDataPlacement,
+		UplinkDataKey:       splithttpConfig.UplinkDataKey,
+		UplinkChunkSize:     splithttpConfig.UplinkChunkSize,
+		NoGRPCHeader:        splithttpConfig.NoGRPCHeader,
+		NoSSEHeader:         splithttpConfig.NoSSEHeader,
 	}
-	webSocketEndpoint := transportprofile.Endpoint{
-		Host: wsConfig.Headers.Host,
-		Path: wsConfig.Path,
-	}
-	xhttpEndpoint := transportprofile.Endpoint{
-		Host:    splithttpConfig.Host,
-		Path:    splithttpConfig.Path,
-		Headers: splithttpConfig.Headers,
-	}
-	transportprofile.Apply(nodeInfo, transportprofile.Input{
-		Protocol: transportProtocol,
-		Endpoints: transportprofile.Endpoints{
-			WebSocket: webSocketEndpoint,
-			GRPC: transportprofile.Endpoint{
-				ServiceName: grpcConfig.ServiceName,
-			},
-			TCP: transportprofile.Endpoint{
-				Header: tcpConfig.Header,
-			},
-			SplitHTTP: xhttpEndpoint,
-			XHTTP:     xhttpEndpoint,
-			HTTPUpgrade: transportprofile.Endpoint{
-				Host:    httpupgradeConfig.Host,
-				Path:    httpupgradeConfig.Path,
-				Headers: httpupgradeConfig.Headers,
-			},
-			Fallback: webSocketEndpoint,
-		},
-		Security: transportprofile.Security{
-			EnableTLS:     enableTLS,
-			EnableVless:   enableVless,
-			EnableREALITY: enableREALITY,
-			VlessFlow:     nodeConfig.Flow,
-			REALITYConfig: realityConfig,
-		},
-		XHTTP: transportprofile.XHTTP{
-			Mode:                splithttpConfig.Mode,
-			Extra:               splithttpConfig.Extra,
-			PaddingBytes:        splithttpConfig.XPaddingBytes,
-			PaddingObfsMode:     splithttpConfig.XPaddingObfsMode,
-			PaddingKey:          splithttpConfig.XPaddingKey,
-			PaddingHeader:       splithttpConfig.XPaddingHeader,
-			PaddingPlacement:    splithttpConfig.XPaddingPlacement,
-			PaddingMethod:       splithttpConfig.XPaddingMethod,
-			UplinkHTTPMethod:    splithttpConfig.UplinkHTTPMethod,
-			SessionPlacement:    splithttpConfig.SessionPlacement,
-			SessionKey:          splithttpConfig.SessionKey,
-			SeqPlacement:        splithttpConfig.SeqPlacement,
-			SeqKey:              splithttpConfig.SeqKey,
-			UplinkDataPlacement: splithttpConfig.UplinkDataPlacement,
-			UplinkDataKey:       splithttpConfig.UplinkDataKey,
-			UplinkChunkSize:     splithttpConfig.UplinkChunkSize,
-			NoGRPCHeader:        splithttpConfig.NoGRPCHeader,
-			NoSSEHeader:         splithttpConfig.NoSSEHeader,
-		},
-	})
 
 	return nodeInfo, nil
+}
+
+func validateOptionalXPaddingBytes(settings json.RawMessage) error {
+	var raw struct {
+		XPaddingBytes json.RawMessage `json:"xPaddingBytes"`
+	}
+	if err := json.Unmarshal(settings, &raw); err != nil {
+		return fmt.Errorf("decode xPaddingBytes settings: %w", err)
+	}
+	if len(raw.XPaddingBytes) == 0 {
+		return nil
+	}
+
+	var values []int32
+	if err := json.Unmarshal(raw.XPaddingBytes, &values); err != nil {
+		return fmt.Errorf("decode xPaddingBytes: %w", err)
+	}
+	if values == nil {
+		return nil
+	}
+	if len(values) != 2 {
+		return fmt.Errorf("decode xPaddingBytes: expected 2 values, got %d", len(values))
+	}
+	return nil
 }

@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xtls/xray-core/app/proxyman"
@@ -10,6 +11,20 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 	. "github.com/Mtoly/XrayRP/service/controller"
 )
+
+func TestInboundBuilderRejectsUplinkChunkSizeRuntimeOverflow(t *testing.T) {
+	nodeInfo := &api.NodeInfo{
+		NodeType:          "V2ray",
+		Port:              8443,
+		TransportProtocol: "xhttp",
+		UplinkChunkSize:   1 << 31,
+	}
+
+	_, err := InboundBuilder(&Config{}, nodeInfo, "test_tag")
+	if err == nil || !strings.Contains(err.Error(), "uplinkChunkSize") {
+		t.Fatalf("error = %v, want uplinkChunkSize range error", err)
+	}
+}
 
 func TestBuildV2ray(t *testing.T) {
 	nodeInfo := &api.NodeInfo{

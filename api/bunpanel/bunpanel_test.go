@@ -21,6 +21,11 @@ const (
 	contractNodeID = 17
 )
 
+func TestSplitHTTPSettingsKeepsXPaddingBytesPublicType(t *testing.T) {
+	var settings bunpanel.SplitHTTPSettings
+	var _ *[2]int32 = settings.XPaddingBytes
+}
+
 type capturedRequest struct {
 	method string
 	path   string
@@ -401,6 +406,104 @@ func TestParseNodeInfoPreservesAdapterSpecificTransportFallbacks(t *testing.T) {
 			t.Fatalf("SplitHTTP unexpectedly replaced present XHTTP settings: %#v", node)
 		}
 	})
+}
+
+func TestParseNodeInfoProjectsTransportFieldsAgainstLiteralOracle(t *testing.T) {
+	client := bunpanel.New(&api.Config{NodeID: contractNodeID, NodeType: "V2ray"})
+	node, err := client.ParseNodeInfo(&bunpanel.Server{
+		Port:     8443,
+		Network:  "xhttp",
+		Security: "tls",
+		Flow:     "fallback-flow",
+		XHTTPSettings: json.RawMessage(`{
+			"host":"edge.example",
+			"path":"/xhttp",
+			"headers":{},
+			"mode":"stream-one",
+			"extra":{},
+			"xPaddingBytes":[100,200],
+			"xPaddingObfsMode":true,
+			"xPaddingKey":"padding-key",
+			"xPaddingHeader":"padding-header",
+			"xPaddingPlacement":"header",
+			"xPaddingMethod":"random",
+			"uplinkHTTPMethod":"POST",
+			"sessionPlacement":"query",
+			"sessionKey":"session-key",
+			"seqPlacement":"path",
+			"seqKey":"seq-key",
+			"uplinkDataPlacement":"body",
+			"uplinkDataKey":"data-key",
+			"uplinkChunkSize":4096,
+			"noGRPCHeader":true,
+			"noSSEHeader":true
+		}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paddingBytes := [2]int32{100, 200}
+	want := &api.NodeInfo{
+		NodeType:            "V2ray",
+		NodeID:              contractNodeID,
+		Port:                8443,
+		TransportProtocol:   "xhttp",
+		Host:                "edge.example",
+		Path:                "/xhttp",
+		EnableTLS:           true,
+		VlessFlow:           "fallback-flow",
+		Headers:             map[string]string{},
+		REALITYConfig:       &api.REALITYConfig{},
+		XHTTPMode:           "stream-one",
+		XHTTPExtra:          json.RawMessage(`{}`),
+		XPaddingBytes:       &paddingBytes,
+		XPaddingObfsMode:    true,
+		XPaddingKey:         "padding-key",
+		XPaddingHeader:      "padding-header",
+		XPaddingPlacement:   "header",
+		XPaddingMethod:      "random",
+		UplinkHTTPMethod:    "POST",
+		SessionPlacement:    "query",
+		SessionKey:          "session-key",
+		SeqPlacement:        "path",
+		SeqKey:              "seq-key",
+		UplinkDataPlacement: "body",
+		UplinkDataKey:       "data-key",
+		UplinkChunkSize:     4096,
+		NoGRPCHeader:        true,
+		NoSSEHeader:         true,
+	}
+	if !reflect.DeepEqual(node, want) {
+		t.Fatalf("node info = %#v, want %#v", node, want)
+	}
+	if node.Headers == nil || node.XHTTPExtra == nil || node.XPaddingBytes == nil || node.REALITYConfig == nil {
+		t.Fatalf("non-nil transport values became nil: %#v", node)
+	}
+}
+
+func TestParseNodeInfoRejectsInvalidXPaddingBytesLength(t *testing.T) {
+	client := bunpanel.New(&api.Config{NodeID: contractNodeID, NodeType: "V2ray"})
+	_, err := client.ParseNodeInfo(&bunpanel.Server{
+		Port:          8443,
+		Network:       "xhttp",
+		XHTTPSettings: json.RawMessage(`{"xPaddingBytes":[100]}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "xPaddingBytes") {
+		t.Fatalf("error = %v, want xPaddingBytes length error", err)
+	}
+}
+
+func TestParseNodeInfoRejectsUplinkChunkSizeRuntimeOverflow(t *testing.T) {
+	client := bunpanel.New(&api.Config{NodeID: contractNodeID, NodeType: "V2ray"})
+	_, err := client.ParseNodeInfo(&bunpanel.Server{
+		Port:          8443,
+		Network:       "xhttp",
+		XHTTPSettings: json.RawMessage(`{"uplinkChunkSize":2147483648}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "uplinkChunkSize") {
+		t.Fatalf("error = %v, want uplinkChunkSize range error", err)
+	}
 }
 
 func integrationClient() *bunpanel.APIClient {

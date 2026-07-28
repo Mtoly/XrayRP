@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
@@ -301,6 +302,9 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 		}
 		streamSetting.HTTPUPGRADESettings = httpupgradeSettings
 	case "splithttp", "xhttp":
+		if node.transport.uplinkChunkSize > math.MaxInt32 {
+			return nil, fmt.Errorf("uplinkChunkSize %d exceeds runtime maximum %d", node.transport.uplinkChunkSize, math.MaxInt32)
+		}
 		splithttpSetting := &conf.SplitHTTPConfig{
 			Path:                node.transport.path,
 			Host:                node.transport.host,
