@@ -751,8 +751,8 @@ github.com/anytls/sing-anytls v0.0.11/go.mod h1:7rjN6IukwysmdusYsrV51Fgu1uW6vsrd
 github.com/apache/arrow/go/v10 v10.0.1/go.mod h1:YvhnlEePVnBS4+0z3fhPfUy7W1Ikj0Ih0vcRo/gZ1M0=
 github.com/apache/arrow/go/v11 v11.0.0/go.mod h1:Eg5OsL5H+e299f7u5ssuXsuHQVEGC4xei5aX110hRiI=
 github.com/apache/thrift v0.16.0/go.mod h1:PHK3hniurgQaNMZYaCLEqXKsYK8upmhPbmdP2FXSqgU=
-github.com/apernet/hysteria/core/v2 v2.9.3 h1:BwJM1nCY3oLG7KQE32HRJczQAfSKgYfIw+qa/USu4do=
-github.com/apernet/hysteria/core/v2 v2.9.3/go.mod h1:Iy4fgHAVfF8EmWWHqCfs0TPmW+bpbYslyEkasgUwdx8=
+github.com/apernet/hysteria/core/v2 v2.10.0 h1:eN2wU5CM46EMRTn3i/HfQOo78DslVoWJ9jPcFQGPgkY=
+github.com/apernet/hysteria/core/v2 v2.10.0/go.mod h1:FYzit6cjmK/ej9Ggk1Eq9y+arN9ZLPj43QzjZ4Ruqpc=
 github.com/apernet/hysteria/extras/v2 v2.10.0 h1:7HfbUEv0sqdbQJ9Jo5khHOJMo7Zn59zvuAbAuyLKw/w=
 github.com/apernet/hysteria/extras/v2 v2.10.0/go.mod h1:OZy5hsWCJ2Zq7ajKD71l0IC7rf9RlJrtJ79P5i3lQNY=
 github.com/apernet/quic-go v0.60.1-0.20260618182935-599b15a1fa26 h1:LTC+O+b5tux3RUzqqepNOkdMMI264O+mG09Y5j9Cf7Y=
