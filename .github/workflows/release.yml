@@ -1,67 +1,146 @@
-name: Build and Release
+name: Build release artifacts
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - master
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
-  pull_request:
-    types: [ opened, synchronize, reopened ]
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
-  release:
-    types: [ published ]
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing canonical SemVer tag to build
+        required: true
+        type: string
+      publish_release:
+        description: Publish the completed artifacts to GitHub Releases
+        required: true
+        type: boolean
+        default: false
+      draft:
+        description: Create a draft release when publishing a new tag
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      build_time: ${{ steps.metadata.outputs.build_time }}
+      commit: ${{ steps.metadata.outputs.commit }}
+      source_date_epoch: ${{ steps.metadata.outputs.source_date_epoch }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      - name: Resolve source identity
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          commit="$(git rev-parse HEAD)"
+          test "$commit" = "$(git rev-list -n 1 "$tag")"
+          test -z "$(git status --porcelain)"
+          source_date_epoch="$(git show -s --format=%ct "$commit")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "source_date_epoch=$source_date_epoch" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u -d "@$source_date_epoch" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  required-checks:
+    name: Required checks
+    needs: metadata
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.metadata.outputs.commit }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+  geo:
+    name: Current upstream geo assets
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify current upstream assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p geo-assets
+          assets=(
+            "geoip geoip geoip"
+            "domain-list-community dlc geosite"
+          )
+          for asset in "${assets[@]}"; do
+            read -r repository upstream_name output_name <<< "$asset"
+            url="https://raw.githubusercontent.com/v2fly/$repository/release/$upstream_name.dat"
+            curl --fail --location --retry 3 "$url" --output "geo-assets/$output_name.dat"
+            expected="$(curl --fail --location --retry 3 "$url.sha256sum" | awk '{print $1}')"
+            actual="$(sha256sum "geo-assets/$output_name.dat" | awk '{print $1}')"
+            [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]
+            test "$actual" = "${expected,,}"
+          done
+      - name: Upload geo assets
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: geo-assets
+          path: geo-assets
+          if-no-files-found: error
+          retention-days: 14
 
   build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm }}
+    needs: [metadata, required-checks, geo]
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     strategy:
+      fail-fast: false
       matrix:
-        # Include amd64 on all platforms.
-        goos: [ windows, freebsd, openbsd, linux, darwin ]
-        goarch: [ amd64, 386 ]
+        goos: [windows, freebsd, openbsd, linux, darwin]
+        goarch: [amd64, "386"]
         exclude:
-          # Exclude i386 on darwin.
-          - goarch: 386
+          - goarch: "386"
             goos: darwin
-          - goarch: 386
+          - goarch: "386"
             goos: openbsd
         include:
-          # BEIGIN MacOS ARM64
           - goos: darwin
             goarch: arm64
-          # END MacOS ARM64
-          # BEGIN Linux ARM 5 6 7
           - goos: linux
             goarch: arm
-            goarm: 7
+            goarm: "7"
           - goos: linux
             goarch: arm
-            goarm: 6
+            goarm: "6"
           - goos: linux
             goarch: arm
-            goarm: 5
-          # END Linux ARM 5 6 7
-          # BEGIN Android ARM 8
+            goarm: "5"
           - goos: android
             goarch: arm64
-          # END Android ARM 8
-          # BEGIN Other architectures
-          # BEGIN riscv64 & ARM64
           - goos: linux
             goarch: arm64
           - goos: linux
             goarch: riscv64
-          # END riscv64 & ARM64
-          # BEGIN MIPS
           - goos: linux
             goarch: mips64
           - goos: linux
@@ -70,122 +149,312 @@ jobs:
             goarch: mipsle
           - goos: linux
             goarch: mips
-          # END MIPS
-          # BEGIN PPC
-          # - goos: linux # Removed due to the unsupport of shirou/gopsutil 
-          #   goarch: ppc64
           - goos: linux
             goarch: ppc64le
-          # END PPC
-          # BEGIN FreeBSD ARM
           - goos: freebsd
             goarch: arm64
           - goos: freebsd
             goarch: arm
-            goarm: 7
-          # END FreeBSD ARM
-          # BEGIN S390X
+            goarm: "7"
           - goos: linux
             goarch: s390x
-          # END S390X
-          # END Other architectures
-      fail-fast: false
-
-    runs-on: ubuntu-latest
     env:
-      GOOS: ${{ matrix.goos }}
+      CGO_ENABLED: "0"
       GOARCH: ${{ matrix.goarch }}
       GOARM: ${{ matrix.goarm }}
-      CGO_ENABLED: 0
+      GOOS: ${{ matrix.goos }}
     steps:
-      - name: Checkout codebase
-        uses: actions/checkout@v5
-      - name: Show workflow information
-        id: get_filename
-        run: |
-          export _NAME=$(jq ".[\"$GOOS-$GOARCH$GOARM$GOMIPS\"].friendlyName" -r < .github/build/friendly-filenames.json)
-          echo "GOOS: $GOOS, GOARCH: $GOARCH, GOARM: $GOARM, GOMIPS: $GOMIPS, RELEASE_NAME: $_NAME"
-          echo "ASSET_NAME=$_NAME" >> $GITHUB_OUTPUT
-          echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
-
+      - name: Checkout tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-
-      - name: Get project dependencies
-        run: go mod download
-
-
-      - name: Build XrayR
-        run: |
-          mkdir -p build_assets
-          go build -v -o build_assets/XrayR -tags with_quic -trimpath -ldflags "-s -w -buildid="
-
-      - name: Build Mips softfloat XrayR
-        if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
-        run: |
-          GOMIPS=softfloat go build -v -o build_assets/XrayR_softfloat -tags with_quic -trimpath -ldflags "-s -w -buildid="
-      - name: Rename Windows XrayR
-        if: matrix.goos == 'windows'
-        run: |
-          cd ./build_assets || exit 1
-          mv XrayR XrayR.exe
-
-      - name: Prepare to release
-        uses: nick-fields/retry@v4
+          cache: true
+      - name: Download geo assets
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          timeout_minutes: 60
-          retry_wait_seconds: 60
-          max_attempts: 5
-          command: |
-            cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md
-            cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
-            cp ${GITHUB_WORKSPACE}/release/config/dns.json ./build_assets/dns.json
-            cp ${GITHUB_WORKSPACE}/release/config/route.json ./build_assets/route.json
-            cp ${GITHUB_WORKSPACE}/release/config/custom_outbound.json ./build_assets/custom_outbound.json
-            cp ${GITHUB_WORKSPACE}/release/config/custom_inbound.json ./build_assets/custom_inbound.json
-            cp ${GITHUB_WORKSPACE}/release/config/rulelist ./build_assets/rulelist
-            cp ${GITHUB_WORKSPACE}/release/config/config.yml.example ./build_assets/config.yml
-            LIST=('geoip geoip geoip' 'domain-list-community dlc geosite')
-            for i in "${LIST[@]}"
-            do
-              INFO=($(echo $i | awk 'BEGIN{FS=" ";OFS=" "} {print $1,$2,$3}'))
-              DOWNLOAD_URL="https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat"
-              FILE_NAME="${INFO[2]}.dat"
-              echo -e "Downloading ${DOWNLOAD_URL}..."
-              curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
-              echo -e "Verifying HASH key..."
-              HASH="$(curl -sL "${DOWNLOAD_URL}.sha256sum" | awk -F ' ' '{print $1}')"
-              [ "$(sha256sum "./build_assets/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ] || { echo -e "The HASH key of ${FILE_NAME} does not match cloud one."; exit 1; }
-            done
-      - name: Create ZIP archive
+          name: geo-assets
+          path: geo-assets
+      - name: Resolve asset name
+        id: asset
         shell: bash
         run: |
-          pushd build_assets || exit 1
-          touch -mt $(date +%Y01010000) *
-          zip -9vr ../XrayR-$ASSET_NAME.zip .
-          popd || exit 1
-          FILE=./XrayR-$ASSET_NAME.zip
-          DGST=$FILE.dgst
-          for METHOD in {"md5","sha1","sha256","sha512"}
-          do
-            openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
-          done
-      - name: Change the name
+          set -euo pipefail
+          key="$GOOS-$GOARCH${GOARM:-}"
+          asset_name="$(jq -r --arg key "$key" '.[$key].friendlyName // empty' .github/build/friendly-filenames.json)"
+          test -n "$asset_name"
+          echo "name=$asset_name" >> "$GITHUB_OUTPUT"
+      - name: Build full binary
+        shell: bash
+        env:
+          BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+          COMMIT: ${{ needs.metadata.outputs.commit }}
+          TAG: ${{ needs.metadata.outputs.tag }}
         run: |
-          mv build_assets XrayR-$ASSET_NAME
-      - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v5
+          set -euo pipefail
+          mkdir -p build_assets
+          ldflags="-s -w -buildid= \
+            -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildTag=$TAG \
+            -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildCommit=$COMMIT \
+            -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildTime=$BUILD_TIME \
+            -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildDirty=false"
+          go build -v -o build_assets/XrayR -tags with_quic -trimpath -ldflags "$ldflags" .
+          if [[ "$GOARCH" == "mips" || "$GOARCH" == "mipsle" ]]; then
+            GOMIPS=softfloat go build -v -o build_assets/XrayR_softfloat \
+              -tags with_quic -trimpath -ldflags "$ldflags" .
+          fi
+          if [[ "$GOOS" == "windows" ]]; then
+            mv build_assets/XrayR build_assets/XrayR.exe
+          fi
+      - name: Add release files and digest map
+        shell: bash
+        env:
+          ASSET_NAME: ${{ steps.asset.outputs.name }}
+          BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+          COMMIT: ${{ needs.metadata.outputs.commit }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp README.md LICENSE build_assets/
+          cp release/config/dns.json build_assets/
+          cp release/config/route.json build_assets/
+          cp release/config/custom_outbound.json build_assets/
+          cp release/config/custom_inbound.json build_assets/
+          cp release/config/rulelist build_assets/
+          cp release/config/config.yml.example build_assets/config.yml
+          cp geo-assets/geoip.dat geo-assets/geosite.dat build_assets/
+          jq -n \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg source_commit "$COMMIT" \
+            --arg build_time "$BUILD_TIME" \
+            --arg goos "$GOOS" \
+            --arg goarch "$GOARCH" \
+            --arg goarm "${GOARM:-}" \
+            '{
+              schema: 1,
+              version: $version,
+              tag: $tag,
+              source_commit: $source_commit,
+              build_time: $build_time,
+              dirty: false,
+              goos: $goos,
+              goarch: $goarch,
+              goarm: $goarm
+            }' > build_assets/BUILD_INFO.json
+
+          binary_records="$(mktemp)"
+          for binary in XrayR XrayR.exe XrayR_softfloat; do
+            binary_path="build_assets/$binary"
+            if [[ ! -f "$binary_path" ]]; then
+              continue
+            fi
+            jq -nc \
+              --arg asset "$ASSET_NAME" \
+              --arg name "$binary" \
+              --arg source_commit "$COMMIT" \
+              --arg sha256 "$(sha256sum "$binary_path" | awk '{print $1}')" \
+              --arg sha512 "$(sha512sum "$binary_path" | awk '{print $1}')" \
+              '{
+                asset: $asset,
+                name: $name,
+                source_commit: $source_commit,
+                sha256: $sha256,
+                sha512: $sha512
+              }' >> "$binary_records"
+          done
+          test -s "$binary_records"
+          jq -s \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg source_commit "$COMMIT" \
+            '{
+              schema: 1,
+              version: $version,
+              tag: $tag,
+              source_commit: $source_commit,
+              binaries: sort_by(.name)
+            }' "$binary_records" > build_assets/BINARY_DIGESTS.json
+          rm -f "$binary_records"
+          find build_assets -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+      - name: Create archive
+        id: package
+        shell: bash
+        env:
+          ASSET_NAME: ${{ steps.asset.outputs.name }}
+        run: |
+          set -euo pipefail
+          archive="XrayR-$ASSET_NAME.zip"
+          (cd build_assets && zip -X -9 -r "../$archive" .)
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}
+          path: build_assets
+          format: spdx-json
+          syft-version: v1.50.0
+          output-file: ${{ steps.package.outputs.asset_name }}.spdx.json
+          upload-artifact: false
+      - name: Create checksums and asset manifest
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ASSET_NAME: ${{ steps.package.outputs.asset_name }}
+          BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+          COMMIT: ${{ needs.metadata.outputs.commit }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          sha512sum "$ARCHIVE" > "$ARCHIVE.sha512"
+          jq -n \
+            --arg name "$ARCHIVE" \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg source_commit "$COMMIT" \
+            --arg build_time "$BUILD_TIME" \
+            --arg goos "$GOOS" \
+            --arg goarch "$GOARCH" \
+            --arg goarm "${GOARM:-}" \
+            --arg sha256 "$(awk '{print $1}' "$ARCHIVE.sha256")" \
+            --arg sha512 "$(awk '{print $1}' "$ARCHIVE.sha512")" \
+            --arg sbom "$ASSET_NAME.spdx.json" \
+            --arg signature "$ARCHIVE.sigstore.json" \
+            --argjson binaries "$(jq -c '.binaries' build_assets/BINARY_DIGESTS.json)" \
+            '{
+              name: $name,
+              version: $version,
+              tag: $tag,
+              source_commit: $source_commit,
+              build_time: $build_time,
+              dirty: false,
+              goos: $goos,
+              goarch: $goarch,
+              goarm: $goarm,
+              sha256: $sha256,
+              sha512: $sha512,
+              sbom: $sbom,
+              signature_bundle: $signature,
+              binaries: $binaries
+            }' > "$ASSET_NAME.build.json"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign archive
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: cosign sign-blob --yes --bundle "$ARCHIVE.sigstore.json" "$ARCHIVE"
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+      - name: Upload release artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-${{ steps.package.outputs.asset_name }}
           path: |
-            ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}/*
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+            ${{ steps.package.outputs.archive }}.sha512
+            ${{ steps.package.outputs.archive }}.sigstore.json
+            ${{ steps.package.outputs.asset_name }}.build.json
+            ${{ steps.package.outputs.asset_name }}.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  release-bundle:
+    name: Assemble release manifest
+    needs: [metadata, required-checks, build]
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
-          file_glob: true
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Create release manifest and checksums
+        shell: bash
+        env:
+          BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+          COMMIT: ${{ needs.metadata.outputs.commit }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq -s \
+            --arg version "$VERSION" \
+            --arg tag "$TAG" \
+            --arg source_commit "$COMMIT" \
+            --arg build_time "$BUILD_TIME" \
+            '{
+              schema: 1,
+              version: $version,
+              tag: $tag,
+              source_commit: $source_commit,
+              build_time: $build_time,
+              dirty: false,
+              assets: sort_by(.name),
+              binaries: ([.[].binaries[]] | sort_by(.asset, .name)),
+              sboms: ([.[] | {asset: .name, sbom: .sbom, source_commit: .source_commit}] | sort_by(.asset))
+            }' dist/*.build.json > dist/release-manifest.json
+          (
+            cd dist
+            sha256sum ./*.zip ./*.spdx.json ./*.build.json release-manifest.json > SHA256SUMS
+            sha512sum ./*.zip ./*.spdx.json ./*.build.json release-manifest.json > SHA512SUMS
+          )
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign release manifest
+        run: cosign sign-blob --yes --bundle dist/release-manifest.sigstore.json dist/release-manifest.json
+      - name: Attest release manifest provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/release-manifest.json
+      - name: Upload release bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-bundle
+          path: dist
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub release
+    needs: [metadata, required-checks, release-bundle]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-bundle
+          path: dist
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          elif [[ "${{ inputs.draft }}" == "true" ]]; then
+            gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes --draft
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes
+          fi

@@ -1,6 +1,13 @@
-name: Test
+name: Required checks
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref or commit to verify
+        required: false
+        type: string
+        default: ""
   push:
     branches: [master]
   pull_request:
@@ -10,51 +17,90 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
+  group: required-checks-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 env:
   CGO_ENABLED: "1"
+  CHECKOUT_REF: ${{ inputs.ref || github.sha }}
 
 jobs:
   test:
-    name: Test and vet
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Run tests
-        run: go test ./...
-      - name: Run vet
-        run: go vet ./...
+        run: go test -count=1 ./...
 
   race:
     name: Race detector
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Run focused race tests
         run: go test -race ./service/controller ./service/machine ./common/limiter ./service/anytls ./service/tuic ./service/hysteria2 ./panel
 
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run vet
+        run: go vet ./...
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build packages
+        run: go build ./...
+      - name: Build full release binary
+        run: go build -tags with_quic .
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -89,9 +135,87 @@ jobs:
           check_coverage service/machine 68.5
           check_coverage common/limiter 56.6
       - name: Upload coverage profile
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: coverage
           path: coverage.out
           if-no-files-found: error
           retention-days: 14
+
+  govulncheck:
+    name: Govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: Scan reachable vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report="$(mktemp)"
+          affected="$(mktemp)"
+          trap 'rm -f "$report" "$affected"' EXIT
+
+          govulncheck -format openvex ./... > "$report"
+          jq -r '.statements[]? | select(.status == "affected") | .vulnerability.name' "$report" \
+            | sort -u > "$affected"
+
+          if [[ ! -s "$affected" ]]; then
+            echo "No reachable vulnerabilities found."
+            exit 0
+          fi
+
+          if [[ "$(wc -l < "$affected")" -ne 1 ]] || ! grep -Fxq 'GO-2026-5288' "$affected"; then
+            echo "Reachable vulnerabilities found:" >&2
+            cat "$affected" >&2
+            exit 1
+          fi
+
+          core_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/core/v2)"
+          extras_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/extras/v2)"
+          if ! dpkg --compare-versions "${core_version#v}" ge '2.8.2' \
+            || ! dpkg --compare-versions "${extras_version#v}" ge '2.8.2'; then
+            echo "GO-2026-5288 cannot be allowed with Hysteria core=$core_version extras=$extras_version; both must be at least v2.8.2." >&2
+            exit 1
+          fi
+          go test -count=1 ./service/hysteria2 -run '^TestBuildServerConfigKeepsVulnerableSniffHookDisabled$'
+
+          echo "Allowing GO-2026-5288: upstream fixed the issue in v2.8.2; core=$core_version extras=$extras_version and Hysteria request sniffing remains disabled."
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          languages: go
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+      - name: Analyze
+        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          upload: false
