@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"context"
 	"errors"
 	"math"
 	"strconv"
@@ -141,12 +142,20 @@ func isReportEndpointUnsupported(statusCode int, body []byte) bool {
 }
 
 func (c *APIClient) postXboardReport(payload map[string]any) error {
+	return c.postXboardReportContext(context.Background(), payload)
+}
+
+func (c *APIClient) postXboardReportContext(ctx context.Context, payload map[string]any) error {
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(payload).
 		ForceContentType("application/json").
 		Post(xboardReportPath)
 	if err != nil || res == nil || res.RawResponse == nil {
 		return c.httpPolicy.CheckResponse(res, xboardReportPath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if isReportEndpointUnsupported(res.StatusCode(), res.Body()) {
 		return errXboardReportUnsupported
@@ -158,54 +167,75 @@ func (c *APIClient) postXboardReport(payload map[string]any) error {
 
 // ReportNodeStatus implements the API interface.
 func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (c *APIClient) ReportNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) error {
 	payload, err := buildReportStatusPayload(nodeStatus)
 	if err != nil {
 		return err
 	}
 
 	if !c.xboardReportUnsupported.Load() {
-		if err := c.postXboardReport(payload); err == nil {
+		if err := c.postXboardReportContext(ctx, payload); err == nil {
 			return nil
 		} else if errors.Is(err, errXboardReportUnsupported) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			c.xboardReportUnsupported.Store(true)
 		} else {
 			return err
 		}
 	}
 
-	return c.reportLegacyNodeStatus(nodeStatus)
+	return c.reportLegacyNodeStatusContext(ctx, nodeStatus)
 }
 
 // ReportNodeOnlineUsers implements the API interface.
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
+
+func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 	payload := buildReportAlivePayload(onlineUserList, c.NodeID)
 	if !c.xboardReportUnsupported.Load() {
-		if err := c.postXboardReport(payload); err == nil {
+		if err := c.postXboardReportContext(ctx, payload); err == nil {
 			return nil
 		} else if errors.Is(err, errXboardReportUnsupported) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			c.xboardReportUnsupported.Store(true)
 		} else {
 			return err
 		}
 	}
 
-	return c.reportLegacyNodeOnlineUsers(onlineUserList)
+	return c.reportLegacyNodeOnlineUsersContext(ctx, onlineUserList)
 }
 
 // ReportUserTraffic reports the user traffic.
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 	payload := buildReportTrafficPayload(userTraffic)
 	if !c.xboardReportUnsupported.Load() {
-		if err := c.postXboardReport(payload); err == nil {
+		if err := c.postXboardReportContext(ctx, payload); err == nil {
 			return nil
 		} else if errors.Is(err, errXboardReportUnsupported) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			c.xboardReportUnsupported.Store(true)
 		} else {
 			return err
 		}
 	}
 
-	return c.reportLegacyUserTraffic(userTraffic)
+	return c.reportLegacyUserTrafficContext(ctx, userTraffic)
 }
 
 func (c *APIClient) legacyStatusPath() string {
@@ -230,6 +260,10 @@ func (c *APIClient) legacyTrafficPath() string {
 }
 
 func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.reportLegacyNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (c *APIClient) reportLegacyNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) error {
 	path := c.legacyStatusPath()
 
 	payload := map[string]any{
@@ -249,6 +283,7 @@ func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(payload).
 		ForceContentType("application/json").
 		Post(path)
@@ -258,10 +293,15 @@ func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
 }
 
 func (c *APIClient) reportLegacyNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	return c.reportLegacyNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
+
+func (c *APIClient) reportLegacyNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 	path := c.legacyAlivePath()
 	data := buildAliveMap(onlineUserList, c.NodeID)
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
@@ -271,10 +311,15 @@ func (c *APIClient) reportLegacyNodeOnlineUsers(onlineUserList *[]api.OnlineUser
 }
 
 func (c *APIClient) reportLegacyUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.reportLegacyUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) reportLegacyUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 	path := c.legacyTrafficPath()
 	data := buildTrafficMap(userTraffic)
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)

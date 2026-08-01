@@ -2,6 +2,7 @@ package panel
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestPanelAdapterRegistryPreservesMachineAliasesAndRawValidation(t *testing.
 func TestPanelAdapterRegistryHasUniqueAliasesAndFactories(t *testing.T) {
 	registry := defaultPanelAdapterRegistry()
 	seen := make(map[string]struct{})
-	var machineAliases []string
+	gotMachineAliases := make([]string, 0, 2)
 	for _, registration := range registry.registrations {
 		if registration.newClient == nil {
 			t.Fatalf("registration has nil factory: %#v", registration)
@@ -89,13 +90,37 @@ func TestPanelAdapterRegistryHasUniqueAliasesAndFactories(t *testing.T) {
 			}
 			seen[alias] = struct{}{}
 			if registration.machineMode {
-				machineAliases = append(machineAliases, alias)
+				gotMachineAliases = append(gotMachineAliases, alias)
 			}
 		}
 	}
-	sort.Strings(machineAliases)
-	want := []string{"NewV2board", "V2board"}
-	if fmt.Sprint(machineAliases) != fmt.Sprint(want) {
-		t.Fatalf("machine aliases = %v, want %v", machineAliases, want)
+	sort.Strings(gotMachineAliases)
+	wantMachineAliases := []string{"NewV2board", "V2board"}
+	if fmt.Sprint(gotMachineAliases) != fmt.Sprint(wantMachineAliases) {
+		t.Fatalf("machine aliases = %v, want %v", gotMachineAliases, wantMachineAliases)
+	}
+
+	wantAliases := map[string]bool{
+		"SSpanel":    false,
+		"SSPanel":    false,
+		"NewV2board": true,
+		"V2board":    true,
+		"PMpanel":    false,
+		"Proxypanel": false,
+		"V2RaySocks": false,
+		"GoV2Panel":  false,
+		"BunPanel":   false,
+	}
+	if len(registry.registrations) != 7 {
+		t.Fatalf("adapter registration count = %d, want 7", len(registry.registrations))
+	}
+	gotAliases := make(map[string]bool, len(seen))
+	for _, registration := range registry.registrations {
+		for _, alias := range registration.aliases {
+			gotAliases[alias] = registration.machineMode
+		}
+	}
+	if !reflect.DeepEqual(gotAliases, wantAliases) {
+		t.Fatalf("adapter alias contract = %#v, want %#v", gotAliases, wantAliases)
 	}
 }

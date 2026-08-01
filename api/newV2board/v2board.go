@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -10,7 +11,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/bitly/go-simplejson"
 	"github.com/go-resty/resty/v2"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/infra/conf"
@@ -109,17 +109,24 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig returns the optional certificate config if present in the UniProxy payload.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (c *APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if snapshot, ok := c.cachedUniProxySnapshot(); ok {
 		if cert := certConfigFromUniProxySnapshot(snapshot); cert != nil {
 			return cert, nil
 		}
 	}
 
-	snapshot, err := c.fetchUniProxySnapshot(false)
+	snapshot, err := c.fetchUniProxySnapshotContext(ctx, false)
 	if err != nil {
 		return nil, err
 	}
-	return certConfigFromUniProxySnapshot(snapshot), nil
+	return certConfigFromUniProxySnapshot(snapshot), ctx.Err()
 }
 
 // Debug set the client debug for client
@@ -131,22 +138,13 @@ func (c *APIClient) assembleURL(path string) string {
 	return c.APIHost + path
 }
 
-func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (*simplejson.Json, error) {
-	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
-		return nil, err
-	}
-
-	rtn, err := simplejson.NewJson(res.Body())
-	if err != nil {
-		return nil, fmt.Errorf("request %s returned invalid JSON", c.assembleURL(path))
-	}
-
-	return rtn, nil
-}
-
 // GetNodeInfo will pull NodeInfo Config from panel
 func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
-	server, err := c.fetchUniProxySnapshot(true)
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
+	server, err := c.fetchUniProxySnapshotContext(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +170,10 @@ func (c *APIClient) userPath() string {
 
 // GetUserList will pull user form panel
 func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 	var users []*user
 	path := c.userPath()
 
@@ -184,6 +186,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetHeader("If-None-Match", c.eTags.Get("users")).
 		ForceContentType("application/json").
 		Get(path)
@@ -201,11 +204,14 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := usersResp.Get("users").Encode()
+	usersJSON, ok, err := usersResp.field("users")
 	if err != nil {
-		return nil, fmt.Errorf("encode user list failed: %w", err)
+		return nil, fmt.Errorf("decode user list failed: %w", err)
 	}
-	if err := json.Unmarshal(b, &users); err != nil {
+	if !ok {
+		usersJSON = json.RawMessage("null")
+	}
+	if err := json.Unmarshal(usersJSON, &users); err != nil {
 		return nil, fmt.Errorf("decode user list failed: %w", err)
 	}
 	if len(users) == 0 {
@@ -241,6 +247,9 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		userList[i] = u
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("users", candidateETag)
 	return &userList, nil
 }
@@ -254,9 +263,14 @@ func (c *APIClient) aliveListPath() string {
 
 // GetAliveList implements the API interface
 func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (c *APIClient) GetAliveListContext(ctx context.Context) (aliveList map[int][]string, err error) {
 	path := c.aliveListPath()
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 
@@ -265,12 +279,18 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 		return nil, err
 	}
 
-	alive, ok := aliveResp.CheckGet("alive")
+	alive, ok, err := aliveResp.field("alive")
+	if err != nil {
+		return nil, fmt.Errorf("parse alive list from %s: %w", c.assembleURL(path), err)
+	}
 	if !ok {
 		return nil, nil
 	}
-	aliveMap, err := alive.Map()
-	if err != nil {
+	var aliveMap map[string]json.RawMessage
+	if trimmed := strings.TrimSpace(string(alive)); len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("parse alive list from %s: alive must be an object", c.assembleURL(path))
+	}
+	if err := json.Unmarshal(alive, &aliveMap); err != nil {
 		return nil, fmt.Errorf("parse alive list from %s: alive must be an object", c.assembleURL(path))
 	}
 
@@ -280,14 +300,17 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 		if err != nil || uidInt <= 0 {
 			return nil, fmt.Errorf("parse alive list from %s: invalid uid %q", c.assembleURL(path), uidStr)
 		}
-		ipList, ok := ips.([]interface{})
-		if !ok {
+		var ipList []json.RawMessage
+		if trimmed := strings.TrimSpace(string(ips)); len(trimmed) == 0 || trimmed[0] != '[' {
+			return nil, fmt.Errorf("parse alive list from %s: uid %d IPs must be an array", c.assembleURL(path), uidInt)
+		}
+		if err := json.Unmarshal(ips, &ipList); err != nil {
 			return nil, fmt.Errorf("parse alive list from %s: uid %d IPs must be an array", c.assembleURL(path), uidInt)
 		}
 		strIPs := make([]string, 0, len(ipList))
 		for index, ip := range ipList {
-			ipStr, ok := ip.(string)
-			if !ok {
+			var ipStr string
+			if err := json.Unmarshal(ip, &ipStr); err != nil {
 				return nil, fmt.Errorf("parse alive list from %s: uid %d IP %d must be a string", c.assembleURL(path), uidInt, index)
 			}
 			if host, _, found := strings.Cut(ipStr, "_"); found {
@@ -298,11 +321,21 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 		aliveData[uidInt] = strIPs
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return aliveData, nil
 }
 
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	snapshot, ok := c.cachedUniProxySnapshot()
 	if !ok {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before GetNodeRule")
@@ -312,6 +345,13 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 
 // ReportIllegal implements the API interface
 func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *[]api.DetectResult) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return api.ErrUnsupportedPanelFeature
 }
 
@@ -331,12 +371,11 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 	switch s.Network {
 	case "ws":
 		if s.NetworkSettings.Headers != nil {
-			if httpHeader, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+			extractedHost, err := transportHeaderHost(s.NetworkSettings.Headers)
+			if err != nil {
 				return nil, err
-			} else {
-				b, _ := simplejson.NewJson(httpHeader)
-				host = b.Get("Host").MustString()
 			}
+			host = extractedHost
 		}
 	case "tcp", "":
 		if s.NetworkSettings.Header != nil {
@@ -350,12 +389,11 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		serviceName = s.NetworkSettings.ServiceName
 	case "httpupgrade":
 		if s.NetworkSettings.Headers != nil {
-			if httpHeaders, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+			extractedHost, err := transportHeaderHost(s.NetworkSettings.Headers)
+			if err != nil {
 				return nil, err
-			} else {
-				b, _ := simplejson.NewJson(httpHeaders)
-				host = b.Get("Host").MustString()
 			}
+			host = extractedHost
 		}
 		if s.NetworkSettings.Host != "" {
 			host = s.NetworkSettings.Host
@@ -438,10 +476,11 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 				if path == "" {
 					path = "/"
 				}
-				h := simplejson.New()
-				h.Set("type", "http")
-				h.SetPath([]string{"request", "path"}, path)
-				header, _ = h.Encode()
+				var err error
+				header, err = marshalHTTPObfsHeader(path)
+				if err != nil {
+					return nil, err
+				}
 				host = obfsHost
 			} else if mode == "tls" {
 				return nil, fmt.Errorf("simple-obfs tls mode is not supported")
@@ -462,10 +501,11 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 				path += p
 			}
 		}
-		h := simplejson.New()
-		h.Set("type", "http")
-		h.SetPath([]string{"request", "path"}, path)
-		header, _ = h.Encode()
+		var err error
+		header, err = marshalHTTPObfsHeader(path)
+		if err != nil {
+			return nil, err
+		}
 		if host == "" {
 			host = s.ObfsSettings.Host
 		}
@@ -535,12 +575,11 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 	switch s.Network {
 	case "ws":
 		if s.NetworkSettings.Headers != nil {
-			if httpHeader, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+			extractedHost, err := transportHeaderHost(s.NetworkSettings.Headers)
+			if err != nil {
 				return nil, err
-			} else {
-				b, _ := simplejson.NewJson(httpHeader)
-				host = b.Get("Host").MustString()
 			}
+			host = extractedHost
 		}
 	case "tcp":
 		if s.NetworkSettings.Header != nil {
@@ -552,12 +591,11 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 		}
 	case "httpupgrade", "splithttp":
 		if s.NetworkSettings.Headers != nil {
-			if httpHeaders, err := s.NetworkSettings.Headers.MarshalJSON(); err != nil {
+			extractedHost, err := transportHeaderHost(s.NetworkSettings.Headers)
+			if err != nil {
 				return nil, err
-			} else {
-				b, _ := simplejson.NewJson(httpHeaders)
-				host = b.Get("Host").MustString()
 			}
+			host = extractedHost
 		}
 		if s.NetworkSettings.Host != "" {
 			host = s.NetworkSettings.Host

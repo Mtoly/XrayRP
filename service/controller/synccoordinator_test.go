@@ -17,6 +17,7 @@ type coordinatorTestExecutor struct {
 	started          chan syncActionType
 	blockedCallIndex map[int]chan struct{}
 	results          map[int]error
+	canceled         chan int
 }
 
 func newCoordinatorTestExecutor() *coordinatorTestExecutor {
@@ -26,6 +27,7 @@ func newCoordinatorTestExecutor() *coordinatorTestExecutor {
 		started:          make(chan syncActionType, 32),
 		blockedCallIndex: make(map[int]chan struct{}),
 		results:          make(map[int]error),
+		canceled:         make(chan int, 32),
 	}
 }
 
@@ -44,7 +46,7 @@ func (e *coordinatorTestExecutor) returnError(index int, err error) {
 	e.results[index] = err
 }
 
-func (e *coordinatorTestExecutor) ExecuteSyncAction(_ context.Context, action syncAction) error {
+func (e *coordinatorTestExecutor) ExecuteSyncAction(ctx context.Context, action syncAction) error {
 	e.mu.Lock()
 	callIndex := len(e.calls) + 1
 	e.calls = append(e.calls, action.Type)
@@ -59,7 +61,12 @@ func (e *coordinatorTestExecutor) ExecuteSyncAction(_ context.Context, action sy
 	e.started <- action.Type
 
 	if release != nil {
-		<-release
+		select {
+		case <-release:
+		case <-ctx.Done():
+			e.canceled <- callIndex
+			result = ctx.Err()
+		}
 	}
 
 	e.mu.Lock()
@@ -196,37 +203,40 @@ func TestSyncCoordinator_FailureStillRequeuesDirtyAction(t *testing.T) {
 	}
 }
 
-func TestSyncCoordinator_StopWaitsForFailedInflightAction(t *testing.T) {
+func TestSyncCoordinator_StopCancelsInflightActionWithoutPublishingLateResult(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
-	executor.returnError(1, errors.New("execution failed"))
 	release := executor.blockCall(1)
 	state := newSyncExecutionState()
 	coordinator := newSyncCoordinatorWithResultHandling(executor, state, nil)
-	coordinator.Submit(newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "stop_failure"}))
+	coordinator.Submit(newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "stop_cancel"}))
 	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncUsers)
 
-	stopped := make(chan struct{})
+	stopped := make(chan error, 1)
 	go func() {
-		coordinator.Stop()
-		close(stopped)
+		stopped <- coordinator.StopContext(context.Background())
 	}()
-	select {
-	case <-stopped:
-		t.Fatal("Stop returned before the inflight action completed")
-	case <-time.After(20 * time.Millisecond):
-	}
 
-	close(release)
 	select {
-	case <-stopped:
+	case call := <-executor.canceled:
+		if call != 1 {
+			t.Fatalf("canceled call = %d, want 1", call)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Stop did not return after the failed inflight action completed")
+		t.Fatal("inflight action did not observe coordinator cancellation")
 	}
-	if snapshot := state.Snapshot(); snapshot.LastError == nil || snapshot.ConsecutiveFailures != 1 {
-		t.Fatalf("failed inflight result was not recorded: %+v", snapshot)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("StopContext() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopContext did not join the canceled inflight action")
+	}
+	close(release)
+	if snapshot := state.Snapshot(); snapshot.LastAttemptAt.IsZero() == false || snapshot.LastError != nil || snapshot.ConsecutiveFailures != 0 {
+		t.Fatalf("canceled inflight result was published: %+v", snapshot)
 	}
 }
-
 func TestSyncCoordinator_ObserverPanicDoesNotBreakCoordinator(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	observed := make(chan syncActionType, 2)
@@ -273,7 +283,7 @@ func TestSyncCoordinator_ObserverPanicDoesNotBreakCoordinator(t *testing.T) {
 	}
 }
 
-func TestSyncCoordinator_BlockingObserverDoesNotBlockProgressOrStop(t *testing.T) {
+func TestSyncCoordinator_BlockingObserverHonorsStopDeadlineAndCanBeJoined(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	observerEntered := make(chan struct{})
 	releaseObserver := make(chan struct{})
@@ -297,15 +307,29 @@ func TestSyncCoordinator_BlockingObserverDoesNotBlockProgressOrStop(t *testing.T
 	waitForCoordinatorAction(t, executor.started, syncActionTypeSyncNodeConfig)
 	waitForCoordinatorIdle(t, coordinator)
 
-	stopped := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan error, 1)
 	go func() {
-		coordinator.Stop()
-		close(stopped)
+		stopped <- coordinator.StopContext(ctx)
 	}()
 	select {
-	case <-stopped:
+	case <-coordinator.done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Stop was blocked by observer")
+		t.Fatal("coordinator execution loop did not stop")
+	}
+	select {
+	case err := <-stopped:
+		t.Fatalf("StopContext returned before the observer joined: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("StopContext error = %v, want context cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopContext did not honor its cancellation deadline")
 	}
 
 	close(releaseObserver)
@@ -314,8 +338,10 @@ func TestSyncCoordinator_BlockingObserverDoesNotBlockProgressOrStop(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("observer did not return after release")
 	}
+	if err := coordinator.StopContext(context.Background()); err != nil {
+		t.Fatalf("StopContext retry error = %v", err)
+	}
 }
-
 func TestSyncCoordinator_DedupeQueuedActions(t *testing.T) {
 	executor := newCoordinatorTestExecutor()
 	releaseFirst := executor.blockCall(1)

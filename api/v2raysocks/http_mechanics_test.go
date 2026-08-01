@@ -14,6 +14,7 @@ import (
 	"github.com/go-resty/resty/v2"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/internal/buildinfo"
 )
 
 func TestNewAppliesSharedHTTPMechanics(t *testing.T) {
@@ -40,8 +41,8 @@ func TestGetUserListPreservesAuthenticationAndETagContract(t *testing.T) {
 			query.Get("act") != "user" || query.Get("node_type") != "v2ray" {
 			t.Errorf("unexpected query: %s", r.URL.RawQuery)
 		}
-		if got := r.Header.Get("User-Agent"); got != "XrayR/0.9.6" {
-			t.Errorf("User-Agent = %q, want XrayR/0.9.6", got)
+		if got := r.Header.Get("User-Agent"); got != buildinfo.UserAgent() {
+			t.Errorf("User-Agent = %q, want %q", got, buildinfo.UserAgent())
 		}
 
 		switch attempt {

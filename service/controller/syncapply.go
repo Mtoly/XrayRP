@@ -55,29 +55,55 @@ type syncApplyHooks struct {
 
 type nodeRuntimeStateApplyModule struct {
 	controller *Controller
+	ctx        context.Context
 	hooks      syncApplyHooks
 }
 
-func newNodeRuntimeStateApplyModule(controller *Controller) nodeRuntimeStateApplyModule {
+func newNodeRuntimeStateApplyModule(controller *Controller, contexts ...context.Context) nodeRuntimeStateApplyModule {
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
 	return nodeRuntimeStateApplyModule{
 		controller: controller,
-		hooks:      controller.resolveSyncApplyHooks(),
+		ctx:        ctx,
+		hooks:      controller.resolveSyncApplyHooks(ctx),
 	}
 }
 
 func (c *Controller) ExecuteSyncAction(ctx context.Context, action syncAction) error {
-	return newNodeRuntimeStateApplyModule(c).Apply(ctx, action)
+	return newNodeRuntimeStateApplyModule(c, ctx).Apply(ctx, action)
 }
 
-func (a nodeRuntimeStateApplyModule) Apply(_ context.Context, action syncAction) error {
-	snapshot, err := a.fetchSyncApplySnapshot(action)
+func (a nodeRuntimeStateApplyModule) Apply(ctx context.Context, action syncAction) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	snapshot, err := a.fetchSyncApplySnapshotContext(ctx, action)
 	if err != nil {
 		return err
 	}
-	return a.applySyncSnapshot(snapshot)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return a.applySyncSnapshotContext(ctx, snapshot)
+}
+
+func (a nodeRuntimeStateApplyModule) operationContext() context.Context {
+	if a.ctx == nil {
+		return context.Background()
+	}
+	return a.ctx
 }
 
 func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (syncApplySnapshot, error) {
+	return a.fetchSyncApplySnapshotContext(a.operationContext(), action)
+}
+
+func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshotContext(ctx context.Context, action syncAction) (syncApplySnapshot, error) {
 	c := a.controller
 	currentNodeInfo, _, currentUserList := c.getStateSnapshot()
 	snapshot := syncApplySnapshot{Action: action}
@@ -115,7 +141,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchNode {
-		nodeInfo, err := c.apiClient.GetNodeInfo()
+		nodeInfo, err := api.GetNodeInfoContext(ctx, c.apiClient)
 		if err != nil {
 			if errors.Is(err, api.ErrNodeNotModified) {
 				snapshot.NodeInfo = currentNodeInfo
@@ -132,7 +158,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchUsers {
-		userList, err := c.apiClient.GetUserList()
+		userList, err := api.GetUserListContext(ctx, c.apiClient)
 		if err != nil {
 			if errors.Is(err, api.ErrUserNotModified) {
 				snapshot.UserList = currentUserList
@@ -145,7 +171,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 	}
 
 	if fetchRules && !c.config.DisableGetRule {
-		ruleList, err := c.apiClient.GetNodeRule()
+		ruleList, err := api.GetNodeRuleContext(ctx, c.apiClient)
 		if err != nil {
 			if errors.Is(err, api.ErrRuleNotModified) {
 				rules := c.getAppliedRuleList()
@@ -163,7 +189,7 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 		if !ok {
 			return snapshot, nil
 		}
-		certConfig, err := provider.GetXrayRCertConfig()
+		certConfig, err := api.GetXrayRCertConfigContext(ctx, provider)
 		if err != nil {
 			if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
 				return snapshot, err
@@ -178,6 +204,13 @@ func (a nodeRuntimeStateApplyModule) fetchSyncApplySnapshot(action syncAction) (
 }
 
 func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapshot) error {
+	return a.applySyncSnapshotContext(a.operationContext(), snapshot)
+}
+
+func (a nodeRuntimeStateApplyModule) applySyncSnapshotContext(ctx context.Context, snapshot syncApplySnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c := a.controller
 	hooks := a.hooks
 	if hooks.beforeReloadLock != nil {
@@ -303,7 +336,7 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 			return rollbackPendingNode(err)
 		}
 	}
-	if err := c.applyBaseConfig(snapshot.BaseConfig); err != nil {
+	if err := c.applyBaseConfigContext(ctx, snapshot.BaseConfig); err != nil {
 		return rollbackPendingNode(err)
 	}
 
@@ -332,6 +365,10 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshot(snapshot syncApplySnapsho
 			return rollbackPendingNode(err)
 		}
 		publishUserState = nodeChanged || snapshot.UserList != nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return rollbackPendingNode(err)
 	}
 
 	if pendingNodePublication {
@@ -893,10 +930,10 @@ func (a nodeRuntimeStateApplyModule) cleanupRuntimeTagViaController(nodeInfo *ap
 		return nil
 	}
 	var cleanupErrs []error
-	if err := ignoreNoClue(a.controller.removeInbound(tag)); err != nil {
+	if err := ignoreNoClue(a.controller.removeInboundContext(a.operationContext(), tag)); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove inbound %s: %w", tag, err))
 	}
-	if err := ignoreNoClue(a.controller.removeOutbound(tag)); err != nil {
+	if err := ignoreNoClue(a.controller.removeOutboundContext(a.operationContext(), tag)); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove outbound %s: %w", tag, err))
 	}
 	return errors.Join(cleanupErrs...)
@@ -937,19 +974,29 @@ func (c *Controller) restoreInboundLimiter(tag string, snapshot *limiter.Inbound
 	return c.dispatcher.Limiter.RestoreInboundLimiterState(tag, snapshot)
 }
 
-func (c *Controller) resolveSyncApplyHooks() syncApplyHooks {
+func (c *Controller) resolveSyncApplyHooks(contexts ...context.Context) syncApplyHooks {
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
 	hooks := c.syncApplyHooks
 	if hooks.runtime.cleanupTag == nil {
-		hooks.runtime.cleanupTag = nodeRuntimeStateApplyModule{controller: c}.cleanupRuntimeTagViaController
+		hooks.runtime.cleanupTag = nodeRuntimeStateApplyModule{controller: c, ctx: ctx}.cleanupRuntimeTagViaController
 	}
 	if hooks.runtime.addTag == nil {
-		hooks.runtime.addTag = c.addNewTagWithConfig
+		hooks.runtime.addTag = func(nodeInfo *api.NodeInfo, tag string, config *Config) error {
+			return c.addNewTagWithConfigContext(ctx, nodeInfo, tag, config)
+		}
 	}
 	if hooks.runtime.addUsers == nil {
-		hooks.runtime.addUsers = c.addNewUserWithConfig
+		hooks.runtime.addUsers = func(users *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
+			return c.addNewUserWithConfigContext(ctx, users, nodeInfo, tag, config)
+		}
 	}
 	if hooks.runtime.removeUsers == nil {
-		hooks.runtime.removeUsers = c.removeUsers
+		hooks.runtime.removeUsers = func(users []string, tag string) error {
+			return c.removeUsersContext(ctx, users, tag)
+		}
 	}
 	if hooks.limiter.addInbound == nil {
 		hooks.limiter.addInbound = c.AddInboundLimiter

@@ -5,6 +5,11 @@ import "github.com/Mtoly/XrayRP/api"
 // WrapAPIWithReporter retains the original public wrapper contract. Machine
 // construction uses WrapMachineAPIWithReporter so incomplete capability sets
 // fail explicitly instead of entering the runtime.
+//
+// Deprecated: use WrapMachineAPIWithReporter for machine runtimes. The
+// replacement requires api.WSCapable, api.WSEndpointDiscoverer,
+// api.BaseConfigProvider, api.CertConfigProvider, and api.AliveListProvider,
+// and returns an error when any capability is missing.
 func WrapAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) PanelClient {
 	if apiClient == nil || reporter == nil || nodeID <= 0 {
 		return apiClient
@@ -17,6 +22,9 @@ func WrapAPIWithReporter(apiClient PanelClient, nodeID int, reporter any) PanelC
 	return preservePanelCapabilities(wrapped, apiClient)
 }
 
+// Deprecated: use WrapMachineAPIWithStatusReporter for machine runtimes. The
+// replacement validates the complete machine capability set and returns an
+// error instead of preserving a partial capability set.
 func WrapAPIWithStatusReporter(apiClient PanelClient, nodeID int, reporter NodeStatusReporter) PanelClient {
 	return WrapAPIWithReporter(apiClient, nodeID, reporter)
 }

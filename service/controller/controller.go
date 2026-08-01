@@ -24,6 +24,7 @@ import (
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
 	"github.com/Mtoly/XrayRP/internal/managednode"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 type PanelClient interface {
@@ -59,6 +60,10 @@ type Controller struct {
 	clientInfo                     api.ClientInfo
 	apiClient                      PanelClient
 	reloadMu                       sync.Mutex
+	lifecycleMu                    sync.Mutex
+	lifecycleState                 controllerLifecycleState
+	lifecycleErr                   error
+	ownedRuntime                   controllerRuntimeOwnership
 	periodicMu                     sync.Mutex
 	periodicJoinWG                 sync.WaitGroup
 	periodicGeneration             uint64
@@ -81,14 +86,16 @@ type Controller struct {
 	startAt                        time.Time
 	logger                         *log.Entry
 	syncCoordinator                syncCoordinatorLifecycle
+	wsRuntimeMu                    sync.RWMutex
 	wsRuntime                      wsRuntimeLifecycle
 	deviceReportState              *deviceReportState
 	syncExecutionState             *syncExecutionState
+	health                         service.RuntimeHealthState
 	beforeUserMonitorLimiterUpdate func()
 	prepareRenewal                 prepareCertificateRenewalFunc
 	newPeriodicTask                periodicTaskFactory
 	syncCoordinatorFactory         func(syncActionExecutor) syncCoordinatorLifecycle
-	wsRuntimeFactory               func(syncActionSubmitter) (wsRuntimeLifecycle, error)
+	wsRuntimeFactory               func(context.Context, syncActionSubmitter) (wsRuntimeLifecycle, error)
 }
 
 type periodicTask = controllerPeriodicTask
@@ -145,7 +152,7 @@ func New(server *core.Instance, apiClient PanelClient, config *Config, panelType
 	controller.syncCoordinatorFactory = func(executor syncActionExecutor) syncCoordinatorLifecycle {
 		return newSyncCoordinatorWithResultHandling(executor, controller.syncExecutionState, controller.logSyncExecutionResult)
 	}
-	controller.wsRuntimeFactory = controller.newConfiguredWSRuntime
+	controller.wsRuntimeFactory = controller.newConfiguredWSRuntimeContext
 
 	return controller
 }
@@ -156,6 +163,12 @@ func (c *Controller) recordSyncExecutionResult(action syncAction, err error) {
 	}
 	if c.syncExecutionState != nil {
 		c.syncExecutionState.Record(action, err)
+	}
+	if err != nil {
+		c.health.RecordFailure(service.FailureStageSync, time.Now())
+	} else {
+		c.health.RecordSuccessfulSync(time.Now())
+		c.refreshCertificateExpiry()
 	}
 	c.logSyncExecutionResult(action, err)
 }
@@ -194,22 +207,22 @@ func (c *Controller) buildSyncCoordinator() syncCoordinatorLifecycle {
 	return c.syncCoordinatorFactory(c)
 }
 
-func (c *Controller) buildWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+func (c *Controller) buildWSRuntime(ctx context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
 	if c.wsRuntimeFactory == nil {
 		return nil, errors.New("controller: websocket runtime factory not configured")
 	}
-	return c.wsRuntimeFactory(submitter)
+	return c.wsRuntimeFactory(ctx, submitter)
 }
 
 type WSEventRuntimeFactory func(WSEventSubmitter) (WSRuntimeLifecycle, error)
 
 func (c *Controller) SetWSEventRuntimeFactory(factory WSEventRuntimeFactory) {
 	if factory == nil {
-		c.wsRuntimeFactory = c.newConfiguredWSRuntime
+		c.wsRuntimeFactory = c.newConfiguredWSRuntimeContext
 		return
 	}
 
-	c.wsRuntimeFactory = func(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	c.wsRuntimeFactory = func(_ context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
 		return factory(wsEventSubmitter{submitter: submitter})
 	}
 }
@@ -287,21 +300,30 @@ func (c *Controller) ensureDeviceReportState() *deviceReportState {
 }
 
 func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	c.reportOnlineDevicesContext(ctx, tag, onlineDevice)
+}
+
+func (c *Controller) reportOnlineDevicesContext(ctx context.Context, tag string, onlineDevice *[]api.OnlineUser) {
 	if reporter, ok := c.deviceReporter(); ok && deviceReporterReady(reporter) {
 		state := c.ensureDeviceReportState()
 		if devices, pending, changed := state.PrepareChangedReport(onlineDevice); changed {
+			if err := ctx.Err(); err != nil {
+				return
+			}
 			if err := reporter.ReportDevices(devices); err != nil {
 				if c.logger != nil {
 					c.logger.WithField("tag", tag).Print(err)
 				}
-			} else {
+			} else if ctx.Err() == nil {
 				state.CommitChangedReport(pending)
 			}
 		}
 	}
 
 	if onlineDevice != nil && len(*onlineDevice) > 0 {
-		if err := c.apiClient.ReportNodeOnlineUsers(onlineDevice); err != nil {
+		if err := api.ReportNodeOnlineUsersContext(ctx, c.apiClient, onlineDevice); err != nil {
 			c.logger.Print(err)
 		} else {
 			c.logger.Printf("Report %d online users", len(*onlineDevice))
@@ -310,7 +332,7 @@ func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineU
 }
 
 func (c *Controller) deviceReporter() (controllerDeviceReporter, bool) {
-	if reporter, ok := c.wsRuntime.(controllerDeviceReporter); ok {
+	if reporter, ok := c.currentWSRuntime().(controllerDeviceReporter); ok {
 		return reporter, true
 	}
 	if reporter, ok := c.apiClient.(controllerNodeDeviceReporter); ok {
@@ -352,6 +374,10 @@ func (c *Controller) shouldStartWSRuntime() bool {
 }
 
 func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	return c.newConfiguredWSRuntimeContext(context.Background(), submitter)
+}
+
+func (c *Controller) newConfiguredWSRuntimeContext(ctx context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
 	capable, ok := c.apiClient.(api.WSCapable)
 	if !ok {
 		return nil, api.ErrUnsupportedPanelFeature
@@ -360,7 +386,7 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 	if wsConfig == nil {
 		return nil, errors.New("controller: websocket config unavailable")
 	}
-	endpoint, err := resolveWSEndpoint(c.apiClient, wsConfig, c.config.WebSocketConfig)
+	endpoint, err := resolveWSEndpointContext(ctx, c.apiClient, wsConfig, c.config.WebSocketConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +402,10 @@ func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRu
 }
 
 func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	return resolveWSEndpointContext(context.Background(), apiClient, wsConfig, runtimeConfig)
+}
+
+func resolveWSEndpointContext(ctx context.Context, apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
 	if wsConfig == nil {
 		return "", errors.New("controller: websocket config unavailable")
 	}
@@ -384,7 +414,7 @@ func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *Web
 	}
 
 	if discoverer, ok := apiClient.(api.WSEndpointDiscoverer); ok {
-		if endpoint, err := discoverer.DiscoverWSEndpoint(); err == nil && strings.TrimSpace(endpoint) != "" {
+		if endpoint, err := api.DiscoverWSEndpointContext(ctx, discoverer); err == nil && strings.TrimSpace(endpoint) != "" {
 			if err := validateDiscoveredWSEndpoint(wsConfig.APIHost, endpoint); err != nil {
 				return "", err
 			}
@@ -513,119 +543,172 @@ func BuildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (st
 	return parsed.String(), nil
 }
 
-// Start implement the Start() function of the service interface
+// Start implement the Start() function of the service interface.
 func (c *Controller) Start() error {
-	c.clientInfo = c.apiClient.Describe()
-	hooks := c.resolveSyncApplyHooks()
-	// First fetch Node Info
-	newNodeInfo, err := c.apiClient.GetNodeInfo()
-	if err != nil {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return c.StartContext(ctx)
+}
+
+func (c *Controller) StartContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultStartTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := c.beginLifecycleStart(); err != nil {
+		return err
+	}
+	clientInfo := c.apiClient.Describe()
+	hooks := c.resolveSyncApplyHooks(ctx)
+	ownership := controllerRuntimeOwnership{}
+	fail := func(primary error) error {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		defer cleanupCancel()
+		return c.failLifecycleStartContext(cleanupCtx, primary, ownership, hooks)
+	}
+
+	newNodeInfo, err := api.GetNodeInfoContext(ctx, c.apiClient)
+	if err != nil {
+		return fail(err)
+	}
+	if newNodeInfo == nil {
+		return fail(errors.New("controller: panel returned nil node info"))
 	}
 	if newNodeInfo.Port == 0 || newNodeInfo.Port > 65535 {
-		return fmt.Errorf("invalid server port: %d, must be 1-65535", newNodeInfo.Port)
+		return fail(fmt.Errorf("invalid server port: %d, must be 1-65535", newNodeInfo.Port))
 	}
-	tag := c.buildNodeTagFrom(newNodeInfo)
-	c.setNodeState(newNodeInfo, tag)
+	appliedNodeInfo := normalizeNodeInfo(newNodeInfo).snapshot()
+	tag := c.buildNodeTagFrom(appliedNodeInfo)
+	ownership.nodeInfo = appliedNodeInfo
+	ownership.tag = tag
 
-	// Add new tag
-	err = hooks.runtime.addTag(newNodeInfo, tag, c.config)
+	ownership.runtime = true
+	if err := hooks.runtime.addTag(appliedNodeInfo, tag, c.config); err != nil {
+		return fail(err)
+	}
+
+	userInfo, err := api.GetUserListContext(ctx, c.apiClient)
 	if err != nil {
-		c.logger.Panic(err)
-		return err
+		return fail(err)
 	}
-	// Update user
-	userInfo, err := c.apiClient.GetUserList()
-	if err != nil {
-		return err
+	if userInfo == nil {
+		return fail(errors.New("controller: panel returned nil user list"))
 	}
-
-	// sync controller userList
-	c.setUserList(userInfo)
-
-	err = hooks.runtime.addUsers(userInfo, newNodeInfo, tag, c.config)
-	if err != nil {
-		return err
+	appliedUsers := cloneSlice(*userInfo)
+	userInfo = &appliedUsers
+	if err := hooks.runtime.addUsers(userInfo, appliedNodeInfo, tag, c.config); err != nil {
+		return fail(err)
 	}
 
-	// Add Limiter
-	if err := hooks.limiter.addInbound(tag, newNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
-		c.logger.Print(err)
+	ownership.limiter = true
+	if err := hooks.limiter.addInbound(tag, appliedNodeInfo.SpeedLimit, userInfo, c.config.GlobalDeviceLimitConfig); err != nil {
+		return fail(err)
 	}
 
-	// Add Rule Manager
+	var appliedRules []api.DetectRule
 	if !c.config.DisableGetRule {
-		if ruleList, err := c.apiClient.GetNodeRule(); err != nil {
-			c.logger.Printf("Get rule list filed: %s", err)
-		} else if ruleList != nil {
-			if err := hooks.updateRule(tag, *ruleList); err != nil {
-				c.logger.Print(err)
-			} else {
-				c.setAppliedRuleState(tag, *ruleList)
+		ruleList, err := api.GetNodeRuleContext(ctx, c.apiClient)
+		if err != nil {
+			return fail(err)
+		}
+		if ruleList != nil {
+			appliedRules = cloneDetectRules(*ruleList)
+			ownership.rules = true
+			if err := hooks.updateRule(tag, appliedRules); err != nil {
+				return fail(err)
 			}
 		}
 	}
 
-	// Init AutoSpeedLimitConfig
 	if c.config.AutoSpeedLimitConfig == nil {
 		c.config.AutoSpeedLimitConfig = &AutoSpeedLimitConfig{0, 0, 0, 0}
-	}
-	if c.config.AutoSpeedLimitConfig.Limit > 0 {
-		c.limitedUsers = make(map[api.UserInfo]LimitInfo)
-		c.warnedUsers = make(map[api.UserInfo]int)
 	}
 
 	c.syncCoordinator = c.buildSyncCoordinator()
 	if c.syncCoordinator == nil {
-		return errors.New("controller: sync coordinator not configured")
+		return fail(errors.New("controller: sync coordinator not configured"))
 	}
+	ownership.syncCoordinator = true
 
 	if c.shouldStartWSRuntime() {
-		wsRuntime, err := c.buildWSRuntime(c.syncCoordinator)
+		wsRuntime, err := c.buildWSRuntime(ctx, c.syncCoordinator)
 		if err != nil {
-			c.syncCoordinator.Stop()
-			c.syncCoordinator = nil
-			return err
+			return fail(err)
 		}
-		c.wsRuntime = wsRuntime
-		c.wsRuntime.Start()
+		c.setWSRuntime(wsRuntime)
+		ownership.websocket = true
+		if err := startWSRuntimeContext(ctx, wsRuntime); err != nil {
+			return fail(err)
+		}
 	}
 
-	// Add periodic tasks
-	if err := c.startControllerPeriodicTasks(newNodeInfo); err != nil {
-		return err
+	ownership.periodic = true
+	if err := c.startControllerPeriodicTasksContext(ctx, appliedNodeInfo); err != nil {
+		return fail(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
 	}
 
+	candidateState := nodeRuntimeState{
+		node:        normalizeNodeInfo(appliedNodeInfo),
+		tag:         tag,
+		userListSet: true,
+		userList:    cloneSlice(appliedUsers),
+	}
+	if ownership.rules {
+		candidateState.appliedRuleTag = tag
+		candidateState.appliedRuleList = cloneDetectRules(appliedRules)
+	}
+	overlay := limiterUserOverlayCandidate{}
+	if c.config.AutoSpeedLimitConfig.Limit > 0 {
+		overlay.limitedUsers = make(map[api.UserInfo]LimitInfo)
+		overlay.warnedUsers = make(map[api.UserInfo]int)
+	}
+	c.lifecycleMu.Lock()
+	c.clientInfo = clientInfo
+	c.lifecycleMu.Unlock()
+	c.commitRuntimeStateWithUserOverlay(candidateState, overlay)
+	c.publishLifecycleRunning(ownership)
+	c.health.RecordSuccessfulSync(time.Now())
+	c.refreshCertificateExpiry()
 	return nil
 }
 
-// Close implement the Close() function of the service interface
+// Close implement the Close() function of the service interface.
 func (c *Controller) Close() error {
-	var closeErrors []error
-	if err := c.closePeriodicTasks(); err != nil {
-		closeErrors = append(closeErrors, err)
-	}
-
-	if c.wsRuntime != nil {
-		c.wsRuntime.Stop()
-		c.wsRuntime = nil
-	}
-	if c.syncCoordinator != nil {
-		c.syncCoordinator.Stop()
-		c.syncCoordinator = nil
-	}
-
-	return errors.Join(closeErrors...)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return c.CloseContext(ctx)
 }
 
+func (c *Controller) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
+	ownership, shouldCleanup, err := c.beginLifecycleClose()
+	if err != nil || !shouldCleanup {
+		return err
+	}
+	hooks := c.resolveSyncApplyHooks(ctx)
+	closeErr := c.cleanupControllerOwnershipContext(ctx, &ownership, hooks)
+	c.finishLifecycleClose(ownership, closeErr)
+	return closeErr
+}
 func (c *Controller) nodeInfoMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.nodeInfoMonitorContext(ctx)
+}
+
+func (c *Controller) nodeInfoMonitorContext(ctx context.Context) error {
 	// delay to start
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
 	action := syncActionFromPollingTick(time.Now())
-	if err := c.submitSyncAction(action); err != nil {
+	if err := c.submitSyncActionContext(ctx, action); err != nil {
 		c.logger.Print(err)
 		return nil
 	}
@@ -648,7 +731,14 @@ func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error
 	return c.addNewTagWithConfig(newNodeInfo, tag, c.config)
 }
 
-func (c *Controller) addNewTagWithConfig(newNodeInfo *api.NodeInfo, tag string, config *Config) (err error) {
+func (c *Controller) addNewTagWithConfig(newNodeInfo *api.NodeInfo, tag string, config *Config) error {
+	return c.addNewTagWithConfigContext(context.Background(), newNodeInfo, tag, config)
+}
+
+func (c *Controller) addNewTagWithConfigContext(ctx context.Context, newNodeInfo *api.NodeInfo, tag string, config *Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	node := normalizeNodeInfo(newNodeInfo)
 	inbound := node.inboundView()
 	outbound := node.outboundView()
@@ -656,88 +746,73 @@ func (c *Controller) addNewTagWithConfig(newNodeInfo *api.NodeInfo, tag string, 
 	nodeType := inbound.listener.nodeType
 
 	// Socks/HTTP inbounds are built with users embedded (no UserManager support).
-	// Skip here — the inbound will be created by rebuildInboundWithUsers() in addNewUser().
+	// Skip here; addNewUserWithConfigContext creates the inbound with its users.
 	if nodeType == "Socks" || nodeType == "HTTP" {
-		// Still need the outbound for routing
 		outBoundConfig, err := buildOutbound(config, outbound, tag)
 		if err != nil {
 			return err
 		}
-		return c.addOutbound(outBoundConfig, tag, routePolicy)
+		return c.addOutboundContext(ctx, outBoundConfig, tag, routePolicy)
 	}
 
-	if nodeType != "Shadowsocks-Plugin" {
-		inboundConfig, err := buildInbound(config, inbound, tag)
-		if err != nil {
-			return err
-		}
-		err = c.addInbound(inboundConfig)
-		if err != nil {
-
-			return err
-		}
-		outBoundConfig, err := buildOutbound(config, outbound, tag)
-		if err != nil {
-
-			return err
-		}
-		err = c.addOutbound(outBoundConfig, tag, routePolicy)
-		if err != nil {
-
-			return err
-		}
-
-	} else {
-		return c.addInboundForSSPlugin(node, tag, config)
+	if nodeType == "Shadowsocks-Plugin" {
+		return c.addInboundForSSPluginContext(ctx, node, tag, config)
 	}
-	return nil
+
+	inboundConfig, err := buildInbound(config, inbound, tag)
+	if err != nil {
+		return err
+	}
+	if err := c.addInboundContext(ctx, inboundConfig); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	outBoundConfig, err := buildOutbound(config, outbound, tag)
+	if err != nil {
+		return err
+	}
+	return c.addOutboundContext(ctx, outBoundConfig, tag, routePolicy)
 }
 
-func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string, config *Config) (err error) {
-	// Shadowsocks-Plugin require a separate inbound for other TransportProtocol likes: ws, grpc
+func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string, config *Config) error {
+	return c.addInboundForSSPluginContext(context.Background(), node, tag, config)
+}
+
+func (c *Controller) addInboundForSSPluginContext(ctx context.Context, node nodeValue, tag string, config *Config) error {
 	views := node.shadowsocksPluginViews()
-	// Add a regular Shadowsocks inbound and outbound
 	inboundConfig, err := buildInbound(config, views.regularInbound, tag)
 	if err != nil {
 		return err
 	}
-	err = c.addInbound(inboundConfig)
-	if err != nil {
-
+	if err := c.addInboundContext(ctx, inboundConfig); err != nil {
 		return err
 	}
 	outBoundConfig, err := buildOutbound(config, views.regularOutbound, tag)
 	if err != nil {
-
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, tag, views.routing)
-	if err != nil {
-
+	if err := c.addOutboundContext(ctx, outBoundConfig, tag, views.routing); err != nil {
 		return err
 	}
-	// Add an inbound for upper streaming protocol
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	dokodemoTag := fmt.Sprintf("dokodemo-door_%s+1", tag)
 	inboundConfig, err = buildInbound(config, views.bridgeInbound, dokodemoTag)
 	if err != nil {
 		return err
 	}
-	err = c.addInbound(inboundConfig)
-	if err != nil {
-
+	if err := c.addInboundContext(ctx, inboundConfig); err != nil {
 		return err
 	}
 	outBoundConfig, err = buildOutbound(config, views.bridgeOutbound, dokodemoTag)
 	if err != nil {
-
 		return err
 	}
-	err = c.addOutbound(outBoundConfig, dokodemoTag, views.routing)
-	if err != nil {
-
-		return err
-	}
-	return nil
+	return c.addOutboundContext(ctx, outBoundConfig, dokodemoTag, views.routing)
 }
 
 // rebuildInboundWithUsers rebuilds the socks/http inbound with all users embedded.
@@ -747,33 +822,43 @@ func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo 
 }
 
 func (c *Controller) rebuildInboundWithUsersWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
-	// Remove existing inbound if present (ignore errors for first-time setup)
-	_ = c.removeInbound(tag)
+	return c.rebuildInboundWithUsersWithConfigContext(context.Background(), userInfo, nodeInfo, tag, config)
+}
 
-	// Build inbound with all users
+func (c *Controller) rebuildInboundWithUsersWithConfigContext(ctx context.Context, userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
+	// Remove existing inbound if present (ignore errors for first-time setup).
+	_ = c.removeInboundContext(ctx, tag)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	inboundConfig, err := buildInboundWithUsers(config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
 	if err != nil {
 		return err
 	}
-	err = c.addInbound(inboundConfig)
-	if err != nil {
+	if err := c.addInboundContext(ctx, inboundConfig); err != nil {
 		return err
 	}
 
 	c.logger.Printf("Rebuilt %s inbound with %d users", nodeInfo.NodeType, len(*userInfo))
 	return nil
 }
-
 func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (err error) {
 	return c.addNewUserWithConfig(userInfo, nodeInfo, tag, c.config)
 }
 
-func (c *Controller) addNewUserWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) (err error) {
+func (c *Controller) addNewUserWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
+	return c.addNewUserWithConfigContext(context.Background(), userInfo, nodeInfo, tag, config)
+}
+
+func (c *Controller) addNewUserWithConfigContext(ctx context.Context, userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	node := normalizeNodeInfo(nodeInfo).userView()
 
-	// Socks/HTTP don't support proxy.UserManager — rebuild entire inbound with users embedded
+	// Socks/HTTP don't support proxy.UserManager; rebuild the inbound with users embedded.
 	if node.nodeType == "Socks" || node.nodeType == "HTTP" {
-		return c.rebuildInboundWithUsersWithConfig(userInfo, nodeInfo, tag, config)
+		return c.rebuildInboundWithUsersWithConfigContext(ctx, userInfo, nodeInfo, tag, config)
 	}
 
 	users := make([]*protocol.User, 0)
@@ -794,14 +879,12 @@ func (c *Controller) addNewUserWithConfig(userInfo *[]api.UserInfo, nodeInfo *ap
 		return fmt.Errorf("unsupported node type: %s", node.nodeType)
 	}
 
-	err = c.addUsers(users, tag)
-	if err != nil {
+	if err := c.addUsersContext(ctx, users, tag); err != nil {
 		return err
 	}
 	c.logger.Printf("Added %d new users", len(*userInfo))
 	return nil
 }
-
 func nodeStateChanged(currentNodeInfo, newNodeInfo *api.NodeInfo) bool {
 	return !normalizeNodeInfo(currentNodeInfo).equal(normalizeNodeInfo(newNodeInfo))
 }
@@ -902,7 +985,16 @@ func (c *Controller) updateInboundLimiterFromUserMonitor(tag string, users *[]ap
 	return c.UpdateInboundLimiter(tag, users)
 }
 
-func (c *Controller) userInfoMonitor() (err error) {
+func (c *Controller) userInfoMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.userInfoMonitorContext(ctx)
+}
+
+func (c *Controller) userInfoMonitorContext(ctx context.Context) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// delay to start
 	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
 		return nil
@@ -913,7 +1005,7 @@ func (c *Controller) userInfoMonitor() (err error) {
 	if err != nil {
 		c.logger.Print(err)
 	}
-	err = c.apiClient.ReportNodeStatus(
+	err = api.ReportNodeStatusContext(ctx, c.apiClient,
 		&api.NodeStatus{
 			CPU:    CPU,
 			Mem:    Mem,
@@ -1031,33 +1123,38 @@ func (c *Controller) userInfoMonitor() (err error) {
 	c.reloadMu.Unlock()
 
 	if len(userTraffic) > 0 {
+		c.health.SetTrafficBacklog(len(userTraffic))
 		c.logger.Printf("Reporting %d user(s) traffic to panel; example: UID=%d up=%d down=%d", len(userTraffic), userTraffic[0].UID, userTraffic[0].Upload, userTraffic[0].Download)
 		var reportErr error
 		if !c.config.DisableUploadTraffic {
-			reportErr = c.apiClient.ReportUserTraffic(&userTraffic)
+			reportErr = api.ReportUserTrafficContext(ctx, c.apiClient, &userTraffic)
 		}
 		// If report traffic error, not clear the traffic
 		if reportErr != nil {
 			c.logger.Print(reportErr)
+			c.health.RecordFailure(service.FailureStageReport, time.Now())
 		} else {
 			c.resetTraffic(&upCounterList, &downCounterList)
+			c.health.SetTrafficBacklog(0)
 		}
+	} else {
+		c.health.SetTrafficBacklog(0)
 	}
 
 	// Report Online info
 	if onlineDevice, err := c.GetOnlineDevice(currentTag); err != nil {
 		c.logger.Print(err)
 	} else {
-		c.reportOnlineDevices(currentTag, onlineDevice)
+		c.reportOnlineDevicesContext(ctx, currentTag, onlineDevice)
 	}
 
-	c.syncAliveListFromPanel(currentTag)
+	c.syncAliveListFromPanelContext(ctx, currentTag)
 
 	// Report Illegal user
 	if detectResult, err := c.GetDetectResult(currentTag); err != nil {
 		c.logger.Print(err)
 	} else if len(*detectResult) > 0 {
-		if err = c.pushIllegalResults(detectResult); err != nil {
+		if err = c.pushIllegalResultsContext(ctx, detectResult); err != nil {
 			c.logger.Print(err)
 		}
 	}
@@ -1065,11 +1162,17 @@ func (c *Controller) userInfoMonitor() (err error) {
 }
 
 func (c *Controller) syncAliveListFromPanel(tag string) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	c.syncAliveListFromPanelContext(ctx, tag)
+}
+
+func (c *Controller) syncAliveListFromPanelContext(ctx context.Context, tag string) {
 	provider, ok := c.apiClient.(api.AliveListProvider)
 	if !ok {
 		return
 	}
-	aliveList, err := provider.GetAliveList()
+	aliveList, err := api.GetAliveListContext(ctx, provider)
 	if err != nil {
 		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
 			c.logger.Print(err)
@@ -1100,10 +1203,16 @@ func (c *Controller) buildNodeTag() string {
 }
 
 func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.pushIllegalResultsContext(ctx, detectResult)
+}
+
+func (c *Controller) pushIllegalResultsContext(ctx context.Context, detectResult *[]api.DetectResult) error {
 	if detectResult == nil || len(*detectResult) == 0 {
 		return nil
 	}
-	if err := c.apiClient.ReportIllegal(detectResult); err != nil {
+	if err := api.ReportIllegalContext(ctx, c.apiClient, detectResult); err != nil {
 		c.logger.WithError(err).Warn("Report illegal results failed")
 		return err
 	}
@@ -1117,17 +1226,32 @@ func (c *Controller) pushIllegalResults(detectResult *[]api.DetectResult) error 
 
 // Check Cert
 func (c *Controller) certMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.certMonitorContext(ctx)
+}
+
+func (c *Controller) certMonitorContext(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.reloadMu.Lock()
 	defer c.reloadMu.Unlock()
-
-	return c.renewCertificateIfNeeded()
+	return c.renewCertificateIfNeededContext(ctx)
 }
 
 func (c *Controller) certMonitorPeriodic() error {
-	if err := c.certMonitor(); err != nil {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.certMonitorPeriodicContext(ctx)
+}
+
+func (c *Controller) certMonitorPeriodicContext(ctx context.Context) error {
+	if err := c.certMonitorContext(ctx); err != nil {
+		c.health.RecordFailure(service.FailureStageCertificate, time.Now())
 		if c.logger != nil {
 			if c.showErrorDetails() {
 				c.logger.WithError(err).Warn("certificate renewal failed")
@@ -1135,11 +1259,19 @@ func (c *Controller) certMonitorPeriodic() error {
 				c.logger.Warn("certificate renewal failed; error details omitted because they may contain credentials")
 			}
 		}
+	} else {
+		c.refreshCertificateExpiry()
 	}
 	return nil
 }
 
-func (c *Controller) renewCertificateIfNeeded() (err error) {
+func (c *Controller) renewCertificateIfNeeded() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.renewCertificateIfNeededContext(ctx)
+}
+
+func (c *Controller) renewCertificateIfNeededContext(ctx context.Context) (err error) {
 	if c == nil || c.config == nil {
 		return nil
 	}
@@ -1188,7 +1320,10 @@ func (c *Controller) renewCertificateIfNeeded() (err error) {
 			candidateConfig.CertConfig.KeyFile = ""
 			candidateConfig.CertConfig.CertContent = string(certificatePEM)
 			candidateConfig.CertConfig.KeyContent = string(privateKeyPEM)
-			return newNodeRuntimeStateApplyModule(c).replaceCertificateRuntime(
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, renewal.Rollback())
+			}
+			return newNodeRuntimeStateApplyModule(c, ctx).replaceCertificateRuntime(
 				currentNodeInfo,
 				currentTag,
 				currentUsers,

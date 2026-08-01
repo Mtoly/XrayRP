@@ -4,13 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"time"
 
 	box "github.com/sagernet/sing-box"
-	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json/badoption"
 
 	"github.com/Mtoly/XrayRP/common/mylego"
+	"github.com/Mtoly/XrayRP/service"
+	"github.com/Mtoly/XrayRP/service/internal/singboxregistry"
 )
 
 func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
@@ -31,7 +33,7 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 	}
 
 	ctx := context.Background()
-	ctx = box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry())
+	ctx = singboxregistry.WithFullRegistry(ctx)
 
 	opts := option.Options{
 		Log: &option.LogOptions{
@@ -146,8 +148,22 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 // hot-reloaded so the new certificate is picked up without restarting the
 // whole XrayR process.
 func (s *AnyTLSService) certMonitor() error {
-	s.reloadMu.Lock()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.certMonitorContext(ctx)
+}
+
+func (s *AnyTLSService) certMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.reloadMu.Lock(ctx); err != nil {
+		return err
+	}
 	defer s.reloadMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if s.beforeCertificateStateRead != nil {
 		s.beforeCertificateStateRead()
@@ -198,15 +214,26 @@ func (s *AnyTLSService) certMonitor() error {
 		if s.logger != nil {
 			s.logger.Infof("AnyTLS certificate renewed for %s, validating replacement runtime", s.config.CertConfig.CertDomain)
 		}
-		return s.reloadNodeWithCertificateLocked(nodeInfo, renewal)
+		return s.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
 	}
 
 	return nil
 }
 
 func (s *AnyTLSService) certMonitorPeriodic() error {
-	if err := s.certMonitor(); err != nil && s.logger != nil {
-		s.logger.Warn("certificate monitor failed; will retry")
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.certMonitorPeriodicContext(ctx)
+}
+
+func (s *AnyTLSService) certMonitorPeriodicContext(ctx context.Context) error {
+	if err := s.certMonitorContext(ctx); err != nil {
+		s.health.RecordFailure(service.FailureStageCertificate, time.Now())
+		if s.logger != nil {
+			s.logger.Warn("certificate monitor failed; will retry")
+		}
+	} else {
+		s.refreshCertificateExpiry()
 	}
 	return nil
 }

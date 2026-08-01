@@ -13,6 +13,8 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
+	"github.com/Mtoly/XrayRP/internal/operation"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
@@ -48,7 +50,7 @@ type preparedCertificateRenewal interface {
 
 type prepareCertificateRenewalFunc func(*mylego.CertConfig) (preparedCertificateRenewal, error)
 
-type portHopRulesFunc func([]portHopRule, *log.Entry) error
+type portHopRulesFunc func(context.Context, []portHopRule, *log.Entry) error
 
 type runtimeServeOutcome struct {
 	done chan struct{}
@@ -113,6 +115,17 @@ func defaultTaskFactory(tag string, interval time.Duration, execute func() error
 	return specialruntime.NewPeriodic(interval, execute)
 }
 
+func (h *Hysteria2Service) newTask(tag string, interval time.Duration, execute func(context.Context) error) lifecycleTask {
+	if h.taskFactory != nil {
+		return h.taskFactory(tag, interval, func() error {
+			ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+			defer cancel()
+			return execute(ctx)
+		})
+	}
+	return specialruntime.NewPeriodicContext(interval, execute)
+}
+
 // defaultServeHandshake only establishes that the Serve goroutine reached the
 // call point. A Serve error not already buffered is recorded by the watcher.
 func defaultServeHandshake(start func(), started <-chan struct{}, result <-chan error) error {
@@ -135,6 +148,7 @@ type Hysteria2Service struct {
 
 	server                     runtimeServer
 	serverConfigFactory        serverConfigFactory
+	cleanupRuntimes            []reloadRuntime
 	runtimeServerFactory       runtimeServerFactory
 	serveRuntime               serveRuntimeFunc
 	closeRuntime               closeRuntimeFunc
@@ -151,11 +165,13 @@ type Hysteria2Service struct {
 	state       lifecycleState
 	runtimeErr  error
 	closed      bool
+	health      service.RuntimeHealthState
 
-	tag     string
-	startAt time.Time
-	tasks   *specialruntime.Tasks
-	logger  *log.Entry
+	tag             string
+	startAt         time.Time
+	tasks           *specialruntime.Tasks
+	syncCoordinator *specialruntime.SnapshotSyncCoordinator
+	logger          *log.Entry
 
 	rules *rule.Manager
 
@@ -173,7 +189,7 @@ type Hysteria2Service struct {
 	// reloadMu serializes hot-reload operations (node / cert changes) so that
 	// we never rebuild the underlying Hysteria2 server concurrently from
 	// multiple goroutines (nodeMonitor, certMonitor, Start).
-	reloadMu sync.Mutex
+	reloadMu operation.Gate
 
 	// portHopRules keeps track of the iptables rules we added for Hysteria2
 	// port hopping so that we can reliably remove or update them when the

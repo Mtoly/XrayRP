@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -123,11 +124,13 @@ func newLifecycleTestController(apiClient PanelClient, enableWS bool) *Controlle
 		startAt:   time.Now().Add(time.Hour),
 		syncApplyHooks: syncApplyHooks{
 			runtime: syncApplyRuntimeHooks{
-				addTag:   func(*api.NodeInfo, string, *Config) error { return nil },
-				addUsers: func(*[]api.UserInfo, *api.NodeInfo, string, *Config) error { return nil },
+				cleanupTag: func(*api.NodeInfo, string) error { return nil },
+				addTag:     func(*api.NodeInfo, string, *Config) error { return nil },
+				addUsers:   func(*[]api.UserInfo, *api.NodeInfo, string, *Config) error { return nil },
 			},
 			limiter: syncApplyLimiterHooks{
-				addInbound: func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error { return nil },
+				addInbound:    func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error { return nil },
+				deleteInbound: func(string) error { return nil },
 			},
 			updateRule: func(string, []api.DetectRule) error { return nil },
 		},
@@ -171,7 +174,7 @@ func TestController_WSStartInitializesRuntimeWhenCapableAndEnabled(t *testing.T)
 	controller.syncCoordinatorFactory = func(syncActionExecutor) syncCoordinatorLifecycle {
 		return coordinator
 	}
-	controller.wsRuntimeFactory = func(s syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	controller.wsRuntimeFactory = func(_ context.Context, s syncActionSubmitter) (wsRuntimeLifecycle, error) {
 		submitter = s
 		wsRuntime.submitter = s
 		return wsRuntime, nil
@@ -206,7 +209,7 @@ func TestController_DualActivePollingAndWSShareCoordinator(t *testing.T) {
 	controller.syncCoordinatorFactory = func(syncActionExecutor) syncCoordinatorLifecycle {
 		return coordinator
 	}
-	controller.wsRuntimeFactory = func(s syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	controller.wsRuntimeFactory = func(_ context.Context, s syncActionSubmitter) (wsRuntimeLifecycle, error) {
 		wsRuntime.submitter = s
 		return wsRuntime, nil
 	}
@@ -244,7 +247,7 @@ func TestController_DualActiveCloseStopsRuntimeAndCoordinator(t *testing.T) {
 	controller.syncCoordinatorFactory = func(syncActionExecutor) syncCoordinatorLifecycle {
 		return coordinator
 	}
-	controller.wsRuntimeFactory = func(s syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	controller.wsRuntimeFactory = func(_ context.Context, s syncActionSubmitter) (wsRuntimeLifecycle, error) {
 		wsRuntime.submitter = s
 		return wsRuntime, nil
 	}
@@ -277,7 +280,7 @@ func TestController_WSDisabledStaysPollingOnly(t *testing.T) {
 	controller.syncCoordinatorFactory = func(syncActionExecutor) syncCoordinatorLifecycle {
 		return coordinator
 	}
-	controller.wsRuntimeFactory = func(syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	controller.wsRuntimeFactory = func(context.Context, syncActionSubmitter) (wsRuntimeLifecycle, error) {
 		wsFactoryCalled = true
 		return &fakeLifecycleWSRuntime{}, nil
 	}

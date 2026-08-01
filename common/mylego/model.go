@@ -1,5 +1,9 @@
 package mylego
 
+import "os"
+
+const filePerm os.FileMode = 0o600
+
 type CertConfig struct {
 	CertMode         string            `mapstructure:"CertMode"` // none, file, http, dns
 	CertDomain       string            `mapstructure:"CertDomain"`

@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strconv"
@@ -27,6 +28,39 @@ func (d *concurrencyDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodes
 	response := d.responses[0]
 	d.responses = d.responses[1:]
 	return response, nil
+}
+
+type lateContextDiscoverer struct {
+	entered  chan struct{}
+	release  chan struct{}
+	response *newV2board.MachineNodesResponse
+}
+
+func (d *lateContextDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodesResponse, error) {
+	return nil, errors.New("context discovery required")
+}
+
+func (d *lateContextDiscoverer) DiscoverMachineNodesContext(context.Context) (*newV2board.MachineNodesResponse, error) {
+	close(d.entered)
+	<-d.release
+	return d.response, nil
+}
+
+type cancelAwareContextDiscoverer struct {
+	entered  chan struct{}
+	canceled chan struct{}
+	response *newV2board.MachineNodesResponse
+}
+
+func (d *cancelAwareContextDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodesResponse, error) {
+	return nil, errors.New("context discovery required")
+}
+
+func (d *cancelAwareContextDiscoverer) DiscoverMachineNodesContext(ctx context.Context) (*newV2board.MachineNodesResponse, error) {
+	close(d.entered)
+	<-ctx.Done()
+	close(d.canceled)
+	return d.response, nil
 }
 
 type gatedMachineService struct {
@@ -148,6 +182,75 @@ func expectedSerializedReconcileEvents() []string {
 	}
 }
 
+func TestSupervisorCanceledDiscoveryDoesNotPublishLateTopology(t *testing.T) {
+	discoverer := &lateContextDiscoverer{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		response: machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "late"},
+		),
+	}
+	factoryCalls := 0
+	supervisor, err := NewSupervisor(SupervisorConfig{}, discoverer, func(NodeBinding) (service.Service, error) {
+		factoryCalls++
+		return &fakeService{}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- supervisor.ReconcileNowContext(ctx) }()
+	<-discoverer.entered
+	cancel()
+	close(discoverer.release)
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReconcileNowContext() error = %v, want context cancellation", err)
+	}
+	state := supervisor.topologySnapshot()
+	if state.generation != 0 || len(state.running) != 0 || factoryCalls != 0 {
+		t.Fatalf("late discovery published topology: generation=%d running=%#v factoryCalls=%d", state.generation, state.running, factoryCalls)
+	}
+}
+
+func TestSupervisorCloseCancelsBlockingDiscoveryBeforeWaitingForReconcile(t *testing.T) {
+	discoverer := &cancelAwareContextDiscoverer{
+		entered:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		response: machineNodesResponse(
+			newV2board.MachineNode{ID: 1, Type: "vless", Name: "late"},
+		),
+	}
+	factoryCalls := 0
+	supervisor, err := NewSupervisor(SupervisorConfig{}, discoverer, func(NodeBinding) (service.Service, error) {
+		factoryCalls++
+		return &fakeService{}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- supervisor.ReconcileNow() }()
+	<-discoverer.entered
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- supervisor.Close() }()
+	<-discoverer.canceled
+
+	if err := <-reconcileDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReconcileNow() error = %v, want shutdown cancellation", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	state := supervisor.topologySnapshot()
+	if len(state.running) != 0 || factoryCalls != 0 {
+		t.Fatalf("shutdown accepted late discovery: running=%#v factoryCalls=%d", state.running, factoryCalls)
+	}
+}
+
 func TestSupervisorReconcileAndCloseOwnStartedRuntimeExactlyOnce(t *testing.T) {
 	startEntered := make(chan struct{}, 1)
 	startRelease := make(chan struct{})
@@ -195,6 +298,67 @@ func TestSupervisorReconcileAndCloseOwnStartedRuntimeExactlyOnce(t *testing.T) {
 	}
 	if !supervisor.closed || len(supervisor.running) != 0 {
 		t.Fatalf("closed supervisor retained runtime state: closed=%t running=%d", supervisor.closed, len(supervisor.running))
+	}
+}
+
+func TestSupervisorRestartAndCloseSerializeOwnership(t *testing.T) {
+	oldCloseEntered := make(chan struct{}, 1)
+	oldCloseRelease := make(chan struct{})
+	closeAttempted := make(chan struct{}, 1)
+	oldService := &gatedMachineService{closeEntered: oldCloseEntered, closeRelease: oldCloseRelease}
+	replacement := &gatedMachineService{}
+	rollback := &gatedMachineService{}
+	supervisor, err := NewSupervisor(
+		SupervisorConfig{},
+		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "trojan", Name: "replacement"}),
+		}},
+		func(binding NodeBinding) (service.Service, error) {
+			if binding.NodeType == "vless" {
+				return rollback, nil
+			}
+			return replacement, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	supervisor.running[1] = &nodeRuntime{
+		binding: NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"},
+		service: oldService,
+		state:   nodeRuntimeRunning,
+	}
+	supervisor.observeOperation = func(operation supervisorOperation, phase supervisorOperationPhase) {
+		if operation == supervisorOperationClose && phase == supervisorOperationAttempted {
+			closeAttempted <- struct{}{}
+		}
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- supervisor.ReconcileNow() }()
+	<-oldCloseEntered
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- supervisor.Close() }()
+	<-closeAttempted
+	close(oldCloseRelease)
+
+	if err := <-reconcileDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReconcileNow() error = %v, want shutdown cancellation", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if starts, closes := oldService.counts(); starts != 0 || closes != 1 {
+		t.Fatalf("old lifecycle = start %d close %d, want 0/1", starts, closes)
+	}
+	if starts, closes := replacement.counts(); starts != 0 || closes != 1 {
+		t.Fatalf("canceled replacement lifecycle = start %d close %d, want 0/1", starts, closes)
+	}
+	if starts, closes := rollback.counts(); starts != 1 || closes != 1 {
+		t.Fatalf("rollback lifecycle = start %d close %d, want 1/1", starts, closes)
+	}
+	if !supervisor.closed || len(supervisor.running) != 0 {
+		t.Fatalf("closed topology = closed:%t running:%#v", supervisor.closed, supervisor.running)
 	}
 }
 
@@ -390,24 +554,18 @@ func TestSupervisorBlockedRuntimeCloseKeepsPublishedTopologyUntilOwnershipResolv
 	}
 }
 
-func TestSupervisorReconcileRestorationFailurePublishesJoinedFailure(t *testing.T) {
+func TestSupervisorReplacementCleanupFailureRetainsOldAndCandidateOwnership(t *testing.T) {
 	replacementStartErr := errors.New("replacement start failed")
 	replacementCleanupErr := errors.New("replacement cleanup failed")
-	restoreStartErr := errors.New("restore start failed")
-	restoreCleanupErr := errors.New("restore cleanup failed")
 	oldService := &fakeService{}
 	replacementService := &fakeService{startErr: replacementStartErr, closeErr: replacementCleanupErr}
-	restoreService := &fakeService{startErr: restoreStartErr, closeErr: restoreCleanupErr}
-	services := []service.Service{replacementService, restoreService}
 	supervisor, err := NewSupervisor(
 		SupervisorConfig{},
 		&concurrencyDiscoverer{responses: []*newV2board.MachineNodesResponse{
 			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "trojan", Name: "replacement"}),
 		}},
 		func(NodeBinding) (service.Service, error) {
-			next := services[0]
-			services = services[1:]
-			return next, nil
+			return replacementService, nil
 		},
 	)
 	if err != nil {
@@ -416,37 +574,27 @@ func TestSupervisorReconcileRestorationFailurePublishesJoinedFailure(t *testing.
 	supervisor.running[1] = &nodeRuntime{
 		binding: NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"},
 		service: oldService,
+		state:   nodeRuntimeRunning,
 	}
 
 	reconcileErr := supervisor.ReconcileNow()
-
-	for _, wantErr := range []error{
-		replacementStartErr,
-		replacementCleanupErr,
-		restoreStartErr,
-		restoreCleanupErr,
-	} {
-		if !errors.Is(reconcileErr, wantErr) {
-			t.Fatalf("ReconcileNow() error = %v, want joined %v", reconcileErr, wantErr)
-		}
+	if !errors.Is(reconcileErr, replacementStartErr) || !errors.Is(reconcileErr, replacementCleanupErr) {
+		t.Fatalf("ReconcileNow() error = %v, want replacement start and cleanup failures", reconcileErr)
 	}
 	state := supervisor.topologySnapshot()
-	if state.running[1] != nil {
-		t.Fatal("restoration failure published a running runtime")
+	retained := state.running[1]
+	if retained == nil || retained.state != nodeRuntimeFailedOwned || retained.binding.NodeType != "vless" {
+		t.Fatalf("failed replacement ownership = %#v", retained)
 	}
-	for _, wantErr := range []error{
-		replacementStartErr,
-		replacementCleanupErr,
-		restoreStartErr,
-		restoreCleanupErr,
-	} {
-		if !errors.Is(state.failure, wantErr) {
-			t.Fatalf("published failure = %v, want joined %v", state.failure, wantErr)
-		}
+	if retained.service != nil || len(retained.cleanupServices) != 1 || retained.cleanupServices[0] != replacementService {
+		t.Fatalf("retained owners = primary:%v cleanup:%#v", retained.service, retained.cleanupServices)
+	}
+	if oldService.closes != 1 || replacementService.starts != 1 || replacementService.closes != 1 {
+		t.Fatalf("lifecycle old close=%d replacement start/close=%d/%d", oldService.closes, replacementService.starts, replacementService.closes)
 	}
 }
 
-func TestSupervisorReconcileStartFailureCleansCandidateAndPublishesJoinedFailure(t *testing.T) {
+func TestSupervisorReconcileStartCleanupFailurePublishesFailedOwnedCandidate(t *testing.T) {
 	startErr := errors.New("candidate start failed")
 	cleanupErr := errors.New("candidate cleanup failed")
 	candidate := &fakeService{startErr: startErr, closeErr: cleanupErr}
@@ -464,7 +612,6 @@ func TestSupervisorReconcileStartFailureCleansCandidateAndPublishesJoinedFailure
 	}
 
 	reconcileErr := supervisor.ReconcileNow()
-
 	if !errors.Is(reconcileErr, startErr) || !errors.Is(reconcileErr, cleanupErr) {
 		t.Fatalf("ReconcileNow() error = %v, want start and cleanup errors", reconcileErr)
 	}
@@ -472,8 +619,9 @@ func TestSupervisorReconcileStartFailureCleansCandidateAndPublishesJoinedFailure
 		t.Fatalf("candidate lifecycle = start %d close %d, want 1/1", candidate.starts, candidate.closes)
 	}
 	state := supervisor.topologySnapshot()
-	if state.running[1] != nil {
-		t.Fatal("failed candidate was published")
+	retained := state.running[1]
+	if retained == nil || retained.state != nodeRuntimeFailedOwned || retained.service != candidate {
+		t.Fatalf("failed candidate ownership = %#v", retained)
 	}
 	if !errors.Is(state.failure, startErr) || !errors.Is(state.failure, cleanupErr) {
 		t.Fatalf("published failure = %v, want start and cleanup errors", state.failure)

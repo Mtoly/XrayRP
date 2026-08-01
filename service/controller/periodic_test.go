@@ -1458,6 +1458,12 @@ func TestControllerCloseContinuesAfterPeriodicFailure(t *testing.T) {
 		}},
 		wsRuntime:       ws,
 		syncCoordinator: coordinator,
+		lifecycleState:  controllerStateRunning,
+		ownedRuntime: controllerRuntimeOwnership{
+			periodic:        true,
+			websocket:       true,
+			syncCoordinator: true,
+		},
 	}
 
 	err := controller.Close()

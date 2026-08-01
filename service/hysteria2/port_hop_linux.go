@@ -4,6 +4,7 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,8 +12,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var runPortHopCommand = func(args ...string) ([]byte, error) {
-	return exec.Command("iptables", args...).CombinedOutput()
+var runPortHopCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "iptables", args...).CombinedOutput()
 }
 
 func portHopIptablesArgs(action string, r portHopRule) []string {
@@ -25,8 +26,8 @@ func portHopIptablesArgs(action string, r portHopRule) []string {
 	return append(args, "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", r.ToPort))
 }
 
-func mutatePortHopIptablesRule(action, operation string, r portHopRule, logger *log.Entry) error {
-	out, err := runPortHopCommand(portHopIptablesArgs(action, r)...)
+func mutatePortHopIptablesRule(ctx context.Context, action, operation string, r portHopRule, logger *log.Entry) error {
+	out, err := runPortHopCommand(ctx, portHopIptablesArgs(action, r)...)
 	if err != nil {
 		ruleErr := fmt.Errorf("%s iptables port-hop rule %v: %w (output: %s)", operation, r, err, string(out))
 		if logger != nil {
@@ -40,10 +41,10 @@ func mutatePortHopIptablesRule(action, operation string, r portHopRule, logger *
 	return nil
 }
 
-func rollbackPortHopIptablesRules(action, operation string, rules []portHopRule, logger *log.Entry) error {
+func rollbackPortHopIptablesRules(ctx context.Context, action, operation string, rules []portHopRule, logger *log.Entry) error {
 	var errs []error
 	for i := len(rules) - 1; i >= 0; i-- {
-		errs = append(errs, mutatePortHopIptablesRule(action, operation, rules[i], logger))
+		errs = append(errs, mutatePortHopIptablesRule(ctx, action, operation, rules[i], logger))
 	}
 	return errors.Join(errs...)
 }
@@ -54,11 +55,11 @@ func rollbackPortHopIptablesRules(action, operation string, rules []portHopRule,
 // equivalent to the manual examples provided by the user, e.g.:
 //
 //	iptables -t nat -A PREROUTING -p udp --dport 30001:50000 -j REDIRECT --to-port 30000
-func applyPortHopIptablesRules(rules []portHopRule, logger *log.Entry) error {
+func applyPortHopIptablesRules(ctx context.Context, rules []portHopRule, logger *log.Entry) error {
 	applied := make([]portHopRule, 0, len(rules))
 	for _, r := range rules {
-		if err := mutatePortHopIptablesRule("-A", "add", r, logger); err != nil {
-			rollbackErr := rollbackPortHopIptablesRules("-D", "rollback added", applied, logger)
+		if err := mutatePortHopIptablesRule(ctx, "-A", "add", r, logger); err != nil {
+			rollbackErr := rollbackPortHopIptablesRules(ctx, "-D", "rollback added", applied, logger)
 			return &portHopMutationError{err: errors.Join(err, rollbackErr), restored: rollbackErr == nil}
 		}
 		applied = append(applied, r)
@@ -68,11 +69,11 @@ func applyPortHopIptablesRules(rules []portHopRule, logger *log.Entry) error {
 
 // deletePortHopIptablesRules removes previously installed iptables rules. Each
 // rule must match exactly the arguments used when it was added.
-func deletePortHopIptablesRules(rules []portHopRule, logger *log.Entry) error {
+func deletePortHopIptablesRules(ctx context.Context, rules []portHopRule, logger *log.Entry) error {
 	deleted := make([]portHopRule, 0, len(rules))
 	for _, r := range rules {
-		if err := mutatePortHopIptablesRule("-D", "delete", r, logger); err != nil {
-			rollbackErr := rollbackPortHopIptablesRules("-A", "rollback deleted", deleted, logger)
+		if err := mutatePortHopIptablesRule(ctx, "-D", "delete", r, logger); err != nil {
+			rollbackErr := rollbackPortHopIptablesRules(ctx, "-A", "rollback deleted", deleted, logger)
 			return &portHopMutationError{err: errors.Join(err, rollbackErr), restored: rollbackErr == nil}
 		}
 		deleted = append(deleted, r)

@@ -4,12 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-)
 
-var (
-	version  = "0.9-alpha"
-	codename = "XrayR"
-	intro    = "A Xray backend that supports many panels"
+	"github.com/Mtoly/XrayRP/internal/buildinfo"
 )
 
 func init() {
@@ -23,5 +19,5 @@ func init() {
 }
 
 func showVersion() {
-	fmt.Printf("%s %s (%s) \n", codename, version, intro)
+	fmt.Print(buildinfo.Current().String())
 }

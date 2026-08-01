@@ -11,6 +11,7 @@ import (
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/internal/operation"
 	"github.com/Mtoly/XrayRP/service"
 	log "github.com/sirupsen/logrus"
 )
@@ -27,12 +28,20 @@ type NodeDiscoverer interface {
 	DiscoverMachineNodes() (*newV2board.MachineNodesResponse, error)
 }
 
+type ContextNodeDiscoverer interface {
+	DiscoverMachineNodesContext(context.Context) (*newV2board.MachineNodesResponse, error)
+}
+
 type NewV2boardDiscoverer struct {
 	Config newV2board.MachineDiscoveryConfig
 }
 
 func (d *NewV2boardDiscoverer) DiscoverMachineNodes() (*newV2board.MachineNodesResponse, error) {
 	return newV2board.DiscoverMachineNodes(d.Config)
+}
+
+func (d *NewV2boardDiscoverer) DiscoverMachineNodesContext(ctx context.Context) (*newV2board.MachineNodesResponse, error) {
+	return newV2board.DiscoverMachineNodesContext(ctx, d.Config)
 }
 
 type NodeServiceFactory func(NodeBinding) (service.Service, error)
@@ -57,24 +66,33 @@ type Supervisor struct {
 	discoverer NodeDiscoverer
 	factory    NodeServiceFactory
 
-	operationMu        sync.Mutex
-	observeOperation   func(supervisorOperation, supervisorOperationPhase)
-	mu                 sync.Mutex
-	running            map[int]*nodeRuntime
-	topologyGeneration uint64
-	topologyFailure    error
-	cancel             context.CancelFunc
-	done               chan struct{}
-	statusCancel       context.CancelFunc
-	statusDone         chan struct{}
-	retiredLoops       map[chan struct{}]machineLoopOwner
-	waitLoop           func(<-chan struct{})
-	discoveryInterval  time.Duration
-	statusInterval     time.Duration
-	started            bool
-	closing            bool
-	closeDone          chan struct{}
-	closed             bool
+	operationMu           operation.Gate
+	operationContextMu    sync.Mutex
+	activeOperation       supervisorOperation
+	activeOperationSet    bool
+	activeOperationCancel context.CancelFunc
+	observeOperation      func(supervisorOperation, supervisorOperationPhase)
+	mu                    sync.Mutex
+	running               map[int]*nodeRuntime
+	topologyGeneration    uint64
+	topologyFailure       error
+	runCtx                context.Context
+	runCancel             context.CancelFunc
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	statusCancel          context.CancelFunc
+	statusDone            chan struct{}
+	retiredLoops          map[chan struct{}]machineLoopOwner
+	waitLoop              func(<-chan struct{})
+	discoveryInterval     time.Duration
+	statusInterval        time.Duration
+	started               bool
+	cleanupPending        bool
+	closing               bool
+	closeDone             chan struct{}
+	closeErr              error
+	closed                bool
+	health                service.RuntimeHealthState
 }
 
 type supervisorOperation uint8
@@ -94,9 +112,25 @@ const (
 )
 
 type nodeRuntime struct {
-	binding      NodeBinding
-	service      service.Service
-	missingCount int
+	binding         NodeBinding
+	service         service.Service
+	cleanupServices []service.Service
+	restorer        machineRuntimeRestorer
+	state           nodeRuntimeLifecycleState
+	failure         error
+	missingCount    int
+}
+
+type nodeRuntimeLifecycleState uint8
+
+const (
+	nodeRuntimeRunning nodeRuntimeLifecycleState = iota
+	nodeRuntimeRetiring
+	nodeRuntimeFailedOwned
+)
+
+type machineRuntimeRestorer interface {
+	RestoreMachineRuntime() (service.Service, error)
 }
 
 type discoverySnapshot struct {
@@ -160,26 +194,57 @@ func NewSupervisor(config SupervisorConfig, discoverer NodeDiscoverer, factory N
 }
 
 func (s *Supervisor) Start() error {
-	if err := s.startInitial(); err != nil {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return s.StartContext(ctx)
+}
+
+func (s *Supervisor) StartContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultStartTimeout)
+	defer cancel()
+	if err := s.startInitialContext(ctx); err != nil {
+		s.health.RecordFailure(service.FailureStageStart, time.Now())
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil || s.closed || s.closing {
+	if s.cancel != nil || s.closed || s.closing || s.cleanupPending {
+		s.mu.Unlock()
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(context.WithoutCancel(ctx))
+	discoveryCtx, discoveryCancel := context.WithCancel(runCtx)
 	done := make(chan struct{})
-	s.cancel = cancel
+	s.runCtx = runCtx
+	s.runCancel = runCancel
+	s.cancel = discoveryCancel
 	s.done = done
-	go s.run(ctx, done, s.discoveryInterval)
+	go s.run(discoveryCtx, done, s.discoveryInterval)
 	s.startStatusLoopLocked(s.statusInterval)
+	topologyFailure := s.topologyFailure
+	s.mu.Unlock()
+	now := time.Now()
+	s.health.RecordSuccessfulSync(now)
+	if topologyFailure != nil {
+		s.health.RecordFailure(service.FailureStageReconcile, now)
+	}
 	return nil
 }
 
 func (s *Supervisor) Close() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return s.CloseContext(ctx)
+}
+
+func (s *Supervisor) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
+	s.cancelActiveOperation()
 	s.notifyOperation(supervisorOperationClose, supervisorOperationAttempted)
 
 	s.mu.Lock()
@@ -187,15 +252,23 @@ func (s *Supervisor) Close() error {
 		done := s.closeDone
 		s.mu.Unlock()
 		if done != nil {
-			<-done
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+			}
 		}
-		return nil
+		s.mu.Lock()
+		closeErr := s.closeErr
+		s.mu.Unlock()
+		return closeErr
 	}
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closing = true
+	s.closeErr = nil
 	s.closeDone = make(chan struct{})
 	loops := make([]machineLoopOwner, 0, 2+len(s.retiredLoops))
 	loops = appendMachineLoopOwner(loops, machineLoopOwner{cancel: s.cancel, done: s.done})
@@ -203,6 +276,9 @@ func (s *Supervisor) Close() error {
 	for _, loop := range s.retiredLoops {
 		loops = appendMachineLoopOwner(loops, loop)
 	}
+	runCancel := s.runCancel
+	s.runCtx = nil
+	s.runCancel = nil
 	s.cancel = nil
 	s.done = nil
 	s.statusCancel = nil
@@ -210,99 +286,158 @@ func (s *Supervisor) Close() error {
 	s.retiredLoops = make(map[chan struct{}]machineLoopOwner)
 	s.mu.Unlock()
 
+	if runCancel != nil {
+		runCancel()
+	}
 	for _, loop := range loops {
 		if loop.cancel != nil {
 			loop.cancel()
 		}
 	}
-	for _, loop := range loops {
-		s.waitForLoop(loop.done)
-	}
-
-	s.operationMu.Lock()
-	s.notifyOperation(supervisorOperationClose, supervisorOperationEntered)
-
-	s.mu.Lock()
-	runtimes := make([]*nodeRuntime, 0, len(s.running))
-	for _, runtime := range s.running {
-		runtimes = append(runtimes, runtime)
-	}
-	s.mu.Unlock()
 
 	var errs []error
-	for _, runtime := range runtimes {
-		if err := s.closeRuntime(runtime); err != nil {
-			errs = append(errs, err)
+	remainingLoops := make([]machineLoopOwner, 0)
+	for _, loop := range loops {
+		if err := s.waitForLoopContext(ctx, loop.done); err != nil {
+			errs = append(errs, fmt.Errorf("join machine loop: %w", err))
+			remainingLoops = appendMachineLoopOwner(remainingLoops, loop)
 		}
 	}
 
+	operationCtx, operationCancel, err := s.beginOperationContext(ctx, supervisorOperationClose)
+	if err != nil {
+		errs = append(errs, err)
+		return s.finishCloseAttempt(nil, remainingLoops, errors.Join(errs...))
+	}
+	defer operationCancel()
+	ctx = operationCtx
+
 	s.mu.Lock()
-	s.running = make(map[int]*nodeRuntime)
-	s.topologyGeneration++
-	s.topologyFailure = errors.Join(errs...)
-	s.started = false
-	s.closed = true
-	closeDone := s.closeDone
+	runtimes := cloneMachineTopology(s.running)
 	s.mu.Unlock()
 
-	s.notifyOperation(supervisorOperationClose, supervisorOperationExited)
-	s.operationMu.Unlock()
+	remaining := make(map[int]*nodeRuntime)
+	for nodeID, runtime := range runtimes {
+		if err := s.closeRuntimeContext(ctx, runtime); err != nil {
+			errs = append(errs, err)
+		}
+		if runtime.hasResources() {
+			remaining[nodeID] = runtime
+		}
+	}
+	closeErr := errors.Join(errs...)
+	s.endOperation(supervisorOperationClose)
+	return s.finishCloseAttempt(remaining, remainingLoops, closeErr)
+}
 
+func (s *Supervisor) finishCloseAttempt(remaining map[int]*nodeRuntime, remainingLoops []machineLoopOwner, closeErr error) error {
 	s.mu.Lock()
+	if remaining != nil {
+		s.running = remaining
+		s.topologyGeneration++
+	}
+	for _, loop := range remainingLoops {
+		s.retireLoopLocked(loop)
+	}
+	if closeErr != nil {
+		s.topologyFailure = closeErr
+	}
+	s.started = false
+	s.cleanupPending = len(s.running) != 0 || len(s.retiredLoops) != 0
+	s.closed = !s.cleanupPending
+	s.closeErr = closeErr
+	closeDone := s.closeDone
 	s.closing = false
 	s.closeDone = nil
 	if closeDone != nil {
 		close(closeDone)
 	}
 	s.mu.Unlock()
-	return errors.Join(errs...)
+	if closeErr != nil {
+		stage := service.FailureStageClose
+		if len(remaining) != 0 || len(remainingLoops) != 0 {
+			stage = service.FailureStageCleanup
+		}
+		s.health.RecordFailure(stage, time.Now())
+	}
+	return closeErr
 }
 
 func (s *Supervisor) startInitial() error {
-	s.beginOperation(supervisorOperationInitial)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return s.startInitialContext(ctx)
+}
+
+func (s *Supervisor) startInitialContext(ctx context.Context) error {
+	operationCtx, operationCancel, err := s.beginOperationContext(ctx, supervisorOperationInitial)
+	if err != nil {
+		return err
+	}
+	defer operationCancel()
+	ctx = operationCtx
 	var loopHandoffs []machineLoopHandoff
-	defer func() {
-		s.endOperation(supervisorOperationInitial)
-		s.joinLoopHandoffs(loopHandoffs, nil)
-	}()
 
 	s.mu.Lock()
 	if s.closed || s.closing {
 		s.mu.Unlock()
+		s.endOperation(supervisorOperationInitial)
 		return fmt.Errorf("machine supervisor is closed")
+	}
+	if s.cleanupPending {
+		failure := s.topologyFailure
+		s.mu.Unlock()
+		s.endOperation(supervisorOperationInitial)
+		return errors.Join(errors.New("machine supervisor cleanup ownership remains"), failure)
 	}
 	if s.started {
 		s.mu.Unlock()
+		s.endOperation(supervisorOperationInitial)
 		return nil
 	}
 	generation := s.topologyGeneration
 	s.mu.Unlock()
 
-	snapshot, err := s.discoverSnapshot()
+	snapshot, err := s.discoverSnapshotContext(ctx)
 	if err != nil {
+		s.endOperation(supervisorOperationInitial)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		s.endOperation(supervisorOperationInitial)
 		return err
 	}
 	bindings := snapshot.bindings
 
 	runtimes := make(map[int]*nodeRuntime, len(bindings))
 	started := make([]*nodeRuntime, 0, len(bindings))
+	runningCount := 0
 	var errs []error
 	for _, binding := range bindings {
-		runtime, err := s.startRuntime(binding)
-		if err != nil {
-			s.logWarning(err)
+		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
-			continue
+			break
 		}
-		runtimes[binding.NodeID] = runtime
-		started = append(started, runtime)
+		runtime, startErr := s.startRuntimeContext(ctx, binding)
+		if runtime != nil {
+			runtimes[binding.NodeID] = runtime
+			started = append(started, runtime)
+			if runtime.state == nodeRuntimeRunning {
+				runningCount++
+			}
+		}
+		if startErr != nil {
+			s.logWarning(startErr)
+			errs = append(errs, startErr)
+		}
 	}
 
 	failure := errors.Join(errs...)
-
 	s.mu.Lock()
 	var commitErr error
 	switch {
+	case ctx.Err() != nil:
+		commitErr = ctx.Err()
 	case s.closed || s.closing:
 		commitErr = fmt.Errorf("machine supervisor is closed")
 	case s.topologyGeneration != generation:
@@ -311,77 +446,132 @@ func (s *Supervisor) startInitial() error {
 			s.topologyGeneration,
 			generation,
 		)
-	case len(bindings) > 0 && len(runtimes) == 0:
-		s.topologyFailure = failure
-		s.topologyGeneration++
 	default:
 		s.running = runtimes
 		s.topologyFailure = failure
 		s.topologyGeneration++
-		s.started = true
-		loopHandoffs = s.applyBaseConfigLocked(snapshot.baseConfig)
+		s.started = runningCount > 0 || len(bindings) == 0
+		s.cleanupPending = runningCount == 0 && len(runtimes) != 0
+		if s.started {
+			loopHandoffs = s.applyBaseConfigLocked(snapshot.baseConfig)
+		}
 	}
 	s.mu.Unlock()
-	s.activateLoopHandoffs(loopHandoffs)
+	s.endOperation(supervisorOperationInitial)
 
 	if commitErr != nil {
-		return errors.Join(commitErr, s.closeRuntimes(started))
+		cleanupCtx, cancel := service.CleanupContext(ctx)
+		cleanupErr := s.cleanupUnpublishedRuntimesContext(cleanupCtx, started)
+		cancel()
+		return errors.Join(commitErr, cleanupErr)
 	}
-	if len(bindings) > 0 && len(runtimes) == 0 {
-		return failure
+	s.activateLoopHandoffs(loopHandoffs)
+	joinErr := s.joinLoopHandoffsContext(ctx, loopHandoffs, nil)
+	if len(bindings) > 0 && runningCount == 0 {
+		return errors.Join(failure, joinErr)
 	}
-	return nil
+	return joinErr
 }
 
 func (s *Supervisor) reconcilePeriodic() error {
-	return s.reconcilePeriodicFrom(nil)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.reconcilePeriodicFromContext(ctx, nil)
 }
 
 func (s *Supervisor) reconcilePeriodicFrom(ownerDone chan struct{}) error {
-	s.beginOperation(supervisorOperationReconcile)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.reconcilePeriodicFromContext(ctx, ownerDone)
+}
+
+func (s *Supervisor) reconcilePeriodicFromContext(ctx context.Context, ownerDone chan struct{}) error {
+	operationCtx, operationCancel, err := s.beginOperationContext(ctx, supervisorOperationReconcile)
+	if err != nil {
+		return err
+	}
+	defer operationCancel()
+	ctx = operationCtx
 	var loopHandoffs []machineLoopHandoff
-	defer func() {
-		s.endOperation(supervisorOperationReconcile)
-		s.joinLoopHandoffs(loopHandoffs, ownerDone)
-	}()
 
 	s.mu.Lock()
-	unavailable := s.closed || s.closing || ownerDone != nil && s.done != ownerDone
+	unavailable := s.closed || s.closing || s.cleanupPending || ownerDone != nil && s.done != ownerDone
 	s.mu.Unlock()
 	if unavailable {
+		s.endOperation(supervisorOperationReconcile)
 		return nil
 	}
 
-	snapshot, err := s.discoverSnapshot()
+	snapshot, err := s.discoverSnapshotContext(ctx)
 	if err != nil {
 		s.logWarning(err)
+		s.endOperation(supervisorOperationReconcile)
+		s.health.RecordFailure(service.FailureStageReconcile, time.Now())
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		s.endOperation(supervisorOperationReconcile)
 		return err
 	}
 
 	s.mu.Lock()
-	if s.closed || s.closing || ownerDone != nil && s.done != ownerDone {
+	if s.closed || s.closing || s.cleanupPending || ownerDone != nil && s.done != ownerDone {
 		s.mu.Unlock()
+		s.endOperation(supervisorOperationReconcile)
 		return nil
 	}
-
 	loopHandoffs = s.applyBaseConfigLocked(snapshot.baseConfig)
 	s.mu.Unlock()
+
+	reconcileErr := s.reconcileContext(ctx, snapshot.bindings)
+	s.endOperation(supervisorOperationReconcile)
 	s.activateLoopHandoffs(loopHandoffs)
-	return s.reconcile(snapshot.bindings)
+	resultErr := errors.Join(reconcileErr, s.joinLoopHandoffsContext(ctx, loopHandoffs, ownerDone))
+	if resultErr != nil {
+		s.health.RecordFailure(service.FailureStageReconcile, time.Now())
+	} else {
+		s.health.RecordSuccessfulSync(time.Now())
+	}
+	return resultErr
 }
 
 func (s *Supervisor) ReconcileNow() error {
-	return s.reconcilePeriodic()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.ReconcileNowContext(ctx)
+}
+
+func (s *Supervisor) ReconcileNowContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultSyncTimeout)
+	defer cancel()
+	return s.reconcilePeriodicFromContext(ctx, nil)
 }
 
 func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
-	response, err := s.discoverer.DiscoverMachineNodes()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.discoverSnapshotContext(ctx)
+}
+
+func (s *Supervisor) discoverSnapshotContext(ctx context.Context) (discoverySnapshot, error) {
+	var response *newV2board.MachineNodesResponse
+	var err error
+	if contextual, ok := s.discoverer.(ContextNodeDiscoverer); ok {
+		response, err = contextual.DiscoverMachineNodesContext(ctx)
+	} else {
+		if err := ctx.Err(); err != nil {
+			return discoverySnapshot{}, err
+		}
+		response, err = s.discoverer.DiscoverMachineNodes()
+	}
 	if err != nil {
 		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return discoverySnapshot{}, err
+	}
 	return materializeDiscoverySnapshot(response)
 }
-
 func materializeDiscoverySnapshot(response *newV2board.MachineNodesResponse) (discoverySnapshot, error) {
 	if response == nil {
 		return discoverySnapshot{}, fmt.Errorf("discover machine nodes: empty response")
@@ -410,7 +600,11 @@ func (s *Supervisor) applyBaseConfigLocked(baseConfig api.BaseConfig) []machineL
 			if s.config.Logger != nil {
 				s.config.Logger.Infof("Update machine discovery interval to %s", nextInterval)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			parent := s.runCtx
+			if parent == nil {
+				parent = context.Background()
+			}
+			ctx, cancel := context.WithCancel(parent)
 			done := make(chan struct{})
 			retired := machineLoopOwner{cancel: s.cancel, done: s.done}
 			replacement := machineLoopOwner{cancel: cancel, done: done}
@@ -460,27 +654,57 @@ func (s *Supervisor) activateLoopHandoffs(handoffs []machineLoopHandoff) {
 }
 
 func (s *Supervisor) joinLoopHandoffs(handoffs []machineLoopHandoff, ownerDone chan struct{}) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
+	defer cancel()
+	_ = s.joinLoopHandoffsContext(ctx, handoffs, ownerDone)
+}
+
+func (s *Supervisor) joinLoopHandoffsContext(ctx context.Context, handoffs []machineLoopHandoff, ownerDone chan struct{}) error {
+	var errs []error
 	for _, handoff := range handoffs {
 		done := handoff.retired.done
 		if done == nil || done == ownerDone {
 			continue
 		}
-		s.waitForLoop(done)
+		if err := s.waitForLoopContext(ctx, done); err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		s.forgetRetiredLoop(done)
 	}
+	return errors.Join(errs...)
 }
 
 func (s *Supervisor) waitForLoop(done <-chan struct{}) {
-	if done == nil {
-		return
-	}
-	if s.waitLoop != nil {
-		s.waitLoop(done)
-		return
-	}
-	<-done
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
+	defer cancel()
+	_ = s.waitForLoopContext(ctx, done)
 }
 
+func (s *Supervisor) waitForLoopContext(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	if s.waitLoop != nil {
+		waitDone := make(chan struct{})
+		go func() {
+			s.waitLoop(done)
+			close(waitDone)
+		}()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitDone:
+			return nil
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
+}
 func (s *Supervisor) forgetRetiredLoop(done chan struct{}) {
 	if done == nil {
 		return
@@ -544,6 +768,7 @@ const (
 	machineReconcileStart machineReconcileAction = iota
 	machineReconcileKeep
 	machineReconcileRestart
+	machineReconcileRecover
 )
 
 type machineReconcilePlan struct {
@@ -590,28 +815,34 @@ func materializeMachineReconcilePlan(running map[int]*nodeRuntime, bindings []No
 		if _, exists := newByID[nodeID]; exists {
 			continue
 		}
+		if runtime == nil {
+			plan.missing = append(plan.missing, machineMissingRuntimeDecision{nodeID: nodeID, remove: true})
+			continue
+		}
 
 		nextMissingCount := runtime.missingCount + 1
 		plan.missing = append(plan.missing, machineMissingRuntimeDecision{
 			nodeID:           nodeID,
 			runtime:          runtime,
 			nextMissingCount: nextMissingCount,
-			remove:           nextMissingCount >= removedNodeMissingThreshold,
+			remove:           runtime.state != nodeRuntimeRunning || nextMissingCount >= removedNodeMissingThreshold,
 		})
 	}
 
 	for _, binding := range bindings {
 		runtime, exists := running[binding.NodeID]
-		if !exists {
+		if !exists || runtime == nil {
 			plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileStart, binding: binding})
 			continue
 		}
-
+		if runtime.state != nodeRuntimeRunning {
+			plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileRecover, binding: binding, runtime: runtime})
+			continue
+		}
 		if runtime.binding.NodeType == binding.NodeType {
 			plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileKeep, binding: binding, runtime: runtime})
 			continue
 		}
-
 		plan.bindings = append(plan.bindings, machineBindingDecision{action: machineReconcileRestart, binding: binding, runtime: runtime})
 	}
 
@@ -619,13 +850,22 @@ func materializeMachineReconcilePlan(running map[int]*nodeRuntime, bindings []No
 }
 
 func (s *Supervisor) reconcile(bindings []NodeBinding) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.reconcileContext(ctx, bindings)
+}
+
+func (s *Supervisor) reconcileContext(ctx context.Context, bindings []NodeBinding) error {
 	transaction, ok := s.planReconcile(bindings)
 	if !ok {
 		return nil
 	}
-	result := s.executeReconcile(transaction)
+	result := s.executeReconcileContext(ctx, transaction)
 	if err := s.commitReconcile(result); err != nil {
-		return errors.Join(result.failure, err, s.closeRuntimes(result.started))
+		cleanupCtx, cancel := service.CleanupContext(ctx)
+		cleanupErr := s.cleanupUnpublishedRuntimesContext(cleanupCtx, result.started)
+		cancel()
+		return errors.Join(result.failure, err, cleanupErr)
 	}
 	return result.failure
 }
@@ -633,7 +873,7 @@ func (s *Supervisor) reconcile(bindings []NodeBinding) error {
 func (s *Supervisor) planReconcile(bindings []NodeBinding) (machineReconcileTransaction, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.closing {
+	if s.closed || s.closing || s.cleanupPending {
 		return machineReconcileTransaction{}, false
 	}
 
@@ -646,37 +886,59 @@ func (s *Supervisor) planReconcile(bindings []NodeBinding) (machineReconcileTran
 }
 
 func (s *Supervisor) executeReconcile(transaction machineReconcileTransaction) machineReconcileResult {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.executeReconcileContext(ctx, transaction)
+}
+
+func (s *Supervisor) executeReconcileContext(ctx context.Context, transaction machineReconcileTransaction) machineReconcileResult {
 	started := make([]*nodeRuntime, 0, len(transaction.plan.bindings))
 	var errs []error
 	for _, decision := range transaction.plan.missing {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		if decision.runtime == nil {
+			delete(transaction.running, decision.nodeID)
+			continue
+		}
 		decision.runtime.missingCount = decision.nextMissingCount
 		if !decision.remove {
 			continue
 		}
 
-		if err := s.closeRuntime(decision.runtime); err != nil {
+		if err := s.closeRuntimeContext(ctx, decision.runtime); err != nil {
 			s.logWarning(err)
 			errs = append(errs, err)
+			transaction.running[decision.nodeID] = decision.runtime
+			continue
 		}
 		delete(transaction.running, decision.nodeID)
 	}
 
-	for _, decision := range transaction.plan.bindings {
-		switch decision.action {
-		case machineReconcileStart:
-			nextRuntime, err := s.startRuntime(decision.binding)
-			if err != nil {
-				s.logWarning(err)
+	if ctx.Err() == nil {
+		for _, decision := range transaction.plan.bindings {
+			if err := ctx.Err(); err != nil {
 				errs = append(errs, err)
-				continue
+				break
 			}
-			transaction.running[decision.binding.NodeID] = nextRuntime
-			started = append(started, nextRuntime)
-		case machineReconcileKeep:
-			decision.runtime.binding = decision.binding
-			decision.runtime.missingCount = 0
-		case machineReconcileRestart:
-			nextRuntime, err := s.restartRuntime(decision.runtime, decision.binding)
+			var nextRuntime *nodeRuntime
+			var err error
+			switch decision.action {
+			case machineReconcileStart:
+				nextRuntime, err = s.startRuntimeContext(ctx, decision.binding)
+			case machineReconcileKeep:
+				decision.runtime.binding = decision.binding
+				decision.runtime.missingCount = 0
+				decision.runtime.failure = nil
+				continue
+			case machineReconcileRestart:
+				nextRuntime, err = s.restartRuntimeContext(ctx, decision.runtime, decision.binding)
+			case machineReconcileRecover:
+				nextRuntime, err = s.recoverRuntimeContext(ctx, decision.runtime, decision.binding)
+			}
+
 			if nextRuntime != nil {
 				transaction.running[decision.binding.NodeID] = nextRuntime
 				if nextRuntime != decision.runtime {
@@ -703,9 +965,9 @@ func (s *Supervisor) executeReconcile(transaction machineReconcileTransaction) m
 func (s *Supervisor) commitReconcile(result machineReconcileResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Close waits for operationMu, so an in-flight reconcile may hand it the final topology while closing.
-	if s.closed {
-		return fmt.Errorf("machine supervisor is closed")
+	// Close waits for the operation gate, so reconcile commits the final ownership state first.
+	if s.closed || s.cleanupPending {
+		return fmt.Errorf("machine supervisor is unavailable")
 	}
 	if s.topologyGeneration != result.generation {
 		return fmt.Errorf(
@@ -720,7 +982,6 @@ func (s *Supervisor) commitReconcile(result machineReconcileResult) error {
 	s.topologyGeneration++
 	return nil
 }
-
 func (s *Supervisor) topologySnapshot() machineTopologySnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -739,12 +1000,50 @@ func cloneMachineTopology(running map[int]*nodeRuntime) map[int]*nodeRuntime {
 			continue
 		}
 		runtimeValue := *runtime
+		runtimeValue.cleanupServices = append([]service.Service(nil), runtime.cleanupServices...)
 		cloned[nodeID] = &runtimeValue
 	}
 	return cloned
 }
 
+func newNodeRuntime(binding NodeBinding, nodeService service.Service) *nodeRuntime {
+	runtime := &nodeRuntime{
+		binding: binding,
+		service: nodeService,
+		state:   nodeRuntimeRetiring,
+	}
+	if restorer, ok := nodeService.(machineRuntimeRestorer); ok {
+		runtime.restorer = restorer
+	}
+	return runtime
+}
+
+func (runtime *nodeRuntime) hasResources() bool {
+	return runtime != nil && (runtime.service != nil || len(runtime.cleanupServices) != 0)
+}
+
+func (runtime *nodeRuntime) absorbOwnership(other *nodeRuntime) {
+	if runtime == nil || other == nil {
+		return
+	}
+	if other.service != nil {
+		runtime.cleanupServices = append(runtime.cleanupServices, other.service)
+	}
+	runtime.cleanupServices = append(runtime.cleanupServices, other.cleanupServices...)
+	runtime.state = nodeRuntimeFailedOwned
+	runtime.failure = errors.Join(runtime.failure, other.failure)
+}
+
 func (s *Supervisor) startRuntime(binding NodeBinding) (*nodeRuntime, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return s.startRuntimeContext(ctx, binding)
+}
+
+func (s *Supervisor) startRuntimeContext(ctx context.Context, binding NodeBinding) (*nodeRuntime, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	nodeService, err := s.factory(binding)
 	if err != nil {
 		return nil, fmt.Errorf("build service for machine node %d: %w", binding.NodeID, err)
@@ -752,19 +1051,48 @@ func (s *Supervisor) startRuntime(binding NodeBinding) (*nodeRuntime, error) {
 	if nodeService == nil {
 		return nil, fmt.Errorf("build service for machine node %d: nil service", binding.NodeID)
 	}
-	if err := nodeService.Start(); err != nil {
-		startErr := fmt.Errorf("start service for machine node %d: %w", binding.NodeID, err)
-		cleanupErr := s.closeRuntime(&nodeRuntime{binding: binding, service: nodeService})
-		return nil, errors.Join(startErr, cleanupErr)
-	}
+	return s.startPreparedRuntimeContext(ctx, newNodeRuntime(binding, nodeService), "start service")
+}
 
-	return &nodeRuntime{
-		binding: binding,
-		service: nodeService,
-	}, nil
+func (s *Supervisor) startPreparedRuntime(runtime *nodeRuntime, operation string) (*nodeRuntime, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return s.startPreparedRuntimeContext(ctx, runtime, operation)
+}
+
+func (s *Supervisor) startPreparedRuntimeContext(ctx context.Context, runtime *nodeRuntime, operation string) (*nodeRuntime, error) {
+	if runtime == nil || runtime.service == nil {
+		return nil, errors.New("machine runtime service is nil")
+	}
+	if err := service.StartContext(ctx, runtime.service); err != nil {
+		startErr := fmt.Errorf("%s for machine node %d: %w", operation, runtime.binding.NodeID, err)
+		cleanupCtx, cancel := service.CleanupContext(ctx)
+		cleanupErr := s.closeRuntimeContext(cleanupCtx, runtime)
+		cancel()
+		joined := errors.Join(startErr, cleanupErr)
+		if runtime.hasResources() {
+			runtime.state = nodeRuntimeFailedOwned
+			runtime.failure = joined
+			return runtime, joined
+		}
+		return nil, joined
+	}
+	runtime.state = nodeRuntimeRunning
+	runtime.failure = nil
+	runtime.missingCount = 0
+	return runtime, nil
 }
 
 func (s *Supervisor) restartRuntime(oldRuntime *nodeRuntime, nextBinding NodeBinding) (*nodeRuntime, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.restartRuntimeContext(ctx, oldRuntime, nextBinding)
+}
+
+func (s *Supervisor) restartRuntimeContext(ctx context.Context, oldRuntime *nodeRuntime, nextBinding NodeBinding) (*nodeRuntime, error) {
+	if err := ctx.Err(); err != nil {
+		return oldRuntime, err
+	}
 	nextService, err := s.factory(nextBinding)
 	if err != nil {
 		return oldRuntime, fmt.Errorf("build replacement service for machine node %d: %w", nextBinding.NodeID, err)
@@ -772,71 +1100,179 @@ func (s *Supervisor) restartRuntime(oldRuntime *nodeRuntime, nextBinding NodeBin
 	if nextService == nil {
 		return oldRuntime, fmt.Errorf("build replacement service for machine node %d: nil service", nextBinding.NodeID)
 	}
+	nextRuntime := newNodeRuntime(nextBinding, nextService)
 
-	if err := s.closeRuntime(oldRuntime); err != nil {
-		cleanupErr := s.closeRuntime(&nodeRuntime{binding: nextBinding, service: nextService})
-		return oldRuntime, errors.Join(
-			fmt.Errorf("close old service for machine node %d before restart: %w", oldRuntime.binding.NodeID, err),
-			cleanupErr,
-		)
-	}
-
-	if err := nextService.Start(); err == nil {
-		return &nodeRuntime{
-			binding: nextBinding,
-			service: nextService,
-		}, nil
-	} else {
-		startErr := fmt.Errorf("start replacement service for machine node %d: %w", nextBinding.NodeID, err)
-		cleanupErr := s.closeRuntime(&nodeRuntime{binding: nextBinding, service: nextService})
-		rollbackRuntime, rollbackErr := s.rollbackRuntime(oldRuntime)
-		if rollbackErr == nil {
-			return rollbackRuntime, errors.Join(startErr, cleanupErr)
+	if closeErr := s.closeRuntimeContext(ctx, oldRuntime); closeErr != nil {
+		cleanupCtx, cancel := service.CleanupContext(ctx)
+		cleanupErr := s.closeRuntimeContext(cleanupCtx, nextRuntime)
+		cancel()
+		if nextRuntime.hasResources() {
+			oldRuntime.absorbOwnership(nextRuntime)
 		}
-		return nil, errors.Join(
-			startErr,
+		joined := errors.Join(
+			fmt.Errorf("close old service for machine node %d before restart: %w", oldRuntime.binding.NodeID, closeErr),
 			cleanupErr,
-			fmt.Errorf("rollback old service for machine node %d: %w", oldRuntime.binding.NodeID, rollbackErr),
 		)
+		oldRuntime.state = nodeRuntimeFailedOwned
+		oldRuntime.failure = joined
+		return oldRuntime, joined
 	}
+
+	startedRuntime, startErr := s.startPreparedRuntimeContext(ctx, nextRuntime, "start replacement service")
+	if startErr == nil {
+		return startedRuntime, nil
+	}
+	if startedRuntime != nil {
+		oldRuntime.absorbOwnership(startedRuntime)
+		oldRuntime.state = nodeRuntimeFailedOwned
+		oldRuntime.failure = startErr
+		return oldRuntime, startErr
+	}
+
+	cleanupCtx, cancel := service.CleanupContext(ctx)
+	rollbackRuntime, rollbackErr := s.rollbackRuntimeContext(cleanupCtx, oldRuntime)
+	cancel()
+	if rollbackRuntime != nil {
+		return rollbackRuntime, errors.Join(startErr, rollbackErr)
+	}
+	return nil, errors.Join(
+		startErr,
+		fmt.Errorf("rollback old service for machine node %d: %w", oldRuntime.binding.NodeID, rollbackErr),
+	)
+}
+
+func (s *Supervisor) recoverRuntime(runtime *nodeRuntime, desiredBinding NodeBinding) (*nodeRuntime, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.recoverRuntimeContext(ctx, runtime, desiredBinding)
+}
+
+func (s *Supervisor) recoverRuntimeContext(ctx context.Context, runtime *nodeRuntime, desiredBinding NodeBinding) (*nodeRuntime, error) {
+	if runtime == nil {
+		return s.startRuntimeContext(ctx, desiredBinding)
+	}
+	if err := s.closeRuntimeContext(ctx, runtime); err != nil {
+		return runtime, err
+	}
+	if runtime.restorer != nil {
+		restored, err := s.rollbackRuntimeContext(ctx, runtime)
+		if err != nil {
+			return restored, fmt.Errorf("restore last-known-good machine node %d: %w", runtime.binding.NodeID, err)
+		}
+		return restored, nil
+	}
+	return s.startRuntimeContext(ctx, desiredBinding)
 }
 
 func (s *Supervisor) rollbackRuntime(oldRuntime *nodeRuntime) (*nodeRuntime, error) {
-	rollbackService, err := s.factory(oldRuntime.binding)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return s.rollbackRuntimeContext(ctx, oldRuntime)
+}
+
+func (s *Supervisor) rollbackRuntimeContext(ctx context.Context, oldRuntime *nodeRuntime) (*nodeRuntime, error) {
+	if oldRuntime == nil {
+		return nil, errors.New("nil rollback runtime")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var rollbackService service.Service
+	var err error
+	if oldRuntime.restorer != nil {
+		rollbackService, err = oldRuntime.restorer.RestoreMachineRuntime()
+	} else {
+		rollbackService, err = s.factory(oldRuntime.binding)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if rollbackService == nil {
 		return nil, fmt.Errorf("nil rollback service")
 	}
-	if err := rollbackService.Start(); err != nil {
-		cleanupErr := s.closeRuntime(&nodeRuntime{binding: oldRuntime.binding, service: rollbackService})
-		return nil, errors.Join(err, cleanupErr)
+	runtime := newNodeRuntime(oldRuntime.binding, rollbackService)
+	if runtime.restorer == nil {
+		runtime.restorer = oldRuntime.restorer
 	}
-	return &nodeRuntime{
-		binding: oldRuntime.binding,
-		service: rollbackService,
-	}, nil
+	return s.startPreparedRuntimeContext(ctx, runtime, "start rollback service")
 }
 
 func (s *Supervisor) closeRuntime(runtime *nodeRuntime) error {
-	if runtime == nil || runtime.service == nil {
-		return nil
-	}
-	if err := runtime.service.Close(); err != nil {
-		return fmt.Errorf("close service for machine node %d: %w", runtime.binding.NodeID, err)
-	}
-	return nil
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return s.closeRuntimeContext(ctx, runtime)
 }
 
-func (s *Supervisor) closeRuntimes(runtimes []*nodeRuntime) error {
+func (s *Supervisor) closeRuntimeContext(ctx context.Context, runtime *nodeRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+	runtime.state = nodeRuntimeRetiring
+	var errs []error
+	if runtime.service != nil {
+		if err := service.CloseContext(ctx, runtime.service); err != nil {
+			errs = append(errs, fmt.Errorf("close service for machine node %d: %w", runtime.binding.NodeID, err))
+		} else {
+			runtime.service = nil
+		}
+	}
+
+	remaining := make([]service.Service, 0, len(runtime.cleanupServices))
+	for _, ownedService := range runtime.cleanupServices {
+		if ownedService == nil {
+			continue
+		}
+		if err := service.CloseContext(ctx, ownedService); err != nil {
+			remaining = append(remaining, ownedService)
+			errs = append(errs, fmt.Errorf("close retained service for machine node %d: %w", runtime.binding.NodeID, err))
+		}
+	}
+	runtime.cleanupServices = remaining
+	closeErr := errors.Join(errs...)
+	if runtime.hasResources() {
+		runtime.state = nodeRuntimeFailedOwned
+		runtime.failure = closeErr
+		return closeErr
+	}
+	runtime.failure = nil
+	return closeErr
+}
+
+func (s *Supervisor) cleanupUnpublishedRuntimes(runtimes []*nodeRuntime) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return s.cleanupUnpublishedRuntimesContext(ctx, runtimes)
+}
+
+func (s *Supervisor) cleanupUnpublishedRuntimesContext(ctx context.Context, runtimes []*nodeRuntime) error {
 	var errs []error
 	for i := len(runtimes) - 1; i >= 0; i-- {
-		if err := s.closeRuntime(runtimes[i]); err != nil {
+		runtime := runtimes[i]
+		if err := s.closeRuntimeContext(ctx, runtime); err != nil {
 			errs = append(errs, err)
+		}
+		if runtime != nil && runtime.hasResources() {
+			s.retainUnpublishedOwnership(runtime)
 		}
 	}
 	return errors.Join(errs...)
+}
+func (s *Supervisor) retainUnpublishedOwnership(runtime *nodeRuntime) {
+	if runtime == nil || !runtime.hasResources() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	nodeID := runtime.binding.NodeID
+	if current := s.running[nodeID]; current != nil {
+		current.absorbOwnership(runtime)
+		current.failure = errors.Join(current.failure, runtime.failure)
+	} else {
+		runtime.state = nodeRuntimeFailedOwned
+		s.running[nodeID] = runtime
+	}
+	s.topologyFailure = errors.Join(s.topologyFailure, runtime.failure)
+	s.topologyGeneration++
 }
 
 func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.Duration) {
@@ -853,7 +1289,10 @@ func (s *Supervisor) run(ctx context.Context, done chan struct{}, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.reconcilePeriodicFrom(done); err != nil {
+			reconcileCtx, cancel := service.WithDefaultTimeout(ctx, service.DefaultSyncTimeout)
+			err := s.reconcilePeriodicFromContext(reconcileCtx, done)
+			cancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
 				s.logWarning(err)
 			}
 		}
@@ -864,7 +1303,11 @@ func (s *Supervisor) startStatusLoopLocked(interval time.Duration) {
 	if s.config.MachineStatus.Reporter == nil || s.config.MachineStatus.Collector == nil || interval <= 0 || s.closed || s.statusCancel != nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := s.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 	s.statusCancel = cancel
 	s.statusDone = done
@@ -882,7 +1325,11 @@ func (s *Supervisor) replaceStatusIntervalLocked(interval time.Duration) (machin
 	if s.config.Logger != nil {
 		s.config.Logger.Infof("Update machine status interval to %s", interval)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := s.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
 	retired := machineLoopOwner{cancel: s.statusCancel, done: s.statusDone}
 	replacement := machineLoopOwner{cancel: cancel, done: done}
@@ -956,8 +1403,14 @@ func (s *Supervisor) reportMachineStatusContext(ctx context.Context) bool {
 	if snapshot.err != nil {
 		s.logWarning(fmt.Errorf("collect machine status: %w", snapshot.err))
 	}
-	if err := s.config.MachineStatus.Reporter.ReportMachineStatus(snapshot.status); err != nil {
-		s.logWarning(fmt.Errorf("report machine status: %w", err))
+	var reportErr error
+	if contextual, ok := s.config.MachineStatus.Reporter.(ContextMachineStatusReporter); ok {
+		reportErr = contextual.ReportMachineStatusContext(ctx, snapshot.status)
+	} else if ctx.Err() == nil {
+		reportErr = s.config.MachineStatus.Reporter.ReportMachineStatus(snapshot.status)
+	}
+	if reportErr != nil && !errors.Is(reportErr, context.Canceled) {
+		s.logWarning(fmt.Errorf("report machine status: %w", reportErr))
 	}
 	return ctx.Err() == nil
 }
@@ -978,16 +1431,44 @@ func (s *Supervisor) showErrorDetails() bool {
 }
 
 func (s *Supervisor) beginOperation(operation supervisorOperation) {
+	_, _, _ = s.beginOperationContext(context.Background(), operation)
+}
+
+func (s *Supervisor) beginOperationContext(ctx context.Context, operation supervisorOperation) (context.Context, context.CancelFunc, error) {
 	s.notifyOperation(operation, supervisorOperationAttempted)
-	s.operationMu.Lock()
+	if err := s.operationMu.Lock(ctx); err != nil {
+		return nil, nil, err
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	s.operationContextMu.Lock()
+	s.activeOperation = operation
+	s.activeOperationSet = true
+	s.activeOperationCancel = cancel
+	s.operationContextMu.Unlock()
 	s.notifyOperation(operation, supervisorOperationEntered)
+	return operationCtx, cancel, nil
+}
+
+func (s *Supervisor) cancelActiveOperation() {
+	s.operationContextMu.Lock()
+	cancel := s.activeOperationCancel
+	active := s.activeOperationSet && s.activeOperation != supervisorOperationClose
+	s.operationContextMu.Unlock()
+	if active && cancel != nil {
+		cancel()
+	}
 }
 
 func (s *Supervisor) endOperation(operation supervisorOperation) {
+	s.operationContextMu.Lock()
+	if s.activeOperationSet && s.activeOperation == operation {
+		s.activeOperationSet = false
+		s.activeOperationCancel = nil
+	}
+	s.operationContextMu.Unlock()
 	s.notifyOperation(operation, supervisorOperationExited)
 	s.operationMu.Unlock()
 }
-
 func (s *Supervisor) notifyOperation(operation supervisorOperation, phase supervisorOperationPhase) {
 	if s.observeOperation != nil {
 		s.observeOperation(operation, phase)

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/panel"
 )
 
@@ -35,6 +37,136 @@ func (r *reloadTestRuntime) Start() error {
 func (r *reloadTestRuntime) Close() error {
 	*r.events = append(*r.events, r.name+".close")
 	return r.closeErr
+}
+
+type deadlineReloadRuntime struct {
+	name          string
+	events        *[]string
+	waitStart     bool
+	waitClose     bool
+	startDeadline chan bool
+	closeDeadline chan bool
+}
+
+func (r *deadlineReloadRuntime) Start() error {
+	return r.StartContext(context.Background())
+}
+
+func (r *deadlineReloadRuntime) StartContext(ctx context.Context) error {
+	*r.events = append(*r.events, r.name+".start")
+	_, hasDeadline := ctx.Deadline()
+	if r.startDeadline != nil {
+		r.startDeadline <- hasDeadline
+	}
+	if r.waitStart {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return ctx.Err()
+}
+
+func (r *deadlineReloadRuntime) Close() error {
+	return r.CloseContext(context.Background())
+}
+
+func (r *deadlineReloadRuntime) CloseContext(ctx context.Context) error {
+	*r.events = append(*r.events, r.name+".close")
+	_, hasDeadline := ctx.Deadline()
+	if r.closeDeadline != nil {
+		r.closeDeadline <- hasDeadline
+	}
+	if r.waitClose {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return ctx.Err()
+}
+
+func TestPanelReloadContextPropagatesStartDeadlineAndRestoresLastKnownGood(t *testing.T) {
+	initialTime := time.Unix(425, 0)
+	events := make([]string, 0, 4)
+	initialConfig := reloadTestPanelConfig("initial")
+	candidateConfig := reloadTestPanelConfig("candidate")
+	initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
+	candidateRuntime := &deadlineReloadRuntime{
+		name:          "candidate",
+		events:        &events,
+		waitStart:     true,
+		startDeadline: make(chan bool, 1),
+		closeDeadline: make(chan bool, 1),
+	}
+	restoredRuntime := &deadlineReloadRuntime{name: "restored", events: &events}
+	buildCalls := 0
+	module := newPanelReloadModule(initialConfig, initialRuntime, panelReloadOptions{
+		lastAppliedAt: initialTime,
+		loadCandidate: func(string, string) (*panel.Config, error) {
+			return candidateConfig, nil
+		},
+		buildRuntime: func(config *panel.Config) panelRuntime {
+			buildCalls++
+			if buildCalls == 1 {
+				return candidateRuntime
+			}
+			if config != initialConfig {
+				t.Fatal("restore used a non-LKG config")
+			}
+			return restoredRuntime
+		},
+		applyProcessConfig: func(*panel.Config) {
+			t.Fatal("canceled candidate process config was published")
+		},
+		collectGarbage: func() {},
+		now:            func() time.Time { return initialTime.Add(4 * time.Second) },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := module.ReloadContext(ctx, "changed.yml"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ReloadContext() error = %v, want deadline exceeded", err)
+	}
+	if hasDeadline := <-candidateRuntime.startDeadline; !hasDeadline {
+		t.Fatal("candidate StartContext did not receive a deadline")
+	}
+	if hasDeadline := <-candidateRuntime.closeDeadline; !hasDeadline {
+		t.Fatal("candidate cleanup CloseContext did not receive a deadline")
+	}
+	state := module.stateSnapshot()
+	if state.status != panelReloadStatusReady || state.config != initialConfig || state.runtime != restoredRuntime {
+		t.Fatalf("deadline restore state = status:%v config:%p runtime:%v", state.status, state.config, state.runtime)
+	}
+}
+
+func TestPanelReloadCloseContextPropagatesDeadlineAndRetainsOwnership(t *testing.T) {
+	initialTime := time.Unix(450, 0)
+	events := make([]string, 0, 2)
+	runtime := &deadlineReloadRuntime{
+		name:          "initial",
+		events:        &events,
+		waitClose:     true,
+		closeDeadline: make(chan bool, 2),
+	}
+	module := newPanelReloadModule(reloadTestPanelConfig("initial"), runtime, panelReloadOptions{
+		lastAppliedAt: initialTime,
+		now:           func() time.Time { return initialTime },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := module.CloseContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext() error = %v, want deadline exceeded", err)
+	}
+	if hasDeadline := <-runtime.closeDeadline; !hasDeadline {
+		t.Fatal("runtime CloseContext did not receive a deadline")
+	}
+	state := module.stateSnapshot()
+	if state.status != panelReloadStatusFailedOwned || state.runtime != runtime {
+		t.Fatalf("deadline close lost ownership: status=%v runtime=%v", state.status, state.runtime)
+	}
+
+	runtime.waitClose = false
+	if err := module.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
+	}
 }
 
 func TestPanelReloadModuleKeepsAppliedRuntimeOnCandidateLoadFailure(t *testing.T) {
@@ -120,6 +252,182 @@ func TestPanelReloadModuleKeepsAppliedRuntimeOnEmptyCandidate(t *testing.T) {
 	}
 	if !module.lastAppliedAt.Equal(initialTime) {
 		t.Fatalf("lastAppliedAt = %s, want %s", module.lastAppliedAt, initialTime)
+	}
+}
+
+func TestPanelReloadModuleSupportsSameModeReloads(t *testing.T) {
+	tests := []struct {
+		name      string
+		initial   *panel.Config
+		candidate *panel.Config
+	}{
+		{
+			name:      "static to static",
+			initial:   reloadStaticTestPanelConfig("initial"),
+			candidate: reloadStaticTestPanelConfig("candidate"),
+		},
+		{
+			name:      "machine to machine with empty nodes",
+			initial:   reloadMachineTestPanelConfig("initial"),
+			candidate: reloadMachineTestPanelConfig("candidate"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialTime := time.Unix(225, 0)
+			events := make([]string, 0, 2)
+			initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
+			candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events}
+			module := newPanelReloadModule(tt.initial, initialRuntime, panelReloadOptions{
+				lastAppliedAt: initialTime,
+				loadCandidate: func(string, string) (*panel.Config, error) {
+					return tt.candidate, nil
+				},
+				buildRuntime: func(config *panel.Config) panelRuntime {
+					if config != tt.candidate {
+						t.Fatal("buildRuntime received non-candidate config")
+					}
+					return candidateRuntime
+				},
+				applyProcessConfig: func(*panel.Config) {},
+				collectGarbage:     func() {},
+				now:                func() time.Time { return initialTime.Add(4 * time.Second) },
+			})
+
+			if err := module.Reload("changed.yml"); err != nil {
+				t.Fatalf("Reload() error = %v", err)
+			}
+			state := module.stateSnapshot()
+			if state.config != tt.candidate || state.runtime != candidateRuntime || state.status != panelReloadStatusReady {
+				t.Fatalf("applied state = config:%p runtime:%v status:%v", state.config, state.runtime, state.status)
+			}
+			if got, want := events, []string{"initial.close", "candidate.start"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("events = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestPanelReloadModuleRestoresLastKnownGoodForSameModeStartFailures(t *testing.T) {
+	startErr := errors.New("start candidate")
+	tests := []struct {
+		name      string
+		initial   *panel.Config
+		candidate *panel.Config
+	}{
+		{
+			name:      "static to static",
+			initial:   reloadStaticTestPanelConfig("initial"),
+			candidate: reloadStaticTestPanelConfig("candidate"),
+		},
+		{
+			name:      "machine to machine",
+			initial:   reloadMachineTestPanelConfig("initial"),
+			candidate: reloadMachineTestPanelConfig("candidate"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialTime := time.Unix(235, 0)
+			events := make([]string, 0, 4)
+			initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
+			candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events, startErr: startErr}
+			restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
+			buildCalls := 0
+			module := newPanelReloadModule(tt.initial, initialRuntime, panelReloadOptions{
+				lastAppliedAt: initialTime,
+				loadCandidate: func(string, string) (*panel.Config, error) {
+					return tt.candidate, nil
+				},
+				buildRuntime: func(config *panel.Config) panelRuntime {
+					buildCalls++
+					if buildCalls == 1 {
+						if config != tt.candidate {
+							t.Fatal("candidate build received wrong config")
+						}
+						return candidateRuntime
+					}
+					if config != tt.initial {
+						t.Fatal("restore build received non-LKG config")
+					}
+					return restoredRuntime
+				},
+				applyProcessConfig: func(*panel.Config) {
+					t.Fatal("failed candidate process config was published")
+				},
+				collectGarbage: func() {},
+				now:            func() time.Time { return initialTime.Add(4 * time.Second) },
+			})
+
+			if err := module.Reload("changed.yml"); !errors.Is(err, startErr) {
+				t.Fatalf("Reload() error = %v, want %v", err, startErr)
+			}
+			state := module.stateSnapshot()
+			if state.config != tt.initial || state.runtime != restoredRuntime || state.status != panelReloadStatusReady {
+				t.Fatalf("LKG state = config:%p runtime:%v status:%v", state.config, state.runtime, state.status)
+			}
+			wantEvents := []string{"initial.close", "candidate.start", "candidate.close", "restored.start"}
+			if !reflect.DeepEqual(events, wantEvents) {
+				t.Fatalf("events = %#v, want %#v", events, wantEvents)
+			}
+		})
+	}
+}
+
+func TestPanelReloadModuleRejectsModeChangesBeforeClosingCurrentRuntime(t *testing.T) {
+	tests := []struct {
+		name      string
+		initial   *panel.Config
+		candidate *panel.Config
+	}{
+		{
+			name:      "static to machine",
+			initial:   reloadStaticTestPanelConfig("initial"),
+			candidate: reloadMachineTestPanelConfig("candidate"),
+		},
+		{
+			name:      "machine to static",
+			initial:   reloadMachineTestPanelConfig("initial"),
+			candidate: reloadStaticTestPanelConfig("candidate"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialTime := time.Unix(245, 0)
+			events := make([]string, 0)
+			initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
+			module := newPanelReloadModule(tt.initial, initialRuntime, panelReloadOptions{
+				lastAppliedAt: initialTime,
+				loadCandidate: func(string, string) (*panel.Config, error) {
+					return tt.candidate, nil
+				},
+				buildRuntime: func(*panel.Config) panelRuntime {
+					t.Fatal("buildRuntime called for unsupported mode change")
+					return nil
+				},
+				applyProcessConfig: func(*panel.Config) {
+					t.Fatal("mode-changing process config was published")
+				},
+				collectGarbage: func() {
+					t.Fatal("garbage collection ran for unsupported mode change")
+				},
+				now: func() time.Time { return initialTime.Add(4 * time.Second) },
+			})
+
+			if err := module.Reload("changed.yml"); !errors.Is(err, panel.ErrRuntimeConfigModeChange) {
+				t.Fatalf("Reload() error = %v, want %v", err, panel.ErrRuntimeConfigModeChange)
+			}
+			state := module.stateSnapshot()
+			if state.config != tt.initial || state.runtime != initialRuntime || state.status != panelReloadStatusReady {
+				t.Fatalf("mode rejection changed LKG state = config:%p runtime:%v status:%v", state.config, state.runtime, state.status)
+			}
+			if len(events) != 0 {
+				t.Fatalf("mode rejection touched current runtime: %#v", events)
+			}
+		})
 	}
 }
 
@@ -209,9 +517,9 @@ func TestPanelReloadModulePreservesSuccessfulReloadOrder(t *testing.T) {
 	}
 	wantEvents := []string{
 		"load:changed.yml:config.yml",
-		"build",
 		"initial.close",
 		"gc",
+		"build",
 		"candidate.start",
 		"apply-process",
 	}
@@ -226,29 +534,31 @@ func TestPanelReloadModulePreservesSuccessfulReloadOrder(t *testing.T) {
 	}
 }
 
-func TestPanelReloadModuleReportsCloseErrorAfterRestoringOldRuntime(t *testing.T) {
+func TestPanelReloadModuleOldCloseFailureRetainsRuntimeAndBlocksReload(t *testing.T) {
 	closeErr := errors.New("close initial")
 	initialTime := time.Unix(350, 0)
-	events := make([]string, 0, 3)
+	events := make([]string, 0, 2)
+	initialConfig := reloadTestPanelConfig("initial")
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events, closeErr: closeErr}
-	candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events}
-	restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
+	loadCalls := 0
 	buildCalls := 0
 
-	module := newPanelReloadModule(reloadTestPanelConfig("initial"), initialRuntime, panelReloadOptions{
+	module := newPanelReloadModule(initialConfig, initialRuntime, panelReloadOptions{
 		lastAppliedAt: initialTime,
 		loadCandidate: func(string, string) (*panel.Config, error) {
+			loadCalls++
 			return reloadTestPanelConfig("candidate"), nil
 		},
 		buildRuntime: func(*panel.Config) panelRuntime {
 			buildCalls++
-			if buildCalls == 1 {
-				return candidateRuntime
-			}
-			return restoredRuntime
+			return &reloadTestRuntime{name: "candidate", events: &events}
 		},
-		applyProcessConfig: func(*panel.Config) {},
-		collectGarbage:     func() {},
+		applyProcessConfig: func(*panel.Config) {
+			t.Fatal("candidate process config applied after old Close failure")
+		},
+		collectGarbage: func() {
+			t.Fatal("garbage collection ran after old Close failure")
+		},
 		now: func() time.Time {
 			return initialTime.Add(4 * time.Second)
 		},
@@ -258,14 +568,32 @@ func TestPanelReloadModuleReportsCloseErrorAfterRestoringOldRuntime(t *testing.T
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("Reload() error = %v, want wrapped close error", err)
 	}
-	if module.applied.runtime != restoredRuntime {
-		t.Fatal("old Close error did not publish restored runtime")
+	failed := module.stateSnapshot()
+	if failed.config != initialConfig || failed.runtime != initialRuntime || failed.status != panelReloadStatusFailedOwned {
+		t.Fatalf("old Close failure state = config:%p runtime:%v status:%v", failed.config, failed.runtime, failed.status)
 	}
-	if got, want := events, []string{"initial.close", "candidate.close", "restored.start"}; !reflect.DeepEqual(got, want) {
+	if buildCalls != 0 {
+		t.Fatalf("candidate builds = %d, want 0 before old runtime release", buildCalls)
+	}
+	if err := module.Reload("again.yml"); !errors.Is(err, errPanelReloadFailedOwned) {
+		t.Fatalf("second Reload() error = %v, want failed-owned rejection", err)
+	}
+	if loadCalls != 1 || buildCalls != 0 {
+		t.Fatalf("failed-owned Reload performed work: loads=%d builds=%d", loadCalls, buildCalls)
+	}
+
+	initialRuntime.closeErr = nil
+	if err := module.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
+	}
+	closed := module.stateSnapshot()
+	if closed.status != panelReloadStatusClosed || closed.runtime != nil {
+		t.Fatalf("cleanup retry state = runtime:%v status:%v", closed.runtime, closed.status)
+	}
+	if got, want := events, []string{"initial.close", "initial.close"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
-
 func TestPanelReloadModuleCloseClosesCurrentRuntime(t *testing.T) {
 	initialTime := time.Unix(375, 0)
 	times := []time.Time{initialTime.Add(4 * time.Second), initialTime.Add(5 * time.Second)}
@@ -405,9 +733,29 @@ func TestLoadPanelReloadCandidateReportsParseFailure(t *testing.T) {
 }
 
 func reloadTestPanelConfig(name string) *panel.Config {
+	return reloadStaticTestPanelConfig(name)
+}
+
+func reloadStaticTestPanelConfig(name string) *panel.Config {
 	return &panel.Config{
 		NodesConfig: []*panel.NodesConfig{{
-			PanelType: name,
+			PanelType: "SSPanel",
+			ApiConfig: &api.Config{
+				APIHost:  "https://" + name + ".example.com",
+				NodeType: "Vless",
+			},
 		}},
+	}
+}
+
+func reloadMachineTestPanelConfig(name string) *panel.Config {
+	return &panel.Config{
+		MachineConfig: &panel.MachineConfig{
+			Enable:    true,
+			PanelType: "NewV2board",
+			ApiHost:   "https://" + name + ".example.com",
+			MachineID: 7,
+			Token:     name + "-token",
+		},
 	}
 }

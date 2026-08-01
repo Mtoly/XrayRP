@@ -1,11 +1,17 @@
 package limiter
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/eko/gocache/lib/v4/cache"
+	"github.com/eko/gocache/lib/v4/store"
+	goCacheStore "github.com/eko/gocache/store/go_cache/v4"
+	goCache "github.com/patrickmn/go-cache"
 	"golang.org/x/time/rate"
 )
 
@@ -154,6 +160,50 @@ func BenchmarkGetOnlineDevice5000Users(b *testing.B) {
 			b.Fatalf("online devices = %d, want %d", len(*online), benchmarkUserCount)
 		}
 	}
+}
+
+func BenchmarkGlobalLimitCacheLocalHit(b *testing.B) {
+	ctx := context.Background()
+	value := []byte("value")
+
+	b.Run("owned-layered", func(b *testing.B) {
+		local := benchmarkGlobalLimitCacheLayer()
+		shared := benchmarkGlobalLimitCacheLayer()
+		if err := local.Set(ctx, "user", value, store.WithExpiration(time.Minute)); err != nil {
+			b.Fatal(err)
+		}
+		cacheManager := newLayeredGlobalLimitCache(local, shared, "local", "shared")
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := cacheManager.Get(ctx, "user"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("legacy-background-chain", func(b *testing.B) {
+		local := benchmarkGlobalLimitCacheLayer()
+		shared := benchmarkGlobalLimitCacheLayer()
+		if err := local.Set(ctx, "user", value, store.WithExpiration(time.Minute)); err != nil {
+			b.Fatal(err)
+		}
+		cacheManager := cache.NewChain[any](local, shared)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := cacheManager.Get(ctx, "user"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func benchmarkGlobalLimitCacheLayer() cache.SetterCacheInterface[any] {
+	client := goCache.New(time.Minute, 0)
+	return cache.New[any](goCacheStore.NewGoCache(client))
 }
 
 func benchmarkLimiter(b *testing.B, userCount int) (*Limiter, []string, []string) {

@@ -1,6 +1,7 @@
 package sspanel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,9 +108,14 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 }
 
 // GetNodeInfo will pull NodeInfo Config from ssPanel
-func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
+func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
 	path := fmt.Sprintf("/mod_mu/nodes/%d/info", c.NodeID)
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetResult(&Response{}).
 		SetHeader("If-None-Match", c.eTags.Get("node")).
 		ForceContentType("application/json").
@@ -152,7 +158,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		case "Trojan":
 			nodeInfo, err = c.ParseTrojanNodeResponse(nodeInfoResponse)
 		case "Shadowsocks":
-			nodeInfo, err = c.ParseSSNodeResponse(nodeInfoResponse)
+			nodeInfo, err = c.ParseSSNodeResponseContext(ctx, nodeInfoResponse)
 		case "Shadowsocks-Plugin":
 			nodeInfo, err = c.ParseSSPluginNodeResponse(nodeInfoResponse)
 		default:
@@ -171,6 +177,9 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s", string(res), err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.version = candidateVersion
 	c.eTags.Publish("node", candidateETag)
 	return nodeInfo, nil
@@ -179,10 +188,15 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 // GetXrayRCertConfig fetches optional global certificate configuration
 // (DNS provider, ACME email, DNS-01 env variables) from the panel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (c *APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
 	path := "/mod_mu/nodes/config"
 	payload := map[string]string{"type": "xrayr_cert"}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(payload).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
@@ -202,9 +216,14 @@ func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
 }
 
 // GetUserList will pull user form ssPanel
-func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 	path := "/mod_mu/users"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetHeader("If-None-Match", c.eTags.Get("users")).
 		SetResult(&Response{}).
@@ -234,12 +253,19 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		res, _ := json.Marshal(userListResponse)
 		return nil, fmt.Errorf("parse user list failed: %s", string(res))
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("users", candidateETag)
 	return userList, nil
 }
 
 // ReportNodeStatus reports the node status to the ssPanel
-func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
+func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (c *APIClient) ReportNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) (err error) {
 	path := fmt.Sprintf("/mod_mu/nodes/%d/info", c.NodeID)
 	systemLoad := SystemLoad{
 		Uptime: strconv.FormatUint(nodeStatus.Uptime, 10),
@@ -247,6 +273,7 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetBody(systemLoad).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
@@ -262,20 +289,23 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 
 // ReportNodeOnlineUsers reports online user ip
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
-	c.access.Lock()
-	defer c.access.Unlock()
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
 
+func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	reportOnline := make(map[int]int)
 	data := make([]OnlineUser, len(*onlineUserList))
 	for i, user := range *onlineUserList {
 		data[i] = OnlineUser{UID: user.UID, IP: user.IP}
 		reportOnline[user.UID]++ // will start from 1 if key doesn’t exist
 	}
-	c.LastReportOnline = reportOnline // Update LastReportOnline
-
 	postData := &PostData{Data: data}
 	path := "/mod_mu/users/aliveip"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetBody(postData).
 		SetResult(&Response{}).
@@ -286,17 +316,33 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 	if err != nil {
 		return err
 	}
-
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.access.Lock()
+	c.LastReportOnline = reportOnline
+	c.access.Unlock()
 	return nil
 }
 
 // GetAliveList is not supported by SSPanel.
-func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
+func (c *APIClient) GetAliveList() (map[int][]string, error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (*APIClient) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // ReportUserTraffic reports the user traffic
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 
 	data := make([]UserTraffic, len(*userTraffic))
 	for i, traffic := range *userTraffic {
@@ -308,6 +354,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	postData := &PostData{Data: data}
 	path := "/mod_mu/users/traffic"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetBody(postData).
 		SetResult(&Response{}).
@@ -323,9 +370,14 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 
 // GetNodeRule will pull the audit rule form ssPanel
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
 	ruleList := c.LocalRuleList
 	path := "/mod_mu/func/detect_rules"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetResult(&Response{}).
 		SetHeader("If-None-Match", c.eTags.Get("rules")).
 		ForceContentType("application/json").
@@ -362,12 +414,19 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 			Pattern: pattern,
 		})
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("rules", candidateETag)
 	return &ruleList, nil
 }
 
 // ReportIllegal reports the user illegal behaviors
 func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *[]api.DetectResult) error {
 
 	data := make([]IllegalItem, len(*detectResultList))
 	for i, r := range *detectResultList {
@@ -380,6 +439,7 @@ func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
 	postData := &PostData{Data: data}
 	path := "/mod_mu/users/detectlog"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetBody(postData).
 		SetResult(&Response{}).
@@ -489,11 +549,16 @@ func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *NodeInfoResponse) (
 
 // ParseSSNodeResponse parse the response for the given node info format
 func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *NodeInfoResponse) (*api.NodeInfo, error) {
+	return c.ParseSSNodeResponseContext(context.Background(), nodeInfoResponse)
+}
+
+func (c *APIClient) ParseSSNodeResponseContext(ctx context.Context, nodeInfoResponse *NodeInfoResponse) (*api.NodeInfo, error) {
 	var port uint32 = 0
 	var speedLimit uint64 = 0
 	var method string
 	path := "/mod_mu/users"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetResult(&Response{}).
 		ForceContentType("application/json").

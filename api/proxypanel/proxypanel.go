@@ -1,6 +1,7 @@
 package proxypanel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -67,6 +68,13 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig is not provided by ProxyPanel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (*APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
@@ -80,7 +88,11 @@ func (c *APIClient) assembleURL(path string) string {
 }
 
 func (c *APIClient) createCommonRequest() *resty.Request {
-	request := c.client.R().EnableTrace()
+	return c.createCommonRequestContext(context.Background())
+}
+
+func (c *APIClient) createCommonRequestContext(ctx context.Context) *resty.Request {
+	request := c.client.R().SetContext(ctx).EnableTrace()
 	request.EnableTrace()
 	request.SetHeader("key", c.Key)
 	request.SetHeader("timestamp", strconv.FormatInt(time.Now().Unix(), 10))
@@ -100,7 +112,11 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 }
 
 // GetNodeInfo will pull NodeInfo Config from sspanel
-func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
+func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -113,7 +129,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
 
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
@@ -143,7 +159,11 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 }
 
 // GetUserList will pull user form sspanel
-func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -156,7 +176,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
 
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
@@ -184,7 +204,11 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 }
 
 // ReportNodeStatus reports the node status to the sspanel
-func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
+func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (c *APIClient) ReportNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) (err error) {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -204,7 +228,7 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 		Disk:   fmt.Sprintf("%d%%", int(nodeStatus.Disk)),
 	}
 
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetBody(systemload).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
@@ -220,6 +244,10 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 
 // ReportNodeOnlineUsers reports online user ip
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
+
+func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 
 	var path string
 	switch c.NodeType {
@@ -238,7 +266,7 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 		data[i] = NodeOnline{UID: user.UID, IP: user.IP}
 	}
 
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetBody(data).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
@@ -253,12 +281,23 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 }
 
 // GetAliveList is not supported by ProxyPanel.
-func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
+func (c *APIClient) GetAliveList() (map[int][]string, error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (*APIClient) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // ReportUserTraffic reports the user traffic
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -278,7 +317,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 			Upload:   traffic.Upload,
 			Download: traffic.Download}
 	}
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetBody(data).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
@@ -294,6 +333,10 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 
 // GetNodeRule will pull the audit rule form sspanel
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -306,7 +349,7 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
 
-	res, err := c.createCommonRequest().
+	res, err := c.createCommonRequestContext(ctx).
 		SetResult(&Response{}).
 		ForceContentType("application/json").
 		Get(path)
@@ -347,6 +390,10 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 
 // ReportIllegal reports the user illegal behaviors
 func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *[]api.DetectResult) error {
 	var path string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless":
@@ -360,7 +407,7 @@ func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
 	}
 
 	for _, r := range *detectResultList {
-		res, err := c.createCommonRequest().
+		res, err := c.createCommonRequestContext(ctx).
 			SetBody(IllegalReport{
 				RuleID: r.RuleID,
 				UID:    r.UID,

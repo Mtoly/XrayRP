@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,6 +66,95 @@ func TestBuildRuntimeConfigPlanHandlesNilConfigAsEmptyStaticPlan(t *testing.T) {
 	}
 	if plan.mode != runtimeConfigModeStatic || len(plan.staticNodes) != 0 || plan.machineConfig != nil || plan.showErrorDetails {
 		t.Fatalf("unexpected nil-config plan: %#v", plan)
+	}
+}
+
+func TestValidateRuntimeConfigAppliesModeSpecificRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr error
+	}{
+		{
+			name: "static mode requires nodes",
+			config: &Config{
+				NodesConfig: nil,
+			},
+			wantErr: ErrStaticRuntimeConfigEmptyNodes,
+		},
+		{
+			name: "static mode accepts nodes",
+			config: &Config{
+				NodesConfig: []*NodesConfig{{
+					PanelType: "SSPanel",
+					ApiConfig: &api.Config{},
+				}},
+			},
+		},
+		{
+			name:   "machine mode accepts empty nodes",
+			config: validMachineModeConfig(),
+		},
+		{
+			name: "machine mode rejects static nodes",
+			config: func() *Config {
+				config := validMachineModeConfig()
+				config.NodesConfig = []*NodesConfig{{
+					PanelType: "SSPanel",
+					ApiConfig: &api.Config{},
+				}}
+				return config
+			}(),
+			wantErr: ErrRuntimeConfigModeConflict,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRuntimeConfig(tt.config)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateRuntimeConfig() error = %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ValidateRuntimeConfig() error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRuntimeConfigReloadRejectsModeChanges(t *testing.T) {
+	staticConfig := &Config{
+		NodesConfig: []*NodesConfig{{
+			PanelType: "SSPanel",
+			ApiConfig: &api.Config{},
+		}},
+	}
+	machineConfig := validMachineModeConfig()
+
+	if err := ValidateRuntimeConfigReload(staticConfig, staticConfig); err != nil {
+		t.Fatalf("static-to-static validation error = %v", err)
+	}
+	if err := ValidateRuntimeConfigReload(machineConfig, machineConfig); err != nil {
+		t.Fatalf("machine-to-machine validation error = %v", err)
+	}
+	if err := ValidateRuntimeConfigReload(staticConfig, machineConfig); !errors.Is(err, ErrRuntimeConfigModeChange) {
+		t.Fatalf("static-to-machine validation error = %v, want %v", err, ErrRuntimeConfigModeChange)
+	}
+	if err := ValidateRuntimeConfigReload(machineConfig, staticConfig); !errors.Is(err, ErrRuntimeConfigModeChange) {
+		t.Fatalf("machine-to-static validation error = %v, want %v", err, ErrRuntimeConfigModeChange)
+	}
+}
+
+func TestDefaultPanelLifecycleUsesValidatedRuntimeConfigPlan(t *testing.T) {
+	ops := defaultPanelLifecycleOps()
+	if _, err := ops.buildRuntimePlan(&Config{}); !errors.Is(err, ErrStaticRuntimeConfigEmptyNodes) {
+		t.Fatalf("empty static initial config error = %v, want %v", err, ErrStaticRuntimeConfigEmptyNodes)
+	}
+	if _, err := ops.buildRuntimePlan(validMachineModeConfig()); err != nil {
+		t.Fatalf("machine initial config with empty Nodes error = %v", err)
 	}
 }
 

@@ -119,3 +119,53 @@ func TestGetUserListAcceptsFiveThousandUsersNearResponseLimit(t *testing.T) {
 		t.Fatalf("users = %#v, want 5000 decoded users", got)
 	}
 }
+
+func TestTransportErrorsDoNotExposeCredentialsOrResponseBodies(t *testing.T) {
+	const (
+		key        = "gov2panel-request-secret"
+		bodySecret = "gov2panel-response-secret"
+	)
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{
+			name:   "HTTP error",
+			status: http.StatusInternalServerError,
+			body:   `{"code":0,"message":"` + bodySecret + `"}`,
+			want:   "status 500",
+		},
+		{
+			name:   "malformed JSON",
+			status: http.StatusOK,
+			body:   `{"private":"` + bodySecret,
+			want:   "not valid JSON",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			client := newContractClient(server, "V2ray")
+			client.Key = key
+			result, err := client.GetUserList()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("result = %#v, error = %v, want %q", result, err, test.want)
+			}
+			if result != nil {
+				t.Fatalf("failed request returned partial result: %#v", result)
+			}
+			if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), bodySecret) {
+				t.Fatalf("transport error leaked credentials or response body: %v", err)
+			}
+		})
+	}
+}

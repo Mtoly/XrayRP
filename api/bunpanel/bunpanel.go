@@ -1,6 +1,7 @@
 package bunpanel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -36,22 +37,44 @@ type APIClient struct {
 }
 
 // ReportIllegal accepts illegal-access reports for this adapter.
-func (*APIClient) ReportIllegal(detectResultList *[]api.DetectResult) (err error) {
-	return nil
+func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (*APIClient) ReportIllegalContext(ctx context.Context, _ *[]api.DetectResult) error {
+	return ctx.Err()
 }
 
 // ReportNodeStatus accepts node status reports for this adapter.
-func (*APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
-	return nil
+func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (*APIClient) ReportNodeStatusContext(ctx context.Context, _ *api.NodeStatus) error {
+	return ctx.Err()
 }
 
 // GetXrayRCertConfig is not supported by BunPanel.
-func (*APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (*APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // GetNodeRule returns the configured local detection rules.
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ruleList := c.LocalRuleList
 	return &ruleList, nil
 }
@@ -115,9 +138,14 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 	return response, nil
 }
 
-func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
+func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
 	path := fmt.Sprintf("/v2/server/%d/get", c.NodeID)
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetResult(&Response{}).
 		SetHeader("If-None-Match", c.eTags.Get("node")).
 		ForceContentType("application/json").
@@ -148,13 +176,21 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s, \nPlease check the doc of custom_config for help: https://xrayr-project.github.io/XrayR-doc/dui-jie-sspanel/sspanel/sspanel_custom_config", string(res), err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("node", candidateETag)
 	return nodeInfo, nil
 }
 
-func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 	path := "/v2/user/get"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("serverId", strconv.Itoa(c.NodeID)).
 		SetHeader("If-None-Match", c.eTags.Get("users")).
 		SetResult(&Response{}).
@@ -184,25 +220,31 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		res, _ := json.Marshal(userListResponse)
 		return nil, fmt.Errorf("parse user list failed: %s", string(res))
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("users", candidateETag)
 	return userList, nil
 }
 
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
-	c.access.Lock()
-	defer c.access.Unlock()
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
 
+func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	reportOnline := make(map[int]int)
 	data := make([]OnlineUser, len(*onlineUserList))
 	for i, user := range *onlineUserList {
 		data[i] = OnlineUser{UID: user.UID, IP: user.IP}
 		reportOnline[user.UID]++
 	}
-	c.LastReportOnline = reportOnline // Update LastReportOnline
-
 	postData := &PostData{Data: data}
 	path := "/v2/user/online/create"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("serverId", strconv.Itoa(c.NodeID)).
 		SetBody(postData).
 		SetResult(&Response{}).
@@ -213,16 +255,32 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 	if err != nil {
 		return err
 	}
-
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.access.Lock()
+	c.LastReportOnline = reportOnline
+	c.access.Unlock()
 	return nil
 }
 
 // GetAliveList is not supported by BunPanel.
-func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
+func (c *APIClient) GetAliveList() (map[int][]string, error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (*APIClient) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 
 	data := make([]UserTraffic, len(*userTraffic))
 	for i, traffic := range *userTraffic {
@@ -234,6 +292,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	postData := &PostData{Data: data}
 	path := "/v2/user/data-usage/create"
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("serverId", strconv.Itoa(c.NodeID)).
 		SetBody(postData).
 		SetResult(&Response{}).

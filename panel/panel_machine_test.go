@@ -430,6 +430,7 @@ func TestMaterializeMachineRuntimeNodeRejectsIncompleteSharedWSCapabilities(t *t
 
 func TestMachineRuntimeNodePlanUseSharedWSRuntime(t *testing.T) {
 	sharedWS := machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{})
+	registry := defaultRuntimeServiceRegistry()
 	tests := []struct {
 		name     string
 		plan     machineRuntimeNodePlan
@@ -451,28 +452,99 @@ func TestMachineRuntimeNodePlanUseSharedWSRuntime(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "hysteria2 falls back",
+			name:     "shared ws supported hysteria2",
 			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "Hysteria2"}},
-			expected: false,
+			expected: true,
 		},
 		{
-			name:     "tuic falls back",
+			name:     "shared ws supported tuic",
 			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "Tuic"}},
-			expected: false,
+			expected: true,
 		},
 		{
-			name:     "anytls falls back",
+			name:     "shared ws supported anytls",
 			plan:     machineRuntimeNodePlan{sharedWS: sharedWS, binding: machine.NodeBinding{NodeType: "AnyTLS"}},
-			expected: false,
+			expected: true,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := test.plan.useSharedWSRuntime(); got != test.expected {
-				t.Fatalf("expected useSharedWSRuntime=%v, got %v", test.expected, got)
+			expected := test.expected
+			if kind, specialized := specializedRuntimeServiceKind(test.plan.binding.NodeType); specialized {
+				_, expected = registry.registration(kind)
+			}
+			if got := test.plan.useSharedWSRuntime(); got != expected {
+				t.Fatalf("expected useSharedWSRuntime=%v, got %v", expected, got)
 			}
 		})
+	}
+}
+
+func TestBuildMachineSpecializedRuntimeAttachesSharedSnapshotMailbox(t *testing.T) {
+	sharedWS := machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{})
+	tests := []string{"Hysteria2", "Tuic", "AnyTLS"}
+	for index, nodeType := range tests {
+		t.Run(nodeType, func(t *testing.T) {
+			kind, _ := specializedRuntimeServiceKind(nodeType)
+			if _, included := defaultRuntimeServiceRegistry().registration(kind); !included {
+				t.Skipf("%s is not included in this build profile", nodeType)
+			}
+			panel := &Panel{}
+			built, err := panel.buildMachineRuntimeNodeServiceFromApplied(
+				nil,
+				machineRuntimeNodePlan{
+					binding:  machine.NodeBinding{NodeID: index + 1, NodeType: nodeType},
+					sharedWS: sharedWS,
+				},
+				runtimeConfigPlan{machineConfig: &MachineConfig{PanelType: "NewV2board"}},
+				&runtimeRegistryTestAPI{clientInfo: api.ClientInfo{NodeType: nodeType}},
+				&controller.Config{},
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("build specialized machine runtime: %v", err)
+			}
+			wrapped, ok := built.(*machineRuntimeNodeService)
+			if !ok {
+				t.Fatalf("runtime type = %T, want machine wrapper", built)
+			}
+			if wrapped.snapshotRuntime == nil {
+				t.Fatal("specialized machine runtime has no shared snapshot mailbox")
+			}
+		})
+	}
+}
+
+func TestBuildMachineSnapshotRuntimeRejectsMissingSubmitter(t *testing.T) {
+	registry := defaultRuntimeServiceRegistry()
+	nodeType := ""
+	for _, candidate := range []struct {
+		kind     runtimeNodeServiceKind
+		nodeType string
+	}{
+		{kind: runtimeNodeServiceAnyTLS, nodeType: "AnyTLS"},
+		{kind: runtimeNodeServiceTuic, nodeType: "Tuic"},
+		{kind: runtimeNodeServiceHysteria2, nodeType: "Hysteria2"},
+	} {
+		if _, included := registry.registration(candidate.kind); included {
+			nodeType = candidate.nodeType
+			break
+		}
+	}
+	if nodeType == "" {
+		t.Skip("this build profile has no specialized runtime")
+	}
+
+	_, err := buildMachineSnapshotRuntime(
+		machineRuntimeNodePlan{
+			binding:  machine.NodeBinding{NodeID: 7, NodeType: nodeType},
+			sharedWS: machine.NewSharedWSRuntime(machine.SharedWSRuntimeConfig{}),
+		},
+		&runtimeRegistryMarkerService{},
+	)
+	if err == nil {
+		t.Fatal("specialized runtime without snapshot submitter was accepted")
 	}
 }
 

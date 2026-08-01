@@ -1,15 +1,18 @@
 package hysteria2
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/apernet/hysteria/core/v2/server"
 	"github.com/apernet/hysteria/extras/v2/correctnet"
 	"github.com/apernet/hysteria/extras/v2/obfs"
 
 	"github.com/Mtoly/XrayRP/common/mylego"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.Config, error) {
@@ -98,8 +101,8 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 		QUICConfig: server.QUICConfig{},
 		Conn:       packetConn,
 
-		// Keep RequestHook nil. Hysteria installs sniffing through this hook, and
-		// enabling it exposes GHSA-9fw6-xgg2-mq9q until upstream ships a fix.
+		// Keep RequestHook nil as defense in depth. XrayRP does not need request
+		// sniffing, and this keeps the affected parser outside the runtime path.
 		RequestHook: nil,
 
 		BandwidthConfig:       bandwidth,
@@ -146,8 +149,22 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 
 // certMonitor checks and renews the certificate when needed.
 func (h *Hysteria2Service) certMonitor() error {
-	h.reloadMu.Lock()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.certMonitorContext(ctx)
+}
+
+func (h *Hysteria2Service) certMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := h.reloadMu.Lock(ctx); err != nil {
+		return err
+	}
 	defer h.reloadMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if h.beforeCertificateStateRead != nil {
 		h.beforeCertificateStateRead()
@@ -198,15 +215,26 @@ func (h *Hysteria2Service) certMonitor() error {
 		if h.logger != nil {
 			h.logger.Infof("Hysteria2 certificate renewed for %s, validating replacement runtime", h.config.CertConfig.CertDomain)
 		}
-		return h.reloadNodeWithCertificateLocked(nodeInfo, renewal)
+		return h.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
 	}
 
 	return nil
 }
 
 func (h *Hysteria2Service) certMonitorPeriodic() error {
-	if err := h.certMonitor(); err != nil && h.logger != nil {
-		h.logger.Warn("certificate monitor failed; will retry")
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.certMonitorPeriodicContext(ctx)
+}
+
+func (h *Hysteria2Service) certMonitorPeriodicContext(ctx context.Context) error {
+	if err := h.certMonitorContext(ctx); err != nil {
+		h.health.RecordFailure(service.FailureStageCertificate, time.Now())
+		if h.logger != nil {
+			h.logger.Warn("certificate monitor failed; will retry")
+		}
+	} else {
+		h.refreshCertificateExpiry()
 	}
 	return nil
 }

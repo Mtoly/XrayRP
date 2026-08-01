@@ -171,6 +171,38 @@ func TestLegacyOuterCrossTagAliasFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLimiterStateSnapshotTracksValidLegacyMutationAndRejectsForgedOuterState(t *testing.T) {
+	limiter := New()
+	users := []api.UserInfo{{UID: 1, Email: "user@example.test", SpeedLimit: 100}}
+	if err := limiter.AddInboundLimiter("inbound", 50, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter() error = %v", err)
+	}
+	value, ok := limiter.InboundInfo.Load("inbound")
+	if !ok {
+		t.Fatal("legacy inbound view was not published")
+	}
+	applied := value.(*InboundInfo)
+	applied.NodeSpeedLimit = 25
+
+	snapshot := limiter.StateSnapshot()
+	if got := snapshot.Inbounds["inbound"].NodeSpeedLimit; got != 25 {
+		t.Fatalf("StateSnapshot() node speed limit = %d, want legacy mutation 25", got)
+	}
+
+	limiter.InboundInfo.Store("forged", applied)
+	if _, ok := limiter.StateSnapshot().Inbounds["forged"]; ok {
+		t.Fatal("StateSnapshot() accepted forged cross-tag outer entry")
+	}
+
+	limiter.InboundInfo.Delete("inbound")
+	if _, ok := limiter.StateSnapshot().Inbounds["inbound"]; ok {
+		t.Fatal("StateSnapshot() reported legacy-deleted applied entry")
+	}
+	if err := limiter.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestLegacyLimiterAPIMutationsRemainApplied(t *testing.T) {
 	limiter := New()
 	users := []api.UserInfo{{

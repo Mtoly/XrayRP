@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -11,18 +12,47 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/internal/operation"
 	"github.com/Mtoly/XrayRP/panel"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 var (
 	errPanelReloadNilCandidate = errors.New("panel reload candidate is nil")
 	errPanelReloadEmptyNodes   = errors.New("panel reload candidate contains no nodes")
 	errPanelReloadClosed       = errors.New("panel reload module is closed")
+	errPanelReloadFailedOwned  = errors.New("panel reload cleanup ownership remains")
 )
 
 type panelRuntime interface {
 	Start() error
 	Close() error
+}
+
+func startPanelRuntimeContext(ctx context.Context, runtime panelRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+	if contextual, ok := runtime.(interface{ StartContext(context.Context) error }); ok {
+		return contextual.StartContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runtime.Start()
+}
+
+func closePanelRuntimeContext(ctx context.Context, runtime panelRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+	if contextual, ok := runtime.(interface{ CloseContext(context.Context) error }); ok {
+		return contextual.CloseContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runtime.Close()
 }
 
 type panelReloadOperation uint8
@@ -46,6 +76,7 @@ const (
 	panelReloadStatusReady panelReloadStatus = iota
 	panelReloadStatusReloading
 	panelReloadStatusFailed
+	panelReloadStatusFailedOwned
 	panelReloadStatusClosed
 )
 
@@ -61,6 +92,7 @@ type panelReloadOptions struct {
 	lastAppliedAt      time.Time
 	debounce           time.Duration
 	loadCandidate      func(eventName, configuredFile string) (*panel.Config, error)
+	validateCandidate  func(current, candidate *panel.Config) error
 	buildRuntime       func(*panel.Config) panelRuntime
 	applyProcessConfig func(*panel.Config)
 	collectGarbage     func()
@@ -69,13 +101,14 @@ type panelReloadOptions struct {
 }
 
 type panelReloadModule struct {
-	operationMu   sync.Mutex
+	operationMu   operation.Gate
 	stateMu       sync.RWMutex
 	applied       panelReloadState
 	configFile    string
 	lastAppliedAt time.Time
 	debounce      time.Duration
 	loadCandidate func(eventName, configuredFile string) (*panel.Config, error)
+	validate      func(current, candidate *panel.Config) error
 	buildRuntime  func(*panel.Config) panelRuntime
 	applyProcess  func(*panel.Config)
 	collect       func()
@@ -89,6 +122,9 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 	}
 	if options.loadCandidate == nil {
 		options.loadCandidate = loadPanelReloadCandidate
+	}
+	if options.validateCandidate == nil {
+		options.validateCandidate = validatePanelReloadCandidate
 	}
 	if options.buildRuntime == nil {
 		options.buildRuntime = func(config *panel.Config) panelRuntime {
@@ -118,6 +154,7 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		lastAppliedAt: options.lastAppliedAt,
 		debounce:      options.debounce,
 		loadCandidate: options.loadCandidate,
+		validate:      options.validateCandidate,
 		buildRuntime:  options.buildRuntime,
 		applyProcess:  options.applyProcessConfig,
 		collect:       options.collectGarbage,
@@ -127,12 +164,25 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 }
 
 func (m *panelReloadModule) Reload(eventName string) error {
-	m.beginOperation(panelReloadOperationReload)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return m.ReloadContext(ctx, eventName)
+}
+
+func (m *panelReloadModule) ReloadContext(parent context.Context, eventName string) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultSyncTimeout)
+	defer cancel()
+	if err := m.beginOperationContext(ctx, panelReloadOperationReload); err != nil {
+		return err
+	}
 	defer m.endOperation(panelReloadOperationReload)
 
 	current := m.stateSnapshot()
 	if current.status == panelReloadStatusClosed {
 		return errPanelReloadClosed
+	}
+	if current.status == panelReloadStatusFailedOwned {
+		return errors.Join(errPanelReloadFailedOwned, current.failure)
 	}
 	if !m.now().After(m.lastAppliedAt.Add(m.debounce)) {
 		return nil
@@ -140,6 +190,9 @@ func (m *panelReloadModule) Reload(eventName string) error {
 
 	fmt.Println("Config file changed:", eventName)
 	candidateConfig, err := m.loadCandidate(eventName, m.configFile)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	if err != nil {
 		log.Errorf("Hot reload: %v; keeping existing configuration", err)
 		return err
@@ -148,14 +201,8 @@ func (m *panelReloadModule) Reload(eventName string) error {
 		log.Errorf("Hot reload: %v; keeping existing configuration", errPanelReloadNilCandidate)
 		return errPanelReloadNilCandidate
 	}
-	if len(candidateConfig.NodesConfig) == 0 {
-		log.Warnf("Hot reload: new config file %s contains no Nodes; ignoring reload to avoid stopping running services", eventName)
-		return fmt.Errorf("%w: %s", errPanelReloadEmptyNodes, eventName)
-	}
-	candidateRuntime := m.buildRuntime(candidateConfig)
-	if candidateRuntime == nil {
-		err := errors.New("build new panel: nil runtime")
-		log.Error("Hot reload: failed to build new panel")
+	if err := m.validate(current.config, candidateConfig); err != nil {
+		log.Warnf("Hot reload: candidate config validation failed; keeping existing configuration")
 		return err
 	}
 
@@ -165,30 +212,64 @@ func (m *panelReloadModule) Reload(eventName string) error {
 		status:  panelReloadStatusReloading,
 	})
 
-	var errs []error
 	if current.runtime != nil {
-		if err := current.runtime.Close(); err != nil {
+		if closeErr := closePanelRuntimeContext(ctx, current.runtime); closeErr != nil {
+			joined := fmt.Errorf("close old panel: %w", closeErr)
 			log.Error("Hot reload: failed to close old panel")
-			errs = append(errs, fmt.Errorf("close old panel: %w", err))
-			if cleanupErr := candidateRuntime.Close(); cleanupErr != nil {
-				log.Error("Hot reload: failed to clean candidate panel")
-				errs = append(errs, fmt.Errorf("clean candidate panel after old close failure: %w", cleanupErr))
-			}
-			return m.restoreLastKnownGood(current, errs)
+			m.publishState(panelReloadState{
+				config:  current.config,
+				runtime: current.runtime,
+				status:  panelReloadStatusFailedOwned,
+				failure: joined,
+			})
+			return joined
 		}
 	}
+	m.publishState(panelReloadState{
+		config: current.config,
+		status: panelReloadStatusReloading,
+	})
 	m.collect()
 
-	if err := candidateRuntime.Start(); err != nil {
-		log.Error("Hot reload: failed to start new panel")
-		errs = append(errs, fmt.Errorf("start new panel: %w", err))
-		if cleanupErr := candidateRuntime.Close(); cleanupErr != nil {
-			log.Error("Hot reload: failed to clean candidate panel")
-			errs = append(errs, fmt.Errorf("clean failed candidate panel: %w", cleanupErr))
-		}
-		return m.restoreLastKnownGood(current, errs)
+	candidateRuntime := m.buildRuntime(candidateConfig)
+	if candidateRuntime == nil {
+		err := errors.New("build new panel: nil runtime")
+		log.Error("Hot reload: failed to build new panel")
+		return m.restoreLastKnownGoodContext(ctx, current, []error{err})
 	}
 
+	if err := startPanelRuntimeContext(ctx, candidateRuntime); err != nil {
+		log.Error("Hot reload: failed to start new panel")
+		errs := []error{fmt.Errorf("start new panel: %w", err)}
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		cleanupErr := closePanelRuntimeContext(cleanupCtx, candidateRuntime)
+		cleanupCancel()
+		if cleanupErr != nil {
+			log.Error("Hot reload: failed to clean candidate panel")
+			errs = append(errs, fmt.Errorf("clean failed candidate panel: %w", cleanupErr))
+			joined := errors.Join(errs...)
+			m.publishState(panelReloadState{
+				config:  current.config,
+				runtime: candidateRuntime,
+				status:  panelReloadStatusFailedOwned,
+				failure: joined,
+			})
+			return joined
+		}
+		return m.restoreLastKnownGoodContext(ctx, current, errs)
+	}
+
+	if err := ctx.Err(); err != nil {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		cleanupErr := closePanelRuntimeContext(cleanupCtx, candidateRuntime)
+		cleanupCancel()
+		if cleanupErr != nil {
+			joined := errors.Join(err, cleanupErr)
+			m.publishState(panelReloadState{config: current.config, runtime: candidateRuntime, status: panelReloadStatusFailedOwned, failure: joined})
+			return joined
+		}
+		return m.restoreLastKnownGoodContext(ctx, current, []error{err})
+	}
 	m.applyProcess(candidateConfig)
 	m.publishState(panelReloadState{
 		config:  candidateConfig,
@@ -198,13 +279,22 @@ func (m *panelReloadModule) Reload(eventName string) error {
 	m.lastAppliedAt = m.now()
 	return nil
 }
-
 func (m *panelReloadModule) Close() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return m.CloseContext(ctx)
+}
+
+func (m *panelReloadModule) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
 	if m == nil {
 		return nil
 	}
 
-	m.beginOperation(panelReloadOperationClose)
+	if err := m.beginOperationContext(ctx, panelReloadOperationClose); err != nil {
+		return err
+	}
 	defer m.endOperation(panelReloadOperationClose)
 
 	current := m.stateSnapshot()
@@ -214,17 +304,33 @@ func (m *panelReloadModule) Close() error {
 
 	var closeErr error
 	if current.runtime != nil {
-		closeErr = current.runtime.Close()
+		closeErr = closePanelRuntimeContext(ctx, current.runtime)
+	}
+	if closeErr != nil {
+		joined := errors.Join(current.failure, closeErr)
+		m.publishState(panelReloadState{
+			config:  current.config,
+			runtime: current.runtime,
+			status:  panelReloadStatusFailedOwned,
+			failure: joined,
+		})
+		return closeErr
 	}
 	m.publishState(panelReloadState{
-		config:  current.config,
-		status:  panelReloadStatusClosed,
-		failure: closeErr,
+		config: current.config,
+		status: panelReloadStatusClosed,
 	})
-	return closeErr
+	return nil
+}
+func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs []error) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return m.restoreLastKnownGoodContext(ctx, previous, errs)
 }
 
-func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs []error) error {
+func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, previous panelReloadState, errs []error) error {
+	ctx, cancel := service.WithDefaultTimeout(context.WithoutCancel(parent), service.DefaultStartTimeout)
+	defer cancel()
 	restoredRuntime := m.buildRuntime(previous.config)
 	if restoredRuntime == nil {
 		errs = append(errs, errors.New("restore old panel: nil runtime"))
@@ -238,10 +344,22 @@ func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs
 		return joined
 	}
 
-	if err := restoredRuntime.Start(); err != nil {
+	if err := startPanelRuntimeContext(ctx, restoredRuntime); err != nil {
 		errs = append(errs, fmt.Errorf("restore old panel: %w", err))
-		if cleanupErr := restoredRuntime.Close(); cleanupErr != nil {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		cleanupErr := closePanelRuntimeContext(cleanupCtx, restoredRuntime)
+		cleanupCancel()
+		if cleanupErr != nil {
 			errs = append(errs, fmt.Errorf("clean failed restored panel: %w", cleanupErr))
+			joined := errors.Join(errs...)
+			m.publishState(panelReloadState{
+				config:  previous.config,
+				runtime: restoredRuntime,
+				status:  panelReloadStatusFailedOwned,
+				failure: joined,
+			})
+			log.Error("Hot reload: failed to restore old panel")
+			return joined
 		}
 		joined := errors.Join(errs...)
 		m.publishState(panelReloadState{
@@ -260,15 +378,21 @@ func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs
 	})
 	return errors.Join(errs...)
 }
-
 func (m *panelReloadModule) beginOperation(operation panelReloadOperation) {
+	_ = m.beginOperationContext(context.Background(), operation)
+}
+
+func (m *panelReloadModule) beginOperationContext(ctx context.Context, operation panelReloadOperation) error {
 	if m.observeOp != nil {
 		m.observeOp(operation, panelReloadOperationAttempted)
 	}
-	m.operationMu.Lock()
+	if err := m.operationMu.Lock(ctx); err != nil {
+		return err
+	}
 	if m.observeOp != nil {
 		m.observeOp(operation, panelReloadOperationEntered)
 	}
+	return nil
 }
 
 func (m *panelReloadModule) endOperation(operation panelReloadOperation) {
@@ -277,11 +401,45 @@ func (m *panelReloadModule) endOperation(operation panelReloadOperation) {
 	}
 	m.operationMu.Unlock()
 }
-
 func (m *panelReloadModule) stateSnapshot() panelReloadState {
 	m.stateMu.RLock()
 	defer m.stateMu.RUnlock()
 	return m.applied
+}
+
+func (m *panelReloadModule) ObservabilitySnapshot() service.RuntimeSnapshot {
+	if m == nil {
+		return service.RuntimeSnapshot{Kind: service.RuntimeKindPanel, Lifecycle: service.RuntimeLifecycleClosed, WebSocket: service.WebSocketDisabled}
+	}
+	state := m.stateSnapshot()
+	snapshot := service.RuntimeSnapshot{
+		Kind:      service.RuntimeKindPanel,
+		Lifecycle: service.RuntimeLifecycleStopped,
+		WebSocket: service.WebSocketDisabled,
+	}
+	if provider, ok := state.runtime.(service.RuntimeSnapshotProvider); ok {
+		snapshot = provider.ObservabilitySnapshot()
+	}
+	switch state.status {
+	case panelReloadStatusReady:
+	case panelReloadStatusReloading:
+		if state.runtime == nil || snapshot.Lifecycle != service.RuntimeLifecycleRunning {
+			snapshot.Lifecycle = service.RuntimeLifecycleStarting
+		} else {
+			snapshot.Lifecycle = service.RuntimeLifecycleReloading
+		}
+	case panelReloadStatusFailed:
+		snapshot.Lifecycle = service.RuntimeLifecycleFailed
+		snapshot.LastFailureStage = service.FailureStageStart
+	case panelReloadStatusFailedOwned:
+		snapshot.Lifecycle = service.RuntimeLifecycleFailedOwned
+		snapshot.CleanupPending = true
+		snapshot.LastFailureStage = service.FailureStageCleanup
+	case panelReloadStatusClosed:
+		snapshot.Lifecycle = service.RuntimeLifecycleClosed
+		snapshot.Children = nil
+	}
+	return snapshot
 }
 
 func (m *panelReloadModule) publishState(state panelReloadState) {
@@ -320,4 +478,12 @@ func applyPanelProcessConfig(config *panel.Config) {
 		log.SetReportCaller(false)
 	}
 	common.SetShowErrorDetails(config.ShowErrorDetails())
+}
+
+func validatePanelReloadCandidate(current, candidate *panel.Config) error {
+	err := panel.ValidateRuntimeConfigReload(current, candidate)
+	if errors.Is(err, panel.ErrStaticRuntimeConfigEmptyNodes) {
+		return errors.Join(errPanelReloadEmptyNodes, err)
+	}
+	return err
 }

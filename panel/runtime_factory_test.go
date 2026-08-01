@@ -32,8 +32,14 @@ func TestRuntimeServiceRegistryPreservesAliasesAndControllerFallback(t *testing.
 	registry := defaultRuntimeServiceRegistry()
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := registry.resolve(test.nodeType).kind; got != test.want {
-				t.Fatalf("kind = %q, want %q", got, test.want)
+			want := test.want
+			if specializedKind, specialized := specializedRuntimeServiceKind(test.nodeType); specialized {
+				if _, included := registry.registration(specializedKind); !included {
+					want = runtimeNodeServiceController
+				}
+			}
+			if got := registry.resolve(test.nodeType).kind; got != want {
+				t.Fatalf("kind = %q, want %q", got, want)
 			}
 		})
 	}
@@ -52,10 +58,20 @@ func TestRuntimeServiceRegistryConstructsSpecializedServices(t *testing.T) {
 	registry := defaultRuntimeServiceRegistry()
 	for _, test := range tests {
 		t.Run(test.nodeType, func(t *testing.T) {
-			runtimeService := registry.build(runtimeServiceConstruction{
+			runtimeService, err := registry.build(runtimeServiceConstruction{
 				apiClient:        &runtimeRegistryTestAPI{clientInfo: api.ClientInfo{NodeType: test.nodeType}},
 				controllerConfig: &controller.Config{},
 			}, "")
+			kind, _ := specializedRuntimeServiceKind(test.nodeType)
+			if _, included := registry.registration(kind); !included {
+				if err == nil {
+					t.Fatalf("build succeeded for omitted node type %q", test.nodeType)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got := fmt.Sprintf("%T", runtimeService); got != test.wantType {
 				t.Fatalf("service type = %q, want %q", got, test.wantType)
 			}
@@ -66,8 +82,9 @@ func TestRuntimeServiceRegistryConstructsSpecializedServices(t *testing.T) {
 func TestRuntimeServiceRegistryPreservesDescribeAndFallbackPrecedence(t *testing.T) {
 	registry := runtimeServiceRegistry{
 		registrations: []runtimeServiceRegistration{{
-			kind:    runtimeNodeServiceTuic,
-			aliases: []string{"Tuic"},
+			kind:             runtimeNodeServiceTuic,
+			aliases:          []string{"Tuic"},
+			supportsSharedWS: true,
 			newService: func(runtimeServiceConstruction) service.Service {
 				return &runtimeRegistryMarkerService{name: "tuic"}
 			},
@@ -95,7 +112,7 @@ func TestRuntimeServiceRegistryPreservesDescribeAndFallbackPrecedence(t *testing
 		{name: "empty describe uses fallback", fallback: "Tuic", want: "tuic"},
 		{name: "describe wins over fallback", described: "Vless", fallback: "Tuic", want: "controller"},
 		{name: "whitespace describe does not use fallback", described: " ", fallback: "Tuic", want: "controller"},
-		{name: "websocket request forces controller", described: "Tuic", fallback: "Tuic", want: "controller-ws", withWSRuntime: true},
+		{name: "websocket keeps specialized service", described: "Tuic", fallback: "Tuic", want: "tuic", withWSRuntime: true},
 	}
 
 	for _, test := range tests {
@@ -108,7 +125,10 @@ func TestRuntimeServiceRegistryPreservesDescribeAndFallbackPrecedence(t *testing
 					return nil, nil
 				}
 			}
-			built := registry.build(construction, test.fallback)
+			built, err := registry.build(construction, test.fallback)
+			if err != nil {
+				t.Fatal(err)
+			}
 			marker, ok := built.(*runtimeRegistryMarkerService)
 			if !ok || marker.name != test.want {
 				t.Fatalf("service = %#v, want marker %q", built, test.want)
@@ -123,10 +143,10 @@ func TestRuntimeServiceRegistryPreservesSharedWSEligibilityNormalization(t *test
 		nodeType string
 		want     bool
 	}{
-		{nodeType: "Hysteria", want: false},
-		{nodeType: " hYsTeRiA2 ", want: false},
-		{nodeType: " TUIC ", want: false},
-		{nodeType: " anytls ", want: false},
+		{nodeType: "Hysteria", want: true},
+		{nodeType: " hYsTeRiA2 ", want: true},
+		{nodeType: " TUIC ", want: true},
+		{nodeType: " anytls ", want: true},
 		{nodeType: "Vless", want: true},
 		{nodeType: " vmess ", want: true},
 		{nodeType: "Unknown", want: true},
@@ -134,8 +154,12 @@ func TestRuntimeServiceRegistryPreservesSharedWSEligibilityNormalization(t *test
 
 	for _, test := range tests {
 		t.Run(test.nodeType, func(t *testing.T) {
-			if got := registry.supportsSharedWS(test.nodeType); got != test.want {
-				t.Fatalf("supports shared WS = %v, want %v", got, test.want)
+			want := test.want
+			if kind, specialized := specializedRuntimeServiceKind(strings.TrimSpace(test.nodeType)); specialized {
+				_, want = registry.registration(kind)
+			}
+			if got := registry.supportsSharedWS(test.nodeType); got != want {
+				t.Fatalf("supports shared WS = %v, want %v", got, want)
 			}
 		})
 	}

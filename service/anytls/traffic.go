@@ -1,9 +1,8 @@
 package anytls
 
 import (
-	"errors"
+	"context"
 	"net"
-	"reflect"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
@@ -379,57 +379,57 @@ func (s *AnyTLSService) restoreTraffic(snapshot map[string]userTraffic) {
 }
 
 func (s *AnyTLSService) userMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.userMonitorContext(ctx)
+}
+
+func (s *AnyTLSService) userMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	_, tag, startAt := s.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
+	s.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncUsers | service.SnapshotSyncRules,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 
 	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 	if err != nil {
 		s.logger.Print(err)
 	} else {
-		if err = s.apiClient.ReportNodeStatus(&api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
+		if err = api.ReportNodeStatusContext(ctx, s.apiClient, &api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
 			s.logger.Print(err)
 		}
 	}
 
-	usersChanged := true
-	newUserInfo, err := s.apiClient.GetUserList()
-	if err != nil {
-		if errors.Is(err, api.ErrUserNotModified) {
-			usersChanged = false
-		} else {
-			s.logger.Print(err)
-			return nil
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if usersChanged {
-		s.syncUsers(newUserInfo)
-	}
-
-	// Check Rule
-	if !s.config.DisableGetRule && s.rules != nil {
-		if ruleList, err := s.apiClient.GetNodeRule(); err != nil {
-			if !errors.Is(err, api.ErrRuleNotModified) {
-				s.logger.Printf("Get rule list filed: %s", err)
-			}
-		} else if ruleList != nil {
-			if err := s.rules.UpdateRule(tag, *ruleList); err != nil {
-				s.logger.Print(err)
-			}
-		}
-	}
-
 	userTraffic, onlineUsers, snapshot := s.collectUsage()
+	s.health.SetTrafficBacklog(len(userTraffic))
+	if err := ctx.Err(); err != nil {
+		s.restoreTraffic(snapshot)
+		return err
+	}
 	if len(userTraffic) > 0 && !s.config.DisableUploadTraffic {
-		if err = s.apiClient.ReportUserTraffic(&userTraffic); err != nil {
+		if err = api.ReportUserTrafficContext(ctx, s.apiClient, &userTraffic); err != nil {
 			s.logger.Print(err)
 			// Restore counters so traffic is not lost and can be retried.
 			s.restoreTraffic(snapshot)
+			s.health.RecordFailure(service.FailureStageReport, time.Now())
+		} else {
+			s.health.SetTrafficBacklog(0)
 		}
+	} else {
+		s.health.SetTrafficBacklog(0)
 	}
 	if len(onlineUsers) > 0 {
-		if err = s.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
+		if err = api.ReportNodeOnlineUsersContext(ctx, s.apiClient, &onlineUsers); err != nil {
 			s.logger.Print(err)
 		}
 	}
@@ -439,7 +439,7 @@ func (s *AnyTLSService) userMonitor() error {
 		if detectResult, err := s.rules.GetDetectResult(tag); err != nil {
 			s.logger.Print(err)
 		} else if len(*detectResult) > 0 {
-			if err = s.apiClient.ReportIllegal(detectResult); err != nil {
+			if err = api.ReportIllegalContext(ctx, s.apiClient, detectResult); err != nil {
 				s.logger.Print(err)
 			} else {
 				s.logger.Printf("Report %d illegal behaviors", len(*detectResult))
@@ -454,42 +454,25 @@ func (s *AnyTLSService) userMonitor() error {
 // (port, TLS/SNI, AnyTLS-specific options, etc.) and hot-reloads the sing-box
 // instance when a change is detected.
 func (s *AnyTLSService) nodeMonitor() error {
-	currentNode, _, startAt := s.appliedStateSnapshot()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.nodeMonitorContext(ctx)
+}
+
+func (s *AnyTLSService) nodeMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, _, startAt := s.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
-	nodeInfo, err := s.apiClient.GetNodeInfo()
-	if err != nil {
-		if errors.Is(err, api.ErrNodeNotModified) {
-			return nil
-		}
-		s.logger.Print(err)
-		return nil
-	}
-
-	if nodeInfo == nil || nodeInfo.NodeType != "AnyTLS" {
-		if s.logger != nil {
-			if nodeInfo == nil {
-				s.logger.Warn("AnyTLS node monitor: unexpected node info: <nil>")
-			} else {
-				s.logger.Warnf("AnyTLS node monitor: unexpected node info: type=%s id=%d", nodeInfo.NodeType, nodeInfo.NodeID)
-			}
-		}
-		return nil
-	}
-
-	// Same as TUIC/Hysteria2: protect against noisy panel-side metadata updates
-	// that change the ETag without altering the actual AnyTLS node configuration
-	// by skipping reload when the effective NodeInfo is unchanged.
-	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
-		return nil
-	}
-
-	if err := s.reloadNode(nodeInfo); err != nil {
-		s.logger.Printf("AnyTLS node reload failed: %v", err)
-	}
-
+	s.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncNode,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 	return nil
 }
 

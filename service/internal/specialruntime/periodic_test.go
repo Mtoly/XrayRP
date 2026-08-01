@@ -1,11 +1,14 @@
 package specialruntime
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Mtoly/XrayRP/service"
 )
 
 func TestManagedPeriodicStartWaitsForFirstExecute(t *testing.T) {
@@ -115,6 +118,75 @@ func TestManagedPeriodicCloseWaitsForCallback(t *testing.T) {
 	close(releaseCallback)
 	if err := <-closeDone; err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestManagedPeriodicCloseCancelsCallbackContextAndJoinsIt(t *testing.T) {
+	timer := newManualManagedPeriodicTimer()
+	callbackEntered := make(chan struct{})
+	callbackCanceled := make(chan struct{})
+	var calls atomic.Int32
+	task := NewPeriodicContext(time.Hour, func(ctx context.Context) error {
+		if calls.Add(1) == 1 {
+			return nil
+		}
+		close(callbackEntered)
+		<-ctx.Done()
+		close(callbackCanceled)
+		return ctx.Err()
+	})
+	task.newTimer = func(time.Duration) managedPeriodicTimer { return timer }
+
+	if err := task.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	timer.waitObserved(t)
+	timer.fire()
+	<-callbackEntered
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- task.CloseContext(context.Background()) }()
+	<-callbackCanceled
+	if err := <-closeDone; err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("callback calls = %d, want initial and one periodic callback", got)
+	}
+}
+
+func TestManagedPeriodicCapsEveryCallbackWithSyncDeadline(t *testing.T) {
+	timer := newManualManagedPeriodicTimer()
+	deadlines := make(chan time.Duration, 2)
+	task := NewPeriodicContext(time.Hour, func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("periodic callback did not receive a deadline")
+		}
+		deadlines <- time.Until(deadline)
+		return nil
+	})
+	task.newTimer = func(time.Duration) managedPeriodicTimer { return timer }
+
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelParent()
+	if err := task.StartContext(parent); err != nil {
+		t.Fatalf("StartContext() error = %v", err)
+	}
+	assertSyncDeadline(t, <-deadlines)
+
+	timer.waitObserved(t)
+	timer.fire()
+	assertSyncDeadline(t, <-deadlines)
+	if err := task.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func assertSyncDeadline(t *testing.T, remaining time.Duration) {
+	t.Helper()
+	if remaining <= 0 || remaining > service.DefaultSyncTimeout+time.Second {
+		t.Fatalf("callback deadline remaining = %s, want sync timeout cap", remaining)
 	}
 }
 

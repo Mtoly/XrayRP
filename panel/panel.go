@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,20 +10,30 @@ import (
 	"github.com/xtls/xray-core/core"
 
 	"github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/internal/operation"
 	"github.com/Mtoly/XrayRP/service"
 )
 
 // Panel Structure
 type Panel struct {
-	access      sync.Mutex
+	access      operation.Gate
 	publishedMu sync.RWMutex
 	published   panelPublishedState
 	panelConfig *Config
 	lifecycle   panelLifecycleOps
-	// Server, Service, and Running are compatibility projections. Internal
-	// lifecycle code owns resources through published instead.
-	Server  *core.Instance
+
+	// Server is a compatibility projection of the currently owned core.
+	//
+	// Deprecated: Use ServerInstance. The returned core is borrowed; callers
+	// must not close it or assume ownership.
+	Server *core.Instance
+	// Service is a compatibility projection of the currently owned services.
+	//
+	// Deprecated: Use ServicesSnapshot, which returns a cloned slice.
 	Service []service.Service
+	// Running is a compatibility projection of the panel lifecycle.
+	//
+	// Deprecated: Use IsRunning.
 	Running bool
 	logger  *log.Entry
 }
@@ -34,6 +45,7 @@ const (
 	panelStateStarting
 	panelStateRunning
 	panelStateStopping
+	panelStateFailedOwned
 )
 
 type panelPublishedState struct {
@@ -85,7 +97,7 @@ func defaultPanelLifecycleOps() panelLifecycleOps {
 		closeCore: func(server *core.Instance) error {
 			return server.Close()
 		},
-		buildRuntimePlan: buildRuntimeConfigPlan,
+		buildRuntimePlan: buildValidatedRuntimeConfigPlan,
 		buildStaticModules: func(p *Panel, server *core.Instance, plan runtimeConfigPlan) ([]service.Service, error) {
 			return p.buildStaticNodeServices(server, plan)
 		},
@@ -107,14 +119,29 @@ func New(panelConfig *Config) *Panel {
 
 // Start the panel
 func (p *Panel) Start() error {
-	p.access.Lock()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return p.StartContext(ctx)
+}
+
+func (p *Panel) StartContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultStartTimeout)
+	defer cancel()
+	if err := p.access.Lock(ctx); err != nil {
+		return err
+	}
 	defer p.access.Unlock()
 	p.logger.Info("Starting panel")
 	ops := p.lifecycleOps()
 	current := p.publishedStateSnapshot()
-	if current.lifecycle == panelStateRunning {
+	switch current.lifecycle {
+	case panelStateRunning:
 		p.publishState(current.lifecycle, current.server, current.services)
 		return nil
+	case panelStateFailedOwned:
+		return errors.New("panel cannot start while cleanup ownership remains")
+	case panelStateStarting, panelStateStopping:
+		return fmt.Errorf("panel cannot start from lifecycle state %d", current.lifecycle)
 	}
 	p.publishState(panelStateStarting, nil, nil)
 
@@ -132,18 +159,28 @@ func (p *Panel) Start() error {
 
 	startedServices := make([]service.Service, 0)
 	rollback := func(primary error) error {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		defer cleanupCancel()
 		errs := []error{primary}
+		remainingServices := make([]service.Service, 0)
 		for i := len(startedServices) - 1; i >= 0; i-- {
-			if err := startedServices[i].Close(); err != nil {
+			if err := service.CloseContext(cleanupCtx, startedServices[i]); err != nil {
 				errs = append(errs, fmt.Errorf("failed to roll back service: %w", err))
+				remainingServices = append(remainingServices, startedServices[i])
 				p.logLifecycleError("Failed to roll back service", err)
 			}
 		}
+		var remainingServer *core.Instance
 		if err := ops.closeCore(server); err != nil {
 			errs = append(errs, fmt.Errorf("failed to roll back core: %w", err))
+			remainingServer = server
 			p.logLifecycleError("Failed to roll back core", err)
 		}
-		p.publishState(panelStateStopped, nil, nil)
+		if remainingServer != nil || len(remainingServices) != 0 {
+			p.publishState(panelStateFailedOwned, remainingServer, remainingServices)
+		} else {
+			p.publishState(panelStateStopped, nil, nil)
+		}
 		return errors.Join(errs...)
 	}
 	if err := ops.startCore(server); err != nil {
@@ -164,21 +201,24 @@ func (p *Panel) Start() error {
 		}
 	}
 
-	for _, s := range services {
-		if err := s.Start(); err != nil {
+	for _, runtimeService := range services {
+		if err := service.StartContext(ctx, runtimeService); err != nil {
+			startedServices = append(startedServices, runtimeService)
 			p.logLifecycleError("Failed to start service", err)
 			return rollback(fmt.Errorf("failed to start service: %w", err))
 		}
-		startedServices = append(startedServices, s)
+		startedServices = append(startedServices, runtimeService)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
 	p.publishState(panelStateRunning, server, services)
 	return nil
 }
-
 func (p *Panel) publishState(lifecycle panelLifecycleState, server *core.Instance, services []service.Service) {
 	next := panelPublishedState{lifecycle: lifecycle}
-	if lifecycle == panelStateRunning {
+	if lifecycle == panelStateRunning || lifecycle == panelStateStopping || lifecycle == panelStateFailedOwned {
 		next.server = server
 		next.services = append([]service.Service(nil), services...)
 	}
@@ -198,6 +238,32 @@ func (p *Panel) publishedStateSnapshot() panelPublishedState {
 	snapshot := p.published
 	snapshot.services = append([]service.Service(nil), p.published.services...)
 	return snapshot
+}
+
+// IsRunning reports whether the authoritative panel lifecycle is running.
+func (p *Panel) IsRunning() bool {
+	if p == nil {
+		return false
+	}
+	return p.publishedStateSnapshot().lifecycle == panelStateRunning
+}
+
+// ServerInstance returns the core currently owned by the panel, if any.
+// The returned core is borrowed; callers must not close it or assume ownership.
+func (p *Panel) ServerInstance() *core.Instance {
+	if p == nil {
+		return nil
+	}
+	return p.publishedStateSnapshot().server
+}
+
+// ServicesSnapshot returns a cloned slice of services currently owned by the
+// panel. The service references are borrowed and must not be closed by callers.
+func (p *Panel) ServicesSnapshot() []service.Service {
+	if p == nil {
+		return nil
+	}
+	return p.publishedStateSnapshot().services
 }
 
 func (p *Panel) logLifecycleError(message string, err error) {
@@ -220,13 +286,15 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 			return nil, err
 		}
 		materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
-
-		runtimeService := runtimeRegistry.build(runtimeServiceConstruction{
+		runtimeService, err := runtimeRegistry.build(runtimeServiceConstruction{
 			server:           server,
 			apiClient:        apiClient,
 			controllerConfig: controllerConfig,
 			panelType:        nodePlan.panelType,
 		}, nodePlan.fallbackNodeType)
+		if err != nil {
+			return nil, err
+		}
 		services = append(services, runtimeService)
 	}
 	return services, nil
@@ -234,7 +302,17 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 
 // Close the panel
 func (p *Panel) Close() error {
-	p.access.Lock()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return p.CloseContext(ctx)
+}
+
+func (p *Panel) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
+	if err := p.access.Lock(ctx); err != nil {
+		return err
+	}
 	defer p.access.Unlock()
 
 	current := p.publishedStateSnapshot()
@@ -242,27 +320,38 @@ func (p *Panel) Close() error {
 		p.publishState(panelStateStopped, nil, nil)
 		return nil
 	}
-	p.publishState(panelStateStopping, nil, nil)
+	if current.lifecycle == panelStateStarting || current.lifecycle == panelStateStopping {
+		return fmt.Errorf("panel cannot close from lifecycle state %d", current.lifecycle)
+	}
+	p.publishState(panelStateStopping, current.server, current.services)
 
-	services := current.services
-	server := current.server
 	ops := p.lifecycleOps()
-
+	remainingServices := make([]service.Service, 0)
 	var errs []error
-	for _, s := range services {
-		if err := s.Close(); err != nil {
+	for _, runtimeService := range current.services {
+		if err := service.CloseContext(ctx, runtimeService); err != nil {
 			p.logLifecycleError("Failed to close service", err)
 			errs = append(errs, err)
+			remainingServices = append(remainingServices, runtimeService)
 		}
 	}
 
-	if server != nil {
-		if err := ops.closeCore(server); err != nil {
+	var remainingServer *core.Instance
+	if current.server != nil {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			remainingServer = current.server
+		} else if err := ops.closeCore(current.server); err != nil {
 			p.logLifecycleError("Failed to close core", err)
 			errs = append(errs, err)
+			remainingServer = current.server
 		}
 	}
 
-	p.publishState(panelStateStopped, nil, nil)
+	if remainingServer != nil || len(remainingServices) != 0 {
+		p.publishState(panelStateFailedOwned, remainingServer, remainingServices)
+	} else {
+		p.publishState(panelStateStopped, nil, nil)
+	}
 	return errors.Join(errs...)
 }

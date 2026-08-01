@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -225,8 +226,8 @@ func TestReloadBuildFailureRetainsOldRuntimeRulesAndAppliedState(t *testing.T) {
 		applyPortHopRules = originalApply
 		deletePortHopRules = originalDelete
 	}()
-	applyPortHopRules = func([]portHopRule, *log.Entry) error { events.add("rules:apply"); return nil }
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { events.add("rules:delete"); return nil }
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error { events.add("rules:apply"); return nil }
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { events.add("rules:delete"); return nil }
 
 	newNode := newReloadNode(10443, "new.example.com")
 	err := service.reloadNode(newNode)
@@ -437,33 +438,83 @@ func TestReloadRestorationFailureJoinsErrorsAndRecordsFailure(t *testing.T) {
 	}
 }
 
-func TestReloadSurfacesOldCloseFailureAfterSuccessfulReplacement(t *testing.T) {
+func TestReloadOldCloseFailureRetainsOwnershipAndCleansCandidate(t *testing.T) {
 	closeErr := errors.New("old close failed")
-	service, oldRuntime, _ := newReloadTestService()
-	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
+	service, oldRuntime, oldNode := newReloadTestService()
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
+	candidateCloseCalls := 0
 	service.closeRuntime = func(runtime runtimeServer) error {
 		if runtime == oldRuntime {
 			return closeErr
 		}
-		return nil
+		candidateCloseCalls++
+		return runtime.Close()
 	}
-	service.serveRuntime = func(runtimeServer) error { return nil }
-	service.serveHandshake = func(start func(), _ <-chan struct{}, result <-chan error) error {
+	service.serveRuntime = defaultServeRuntime
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
 		start()
-		return <-result
+		<-started
+		return nil
 	}
 
 	err := service.reloadNode(newReloadNode(10443, "new.example.com"))
 	if !errors.Is(err, closeErr) {
-		t.Fatalf("reloadNode() error = %v, want surfaced old close error %v", err, closeErr)
+		t.Fatalf("reloadNode() error = %v, want %v", err, closeErr)
 	}
-	if service.server != candidate || service.nodeInfo.Port != 10443 {
-		t.Fatalf("successful replacement not published after old close error: server=%v node=%v", service.server, service.nodeInfo)
+	if candidateCloseCalls != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidateCloseCalls)
+	}
+	if service.state != stateFailed || service.server != oldRuntime || service.nodeInfo != oldNode || len(service.cleanupRuntimes) != 0 {
+		t.Fatalf("failed reload ownership: state=%v server=%v node=%v cleanup=%v", service.state, service.server, service.nodeInfo, service.cleanupRuntimes)
+	}
+
+	service.closeRuntime = defaultCloseRuntime
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if service.state != stateStopped || service.server != nil || len(service.cleanupRuntimes) != 0 {
+		t.Fatalf("cleanup retry state: state=%v server=%v cleanup=%v", service.state, service.server, service.cleanupRuntimes)
 	}
 }
 
+func TestReloadOldAndCandidateCleanupFailuresRetainBothOwners(t *testing.T) {
+	oldCloseErr := errors.New("old close failed")
+	candidateCloseErr := errors.New("candidate close failed")
+	service, oldRuntime, _ := newReloadTestService()
+	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) { return &server.Config{}, nil }
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
+	service.closeRuntime = func(runtime runtimeServer) error {
+		if runtime == oldRuntime {
+			return oldCloseErr
+		}
+		return errors.Join(runtime.Close(), candidateCloseErr)
+	}
+	service.serveRuntime = defaultServeRuntime
+	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
+		start()
+		<-started
+		return nil
+	}
+
+	err := service.reloadNode(newReloadNode(10443, "new.example.com"))
+	if !errors.Is(err, oldCloseErr) || !errors.Is(err, candidateCloseErr) {
+		t.Fatalf("reloadNode() error = %v, want both cleanup errors", err)
+	}
+	if service.state != stateFailed || service.server != oldRuntime || len(service.cleanupRuntimes) != 1 || service.cleanupRuntimes[0].runtime != candidate {
+		t.Fatalf("failed reload lost owners: state=%v server=%v cleanup=%v", service.state, service.server, service.cleanupRuntimes)
+	}
+
+	service.closeRuntime = defaultCloseRuntime
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if service.server != nil || len(service.cleanupRuntimes) != 0 || service.state != stateStopped {
+		t.Fatalf("cleanup retry retained ownership: state=%v server=%v cleanup=%v", service.state, service.server, service.cleanupRuntimes)
+	}
+}
 func TestReloadPublishesRuntimeRulesAndOwnershipOnlyAfterServeReady(t *testing.T) {
 	service, oldRuntime, oldNode := newReloadTestService()
 	oldServeDone := service.serveDone
@@ -494,8 +545,8 @@ func TestReloadPublishesRuntimeRulesAndOwnershipOnlyAfterServeReady(t *testing.T
 		deletePortHopRules = originalDelete
 	}()
 	ruleEvents := &lifecycleEvents{}
-	applyPortHopRules = func([]portHopRule, *log.Entry) error { ruleEvents.add("rules:apply"); return nil }
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { ruleEvents.add("rules:delete"); return nil }
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error { ruleEvents.add("rules:apply"); return nil }
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { ruleEvents.add("rules:delete"); return nil }
 
 	done := make(chan error, 1)
 	go func() { done <- service.reloadNode(newReloadNode(10443, "new.example.com")) }()
@@ -656,8 +707,8 @@ func TestReloadFailureRejectsBlockedAuthenticationBeforeCandidateCleanup(t *test
 		deletePortHopRules = originalDelete
 		_ = service.Close()
 	})
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
-	applyPortHopRules = func([]portHopRule, *log.Entry) error { return applyErr }
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return applyErr }
 	newNode := newReloadNode(10443, "new.example.com")
 	newNode.Hysteria2Config.PortHopEnabled = true
 	newNode.Hysteria2Config.PortHopPorts = "31001-31002"
@@ -812,34 +863,42 @@ func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
 	if !locked {
 		service.reloadMu.Unlock()
 	}
+
+	closeCtx, cancelClose := context.WithCancel(context.Background())
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- service.Close() }()
+	go func() { closeDone <- service.CloseContext(closeCtx) }()
+	cancelClose()
+	if closeErr := <-closeDone; !errors.Is(closeErr, context.Canceled) {
+		close(releaseRenew)
+		<-done
+		t.Fatalf("CloseContext() error = %v, want context cancellation", closeErr)
+	}
 	select {
-	case closeErr := <-closeDone:
-		if closeErr == nil {
-			close(releaseRenew)
-			<-done
-			t.Fatal("Close() succeeded while certificate reload transaction was active")
-		}
 	case <-closeRuntimeEntered:
 		close(releaseRenew)
 		<-done
-		<-closeDone
-		t.Fatal("Close() entered runtime shutdown while certificate reload transaction was active")
+		t.Fatal("canceled CloseContext entered runtime shutdown during certificate reload")
+	default:
 	}
-	runtimeAfterRejectedClose := service.server
-	stateAfterRejectedClose := service.state
-	if runtimeAfterRejectedClose != oldRuntime || stateAfterRejectedClose != stateReloading {
+	service.lifecycleMu.Lock()
+	runtimeAfterCanceledClose := service.server
+	stateAfterCanceledClose := service.state
+	service.lifecycleMu.Unlock()
+	if runtimeAfterCanceledClose != oldRuntime || stateAfterCanceledClose != stateReloading {
 		close(releaseRenew)
 		<-done
-		t.Fatalf("rejected Close() mutated active transaction: server=%v state=%d", runtimeAfterRejectedClose, stateAfterRejectedClose)
+		t.Fatalf("canceled CloseContext mutated active transaction: server=%v state=%d", runtimeAfterCanceledClose, stateAfterCanceledClose)
 	}
+
 	close(releaseRenew)
 	if err := <-done; err != nil {
 		t.Fatalf("certMonitor() error = %v", err)
 	}
 	if !locked || service.server != candidate {
 		t.Fatalf("certificate reload transaction = locked:%v server:%v", locked, service.server)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() cleanup error = %v", err)
 	}
 }
 
@@ -1026,8 +1085,8 @@ func TestCertificateReloadCommitsAfterPortHopBeforePublication(t *testing.T) {
 		deletePortHopRules = oldDelete
 		applyPortHopRules = oldApply
 	})
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
-	applyPortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		if !reflect.DeepEqual(rules, oldRules) {
 			t.Fatalf("applied port-hop rules = %v, want %v", rules, oldRules)
 		}
@@ -1092,16 +1151,15 @@ func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T
 	}
 }
 
-func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
+func TestCertificateReloadOldCloseFailureBlocksCandidateBuildAndRetry(t *testing.T) {
 	closeErr := errors.New("old runtime close failed")
 	service, oldRuntime, _ := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
-	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
 	renewCalls := 0
 	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
 		return &fakePreparedRenewal{
-			renewed:     renewCalls == 1,
+			renewed:     true,
 			certificate: []byte("candidate-cert"),
 			privateKey:  []byte("candidate-key"),
 		}, nil
@@ -1112,37 +1170,33 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 		return &server.Config{}, nil
 	}
 	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
-		return candidate, nil
+		return &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}, nil
 	}
-	service.serveRuntime = defaultServeRuntime
 	service.closeRuntime = func(runtime runtimeServer) error {
-		err := runtime.Close()
 		if runtime == oldRuntime {
-			return errors.Join(err, closeErr)
+			return closeErr
 		}
-		return err
+		return runtime.Close()
 	}
-	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
-		start()
-		<-started
-		return nil
-	}
-	t.Cleanup(func() { _ = service.Close() })
 
 	if err := service.certMonitor(); !errors.Is(err, closeErr) {
 		t.Fatalf("first certMonitor() error = %v, want %v", err, closeErr)
 	}
-	if service.server != candidate {
-		t.Fatalf("certificate runtime was not published: server=%v want=%v", service.server, candidate)
+	if service.state != stateFailed || service.server != oldRuntime || builds != 0 {
+		t.Fatalf("certificate reload advanced after old close failure: state=%v server=%v builds=%d", service.state, service.server, builds)
 	}
-	if err := service.certMonitor(); err != nil {
-		t.Fatalf("second certMonitor() error = %v", err)
+	if err := service.certMonitor(); err == nil {
+		t.Fatal("second certMonitor() error = nil, want failed-owned rejection")
 	}
-	if builds != 1 {
-		t.Fatalf("runtime builds = %d, want no retry after certificate was applied", builds)
+	if builds != 0 || renewCalls != 1 {
+		t.Fatalf("failed-owned certificate reload retried: builds=%d renewals=%d, want 0/1", builds, renewCalls)
+	}
+
+	service.closeRuntime = defaultCloseRuntime
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
 	}
 }
-
 func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	t.Cleanup(func() { _ = service.Close() })
@@ -1248,12 +1302,12 @@ func TestReplacePortHopRulesRestoresOldRulesWhenNewApplyFails(t *testing.T) {
 		applyPortHopRules = originalApply
 		deletePortHopRules = originalDelete
 	})
-	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		events.add("delete:old")
 		return nil
 	}
 	applyCalls := 0
-	applyPortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	applyPortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		applyCalls++
 		if applyCalls == 1 {
 			events.add("apply:new")
@@ -1263,7 +1317,7 @@ func TestReplacePortHopRulesRestoresOldRulesWhenNewApplyFails(t *testing.T) {
 		return nil
 	}
 
-	_, err := service.replacePortHopRulesLocked(newRules)
+	_, err := service.replacePortHopRulesLocked(context.Background(), newRules)
 	if !errors.Is(err, applyErr) {
 		t.Fatalf("replacePortHopRulesLocked() error = %v, want %v", err, applyErr)
 	}
@@ -1275,27 +1329,20 @@ func TestReplacePortHopRulesRestoresOldRulesWhenNewApplyFails(t *testing.T) {
 	}
 }
 
-func TestReloadPortHopRollbackFailureDoesNotPublishFalseOwnership(t *testing.T) {
+func TestReloadPortHopRollbackFailureRetainsCandidateOwnershipWithoutRestore(t *testing.T) {
 	applyErr := errors.New("apply new rules failed")
 	rulesRestoreErr := errors.New("restore old rules failed")
 	candidateCloseErr := errors.New("candidate close failed")
-	restoredServeErr := errors.New("restored runtime serve failed")
 	service, oldRuntime, oldNode := newReloadTestService()
 	oldRules := []portHopRule{{FromPortStart: 30001, FromPortEnd: 30002, ToPort: 9443}}
 	service.portHopRules = append([]portHopRule(nil), oldRules...)
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{})}
-	restored := &fakeRuntimeServer{events: &lifecycleEvents{}, serveBlock: make(chan struct{}), serveErr: restoredServeErr}
 	builds := 0
 	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
 		builds++
 		return &server.Config{}, nil
 	}
-	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) {
-		if builds == 1 {
-			return candidate, nil
-		}
-		return restored, nil
-	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
 	service.serveRuntime = defaultServeRuntime
 	service.serveHandshake = func(start func(), started <-chan struct{}, _ <-chan error) error {
 		start()
@@ -1306,21 +1353,16 @@ func TestReloadPortHopRollbackFailureDoesNotPublishFalseOwnership(t *testing.T) 
 		if runtime == oldRuntime {
 			return nil
 		}
-		err := runtime.Close()
-		if runtime == candidate {
-			return errors.Join(err, candidateCloseErr)
-		}
-		return err
+		return errors.Join(runtime.Close(), candidateCloseErr)
 	}
 	originalApply, originalDelete := applyPortHopRules, deletePortHopRules
 	t.Cleanup(func() {
 		applyPortHopRules = originalApply
 		deletePortHopRules = originalDelete
-		_ = service.Close()
 	})
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return nil }
 	applyCalls := 0
-	applyPortHopRules = func([]portHopRule, *log.Entry) error {
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error {
 		applyCalls++
 		if applyCalls == 1 {
 			return applyErr
@@ -1337,27 +1379,60 @@ func TestReloadPortHopRollbackFailureDoesNotPublishFalseOwnership(t *testing.T) 
 			t.Fatalf("reloadNode() error = %v, want joined %v", err, wantErr)
 		}
 	}
-	if service.server != restored || service.nodeInfo != oldNode {
-		t.Fatalf("runtime restoration = server:%v node:%v, want restored runtime and old node", service.server, service.nodeInfo)
+	if builds != 1 || service.server != nil || service.nodeInfo != oldNode {
+		t.Fatalf("runtime restoration advanced despite candidate cleanup failure: builds=%d server=%v node=%v", builds, service.server, service.nodeInfo)
 	}
-	if service.state != stateFailed || !errors.Is(service.runtimeErr, rulesRestoreErr) {
-		t.Fatalf("rollback failure state/error = %v/%v, want failed with restore error", service.state, service.runtimeErr)
+	if service.state != stateFailed || len(service.cleanupRuntimes) != 1 || service.cleanupRuntimes[0].runtime != candidate {
+		t.Fatalf("rollback failure ownership = state:%v cleanup:%v", service.state, service.cleanupRuntimes)
 	}
 	if len(service.portHopRules) != 0 {
 		t.Fatalf("rollback failure published false port-hop ownership: %v", service.portHopRules)
 	}
-	watcherDone := service.watcherDone
-	close(restored.serveBlock)
-	<-watcherDone
-	service.lifecycleMu.Lock()
-	runtimeErr := service.runtimeErr
-	service.lifecycleMu.Unlock()
-	if !errors.Is(runtimeErr, rulesRestoreErr) || !errors.Is(runtimeErr, restoredServeErr) {
-		t.Fatalf("restored runtime error = %v, want existing rollback and later Serve errors", runtimeErr)
+
+	service.closeRuntime = defaultCloseRuntime
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
+	}
+}
+func TestReloadContextCancellationDuringServeHandshakeKeepsAppliedRuntime(t *testing.T) {
+	service, oldRuntime, oldNode := newReloadTestService()
+	candidate := &fakeRuntimeServer{
+		events:      &lifecycleEvents{},
+		serveBlock:  make(chan struct{}),
+		serving:     make(chan struct{}),
+		serveExited: make(chan struct{}),
+	}
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		return &server.Config{}, nil
+	}
+	service.runtimeServerFactory = func(*server.Config) (runtimeServer, error) { return candidate, nil }
+	service.closeRuntime = defaultCloseRuntime
+	service.serveRuntime = defaultServeRuntime
+	service.serveHandshake = func(start func(), _ <-chan struct{}, result <-chan error) error {
+		start()
+		<-candidate.serving
+		return <-result
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.reloadNodeContext(ctx, newReloadNode(10443, "new.example.com")) }()
+	<-candidate.serving
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("reloadNodeContext() error = %v, want context cancellation", err)
+	}
+	if service.server != oldRuntime || service.nodeInfo != oldNode || service.state != stateRunning || len(service.cleanupRuntimes) != 0 {
+		t.Fatalf("canceled reload published candidate or lost LKG: server=%v node=%v state=%v cleanup=%v", service.server, service.nodeInfo, service.state, service.cleanupRuntimes)
+	}
+	select {
+	case <-candidate.serveExited:
+	default:
+		t.Fatal("canceled candidate Serve goroutine was not joined")
 	}
 }
 
-func TestCloseRacingWithReloadIsRejectedWithoutMutation(t *testing.T) {
+func TestCloseRacingWithReloadHonorsDeadlineAndRetainsOwnership(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	candidate := &fakeRuntimeServer{events: &lifecycleEvents{}}
 	serveEntered := make(chan struct{})
@@ -1378,13 +1453,32 @@ func TestCloseRacingWithReloadIsRejectedWithoutMutation(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- service.reloadNode(newReloadNode(10443, "new.example.com")) }()
 	<-serveEntered
-	closeErr := service.Close()
+	closeCtx, cancelClose := context.WithCancel(context.Background())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- service.CloseContext(closeCtx) }()
+	cancelClose()
+	if closeErr := <-closeDone; !errors.Is(closeErr, context.Canceled) {
+		close(releaseServe)
+		<-done
+		t.Fatalf("CloseContext() error = %v, want context cancellation", closeErr)
+	}
+	service.lifecycleMu.Lock()
 	closed, state := service.closed, service.state
+	service.lifecycleMu.Unlock()
+	if closed || state != stateReloading {
+		close(releaseServe)
+		<-done
+		t.Fatalf("deadline close mutated active reload: closed=%v state=%v", closed, state)
+	}
+
 	close(releaseServe)
 	if err := <-done; err != nil {
 		t.Fatalf("reloadNode() error = %v", err)
 	}
-	if closeErr == nil || closed || state != stateReloading {
-		t.Fatalf("Close during reload = error:%v closed:%v state:%v, want rejection without mutation", closeErr, closed, state)
+	if service.server != candidate {
+		t.Fatalf("completed reload server = %v, want candidate", service.server)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
 	}
 }

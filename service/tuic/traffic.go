@@ -1,9 +1,8 @@
 package tuic
 
 import (
-	"errors"
+	"context"
 	"net"
-	"reflect"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
@@ -362,57 +362,57 @@ func (s *TuicService) restoreTraffic(snapshot map[string]userTraffic) {
 }
 
 func (s *TuicService) userMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.userMonitorContext(ctx)
+}
+
+func (s *TuicService) userMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	_, tag, startAt := s.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
+	s.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncUsers | service.SnapshotSyncRules,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 
 	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 	if err != nil {
 		s.logger.Print(err)
 	} else {
-		if err = s.apiClient.ReportNodeStatus(&api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
+		if err = api.ReportNodeStatusContext(ctx, s.apiClient, &api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
 			s.logger.Print(err)
 		}
 	}
 
-	usersChanged := true
-	newUserInfo, err := s.apiClient.GetUserList()
-	if err != nil {
-		if errors.Is(err, api.ErrUserNotModified) {
-			usersChanged = false
-		} else {
-			s.logger.Print(err)
-			return nil
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if usersChanged {
-		s.syncUsers(newUserInfo)
-	}
-
-	// Check Rule
-	if !s.config.DisableGetRule && s.rules != nil {
-		if ruleList, err := s.apiClient.GetNodeRule(); err != nil {
-			if !errors.Is(err, api.ErrRuleNotModified) {
-				s.logger.Printf("Get rule list filed: %s", err)
-			}
-		} else if ruleList != nil {
-			if err := s.rules.UpdateRule(tag, *ruleList); err != nil {
-				s.logger.Print(err)
-			}
-		}
-	}
-
 	userTraffic, onlineUsers, snapshot := s.collectUsage()
+	s.health.SetTrafficBacklog(len(userTraffic))
+	if err := ctx.Err(); err != nil {
+		s.restoreTraffic(snapshot)
+		return err
+	}
 	if len(userTraffic) > 0 && !s.config.DisableUploadTraffic {
-		if err = s.apiClient.ReportUserTraffic(&userTraffic); err != nil {
+		if err = api.ReportUserTrafficContext(ctx, s.apiClient, &userTraffic); err != nil {
 			s.logger.Print(err)
 			// Restore counters so traffic is not lost and can be retried.
 			s.restoreTraffic(snapshot)
+			s.health.RecordFailure(service.FailureStageReport, time.Now())
+		} else {
+			s.health.SetTrafficBacklog(0)
 		}
+	} else {
+		s.health.SetTrafficBacklog(0)
 	}
 	if len(onlineUsers) > 0 {
-		if err = s.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
+		if err = api.ReportNodeOnlineUsersContext(ctx, s.apiClient, &onlineUsers); err != nil {
 			s.logger.Print(err)
 		}
 	}
@@ -422,7 +422,7 @@ func (s *TuicService) userMonitor() error {
 		if detectResult, err := s.rules.GetDetectResult(tag); err != nil {
 			s.logger.Print(err)
 		} else if len(*detectResult) > 0 {
-			if err = s.apiClient.ReportIllegal(detectResult); err != nil {
+			if err = api.ReportIllegalContext(ctx, s.apiClient, detectResult); err != nil {
 				s.logger.Print(err)
 			} else {
 				s.logger.Printf("Report %d illegal behaviors", len(*detectResult))
@@ -437,43 +437,25 @@ func (s *TuicService) userMonitor() error {
 // (port, TLS/SNI, TUIC-specific options, etc.) and hot-reloads the sing-box
 // instance when a change is detected.
 func (s *TuicService) nodeMonitor() error {
-	currentNode, _, startAt := s.appliedStateSnapshot()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return s.nodeMonitorContext(ctx)
+}
+
+func (s *TuicService) nodeMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, _, startAt := s.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(s.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
-	nodeInfo, err := s.apiClient.GetNodeInfo()
-	if err != nil {
-		if errors.Is(err, api.ErrNodeNotModified) {
-			return nil
-		}
-		s.logger.Print(err)
-		return nil
-	}
-
-	if nodeInfo == nil || nodeInfo.NodeType != "Tuic" {
-		if s.logger != nil {
-			if nodeInfo == nil {
-				s.logger.Warn("TUIC node monitor: unexpected node info: <nil>")
-			} else {
-				s.logger.Warnf("TUIC node monitor: unexpected node info: type=%s id=%d", nodeInfo.NodeType, nodeInfo.NodeID)
-			}
-		}
-		return nil
-	}
-
-	// Some panels update node-related metadata frequently without changing the
-	// actual TUIC configuration, which may cause the ETag to change on every
-	// poll. Guard against unnecessary hot-reloads by comparing the new NodeInfo
-	// with the current in-memory value, similar to controller.nodeInfoMonitor.
-	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
-		return nil
-	}
-
-	if err := s.reloadNode(nodeInfo); err != nil {
-		s.logger.Printf("TUIC node reload failed: %v", err)
-	}
-
+	s.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncNode,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 	return nil
 }
 

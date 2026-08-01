@@ -105,6 +105,11 @@ func TestGetAliveListDistinguishesAbsentEmptyAndMalformedSnapshots(t *testing.T)
 			wantEmpty: true,
 		},
 		{
+			name:    "alive is null",
+			payload: `{"alive":null}`,
+			wantErr: true,
+		},
+		{
 			name:    "alive is not an object",
 			payload: `{"alive":[]}`,
 			wantErr: true,

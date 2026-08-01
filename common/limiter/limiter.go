@@ -11,13 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/eko/gocache/lib/v4/cache"
-	"github.com/eko/gocache/lib/v4/marshaler"
 	"github.com/eko/gocache/lib/v4/store"
-	goCacheStore "github.com/eko/gocache/store/go_cache/v4"
-	redisStore "github.com/eko/gocache/store/redis/v4"
-	goCache "github.com/patrickmn/go-cache"
-	"github.com/redis/go-redis/v9"
 	xrayerrors "github.com/xtls/xray-core/common/errors"
 	"golang.org/x/time/rate"
 
@@ -282,31 +276,9 @@ func (i *inboundState) notifyReplacement() {
 	i.admissionMu.Unlock()
 }
 
-type globalLimitBackend struct {
-	globalOnlineIP *marshaler.Marshaler
-	closer         io.Closer
-}
-
-func newGlobalLimitBackend(config *GlobalDeviceLimitConfig) globalLimitBackend {
-	gs := goCacheStore.NewGoCache(goCache.New(time.Duration(config.Expiry)*time.Second, time.Minute))
-	client := redis.NewClient(&redis.Options{
-		Network:  config.RedisNetwork,
-		Addr:     config.RedisAddr,
-		Username: config.RedisUsername,
-		Password: config.RedisPassword,
-		DB:       config.RedisDB,
-	})
-	rs := redisStore.NewRedis(client, store.WithExpiration(time.Duration(config.Expiry)*time.Second))
-	cacheManager := cache.NewChain[any](cache.New[any](gs), cache.New[any](rs))
-	return globalLimitBackend{
-		globalOnlineIP: marshaler.New(cacheManager),
-		closer:         client,
-	}
-}
-
 type globalLimitState struct {
 	config         *GlobalDeviceLimitConfig
-	globalOnlineIP *marshaler.Marshaler
+	globalOnlineIP globalOnlineIPCache
 	closer         io.Closer
 	useMu          sync.RWMutex
 	keyLocks       sync.Map // Key: user tag -> *sync.Mutex, serializes global-limit cache updates per user

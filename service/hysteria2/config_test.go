@@ -68,7 +68,7 @@ func TestBuildServerConfigKeepsVulnerableSniffHookDisabled(t *testing.T) {
 	defer cfg.Conn.Close()
 
 	if cfg.RequestHook != nil {
-		t.Fatalf("RequestHook must remain nil while GHSA-9fw6-xgg2-mq9q is unpatched, got %T", cfg.RequestHook)
+		t.Fatalf("RequestHook must remain nil as defense in depth for GHSA-9fw6-xgg2-mq9q, got %T", cfg.RequestHook)
 	}
 }
 

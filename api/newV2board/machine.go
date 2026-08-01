@@ -2,6 +2,7 @@ package newV2board
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -106,6 +107,10 @@ func normalizeMachineNodes(nodes []MachineNode) []MachineNode {
 }
 
 func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse, error) {
+	return DiscoverMachineNodesContext(context.Background(), config)
+}
+
+func DiscoverMachineNodesContext(ctx context.Context, config MachineDiscoveryConfig) (*MachineNodesResponse, error) {
 	apiHost, token, err := validateMachineConfig(config)
 	if err != nil {
 		return nil, err
@@ -114,6 +119,7 @@ func DiscoverMachineNodes(config MachineDiscoveryConfig) (*MachineNodesResponse,
 	client, policy := newMachineClient(apiHost, config.Timeout, token)
 
 	res, err := client.R().
+		SetContext(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(machineAuthRequest{
 			MachineID: config.MachineID,
@@ -195,6 +201,10 @@ func materializeMachineStatusPayload(machineID int, token string, status api.Mac
 }
 
 func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus) error {
+	return ReportMachineStatusContext(context.Background(), config, status)
+}
+
+func ReportMachineStatusContext(ctx context.Context, config MachineDiscoveryConfig, status api.MachineStatus) error {
 	report, err := materializeMachineStatusReport(config, status)
 	if err != nil {
 		return err
@@ -202,6 +212,7 @@ func ReportMachineStatus(config MachineDiscoveryConfig, status api.MachineStatus
 
 	client, policy := newMachineClient(report.APIHost, report.Timeout, report.Payload.Token)
 	res, err := client.R().
+		SetContext(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(report.Payload).
 		Post(machineStatusPath)

@@ -137,6 +137,56 @@ func (f *fakeSyncApplyAPI) GetNodeRule() (*[]api.DetectRule, error) {
 func (f *fakeSyncApplyAPI) ReportIllegal(*[]api.DetectResult) error { return nil }
 func (f *fakeSyncApplyAPI) Debug()                                  {}
 
+type lateNodeContextAPI struct {
+	*fakeSyncApplyAPI
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (a *lateNodeContextAPI) GetNodeInfoContext(context.Context) (*api.NodeInfo, error) {
+	close(a.entered)
+	<-a.release
+	return a.nodeInfo, a.nodeErr
+}
+
+func TestSyncApplyCanceledRESTFetchDoesNotPublishLateNodeRuntimeState(t *testing.T) {
+	currentNode := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
+	lateNode := &api.NodeInfo{NodeType: "Trojan", NodeID: 1, Port: 8443}
+	client := &lateNodeContextAPI{
+		fakeSyncApplyAPI: &fakeSyncApplyAPI{nodeInfo: lateNode},
+		entered:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	controller, recorder := newTestSyncApplyController(client)
+	controller.config.DisableGetRule = true
+	currentTag := controller.buildNodeTagFrom(currentNode)
+	controller.setNodeState(currentNode, currentTag)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- controller.ExecuteSyncAction(ctx, newSyncAction(
+			syncActionTypeSyncNodeConfig,
+			syncActionSourcePolling,
+			syncActionMetadata{Trigger: "cancelled_rest"},
+		))
+	}()
+	<-client.entered
+	cancel()
+	close(client.release)
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteSyncAction() error = %v, want context cancellation", err)
+	}
+	nodeInfo, tag, _ := controller.getStateSnapshot()
+	if !reflect.DeepEqual(nodeInfo, currentNode) || tag != currentTag {
+		t.Fatalf("canceled REST fetch published late state: node=%#v tag=%q", nodeInfo, tag)
+	}
+	if recorder.addTagCalls != 0 || recorder.cleanupTagCalls != 0 || recorder.appliedSnapshotCount() != 0 {
+		t.Fatalf("canceled REST fetch touched apply hooks: add=%d cleanup=%d snapshots=%d", recorder.addTagCalls, recorder.cleanupTagCalls, recorder.appliedSnapshotCount())
+	}
+}
+
 type syncApplyRecorder struct {
 	appliedSnapshotsMu      sync.Mutex
 	appliedSnapshots        []syncApplySnapshot

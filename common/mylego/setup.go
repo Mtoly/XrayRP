@@ -3,7 +3,6 @@ package mylego
 import (
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/go-acme/lego/v4/certcrypto"
@@ -11,12 +10,9 @@ import (
 	"github.com/go-acme/lego/v4/challenge/http01"
 	"github.com/go-acme/lego/v4/challenge/tlsalpn01"
 	"github.com/go-acme/lego/v4/lego"
-	"github.com/go-acme/lego/v4/providers/dns"
 	"github.com/go-acme/lego/v4/registration"
 	"golang.org/x/crypto/acme"
 )
-
-const filePerm os.FileMode = 0o600
 
 func setup(accountsStorage *AccountsStorage) (*Account, *lego.Client) {
 	keyType := certcrypto.EC256
@@ -76,7 +72,7 @@ func setupChallenges(l *LegoCMD, client *lego.Client) {
 }
 
 func setupDNS(p string, client *lego.Client) {
-	provider, err := dns.NewDNSChallengeProviderByName(p)
+	provider, err := newFullDNSChallengeProvider(p)
 	if err != nil {
 		panic(err)
 	}

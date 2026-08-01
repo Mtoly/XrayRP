@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/common"
 	"github.com/Mtoly/XrayRP/panel"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 var (
@@ -80,6 +83,12 @@ func getConfig() (*viper.Viper, error) {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx)
+}
+
+func runContext(ctx context.Context) error {
 	showVersion()
 
 	config, err := getConfig()
@@ -93,35 +102,53 @@ func run() error {
 
 	applyPanelProcessConfig(panelConfig)
 
-	// Create initial panel instance.
 	initialPanel := panel.New(panelConfig)
 	reloader := newPanelReloadModule(panelConfig, initialPanel, panelReloadOptions{
 		configFile:    cfgFile,
 		lastAppliedAt: time.Now(),
 	})
+	observability, err := newObservabilityServer(panelConfig.Observability, reloader)
+	if err != nil {
+		return err
+	}
 	config.OnConfigChange(func(e fsnotify.Event) {
-		_ = reloader.Reload(e.Name)
+		if err := reloader.ReloadContext(ctx, e.Name); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("Hot reload failed")
+		}
 	})
 
-	if err := initialPanel.Start(); err != nil {
-		return fmt.Errorf("failed to start panel: %w", err)
+	startCtx, startCancel := service.WithDefaultTimeout(ctx, service.DefaultStartTimeout)
+	err = initialPanel.StartContext(startCtx)
+	startCancel()
+	if err != nil {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		cleanupErr := reloader.CloseContext(cleanupCtx)
+		cleanupCancel()
+		return errors.Join(fmt.Errorf("failed to start panel: %w", err), cleanupErr)
 	}
-	defer func() {
-		if err := reloader.Close(); err != nil {
-			log.Error("Failed to close panel")
-		}
-	}()
+	if err := observability.StartContext(ctx); err != nil {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		cleanupErr := reloader.CloseContext(cleanupCtx)
+		cleanupCancel()
+		return errors.Join(fmt.Errorf("failed to start observability server: %w", err), cleanupErr)
+	}
 
-	// Explicitly triggering GC to remove garbage from config loading.
 	runtime.GC()
-	// Running backend
-	osSignals := make(chan os.Signal, 1)
-	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
-	<-osSignals
+	<-ctx.Done()
+	observability.BeginShutdown()
 
-	return nil
+	shutdownCtx, shutdownCancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer shutdownCancel()
+	panelCloseErr := reloader.CloseContext(shutdownCtx)
+	observabilityCloseErr := observability.CloseContext(shutdownCtx)
+	if panelCloseErr != nil {
+		panelCloseErr = fmt.Errorf("failed to close panel: %w", panelCloseErr)
+	}
+	if observabilityCloseErr != nil {
+		observabilityCloseErr = fmt.Errorf("failed to close observability server: %w", observabilityCloseErr)
+	}
+	return errors.Join(panelCloseErr, observabilityCloseErr)
 }
-
 func Execute() error {
 	return rootCmd.Execute()
 }

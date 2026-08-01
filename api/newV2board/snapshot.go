@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -249,8 +250,12 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 }
 
 func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
+	return c.fetchUniProxySnapshotContext(context.Background(), useETag)
+}
+
+func (c *APIClient) fetchUniProxySnapshotContext(ctx context.Context, useETag bool) (*serverConfig, error) {
 	path := c.configPath()
-	req := c.client.R().ForceContentType("application/json")
+	req := c.client.R().SetContext(ctx).ForceContentType("application/json")
 	if useETag {
 		req.SetHeader("If-None-Match", c.eTags.Get("node"))
 	}
@@ -273,11 +278,13 @@ func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
 	}
 
 	snapshot := new(serverConfig)
-	b, _ := cfgResp.Encode()
-	if err := json.Unmarshal(b, snapshot); err != nil {
+	if err := cfgResp.decode(snapshot); err != nil {
 		return nil, err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := c.storeUniProxySnapshot(snapshot); err != nil {
 		return nil, err
 	}

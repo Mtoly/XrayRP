@@ -441,6 +441,28 @@ func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
 	}
 }
 
+func TestStartRuleFetchFailureStopsBeforeRuntimeBuild(t *testing.T) {
+	ruleErr := errors.New("rule fetch failed")
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeServer{events: events})
+	service.config.DisableGetRule = false
+	service.apiClient.(*configurablePanelClient).nodeRuleErr = ruleErr
+	service.serverConfigFactory = func(*Hysteria2Service, serverBuildSpec) (*server.Config, error) {
+		t.Fatal("runtime built before audit rules were ready")
+		return nil, nil
+	}
+
+	err := service.Start()
+	if !errors.Is(err, ruleErr) {
+		t.Fatalf("Start() error = %v, want %v", err, ruleErr)
+	}
+	if got := events.snapshot(); len(got) != 0 {
+		t.Fatalf("events = %v, want no runtime work", got)
+	}
+	if service.state != stateFailed || service.server != nil || service.nodeInfo != nil || service.tasks != nil {
+		t.Fatalf("rule failure published runtime ownership: state=%v server=%v node=%v tasks=%v", service.state, service.server, service.nodeInfo, service.tasks)
+	}
+}
 func TestStartPreservesUsersWhenPanelReturnsNoUserSnapshot(t *testing.T) {
 	events := &lifecycleEvents{}
 	service := newStartTestService(events, &fakeRuntimeServer{events: events})
@@ -530,8 +552,8 @@ func TestStartImmediateServeFailureCleansRuntimeAndSkipsTasks(t *testing.T) {
 	if !errors.Is(err, serveErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("Start() error = %v, want joined serve and close errors", err)
 	}
-	if service.server != nil || service.nodeInfo != nil || service.tasks != nil {
-		t.Fatalf("failed Start published runtime state: server=%v nodeInfo=%v tasks=%v", service.server, service.nodeInfo, service.tasks)
+	if service.state != stateFailed || service.server != runtime || service.nodeInfo == nil || service.tasks != nil || service.closed {
+		t.Fatalf("failed Start lost runtime ownership: state=%v server=%v nodeInfo=%v tasks=%v closed=%v", service.state, service.server, service.nodeInfo, service.tasks, service.closed)
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build-config", "build-server", "serve", "stop", "close"}) {
 		t.Fatalf("events = %v, want immediate serve failure cleanup", got)
@@ -611,8 +633,8 @@ func TestStartTaskFailureCleansStartedTasksInReverseThenRuntime(t *testing.T) {
 	}) {
 		t.Fatalf("events = %v, want reverse task cleanup then runtime cleanup", got)
 	}
-	if service.tasks != nil || service.server != nil || service.nodeInfo != nil {
-		t.Fatalf("failed Start published state: tasks=%v server=%v nodeInfo=%v", service.tasks, service.server, service.nodeInfo)
+	if service.state != stateFailed || service.tasks == nil || service.server != runtime || service.nodeInfo == nil || service.closed {
+		t.Fatalf("failed Start lost cleanup ownership: state=%v tasks=%v server=%v nodeInfo=%v closed=%v", service.state, service.tasks, service.server, service.nodeInfo, service.closed)
 	}
 	select {
 	case <-runtime.serveExited:
@@ -621,13 +643,13 @@ func TestStartTaskFailureCleansStartedTasksInReverseThenRuntime(t *testing.T) {
 	}
 }
 
-func TestStartFailureRestoresUserStateAndDefersRules(t *testing.T) {
+func TestStartFailureRestoresUserStateAndCleansPreparedRules(t *testing.T) {
 	events := &lifecycleEvents{}
 	service := newStartTestService(events, &fakeRuntimeServer{events: events})
 	service.config.DisableGetRule = false
 	client := service.apiClient.(*configurablePanelClient)
 	client.users = []api.UserInfo{{UUID: "old-user", SpeedLimit: 20}, {UUID: "new-user", SpeedLimit: 10}}
-	client.rules = []api.DetectRule{{ID: 1}}
+	client.rules = []api.DetectRule{{ID: 1, Pattern: regexp.MustCompile(`blocked\.example`)}}
 	oldLimiter := rate.NewLimiter(10, 10)
 	service.users["old-user"] = userRecord{UID: 1}
 	service.rateLimiters = map[string]*rate.Limiter{"old-user": oldLimiter}
@@ -647,8 +669,11 @@ func TestStartFailureRestoresUserStateAndDefersRules(t *testing.T) {
 	if got := oldLimiter.Limit(); got != 10 {
 		t.Fatalf("original limiter mutated during failed Start: limit=%v, want 10", got)
 	}
-	if client.nodeRuleCalls != 0 {
-		t.Fatalf("GetNodeRule calls = %d, want deferred until successful startup", client.nodeRuleCalls)
+	if client.nodeRuleCalls != 1 {
+		t.Fatalf("GetNodeRule calls = %d, want rules prepared before runtime publication", client.nodeRuleCalls)
+	}
+	if service.rules.DetectUID("Hysteria2_127.0.0.1_9443_9", "blocked.example:443", 17, "192.0.2.1") {
+		t.Fatal("failed Start retained prepared audit rules")
 	}
 }
 

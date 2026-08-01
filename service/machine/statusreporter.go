@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -13,8 +14,16 @@ type NodeStatusReporter interface {
 	ReportNodeStatus(nodeID int, nodeStatus *api.NodeStatus) error
 }
 
+type ContextNodeStatusReporter interface {
+	ReportNodeStatusContext(context.Context, int, *api.NodeStatus) error
+}
+
 type MachineStatusReporter interface {
 	ReportMachineStatus(status api.MachineStatus) error
+}
+
+type ContextMachineStatusReporter interface {
+	ReportMachineStatusContext(context.Context, api.MachineStatus) error
 }
 
 type MachineStatusCollector func() (api.MachineStatus, error)
@@ -113,11 +122,53 @@ type machineReportingAPI struct {
 	reporter any
 }
 
+func (a *machineReportingAPI) GetNodeInfoContext(ctx context.Context) (*api.NodeInfo, error) {
+	return api.GetNodeInfoContext(ctx, a.machinePanelClient)
+}
+
+func (a *machineReportingAPI) GetUserListContext(ctx context.Context) (*[]api.UserInfo, error) {
+	return api.GetUserListContext(ctx, a.machinePanelClient)
+}
+
+func (a *machineReportingAPI) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
+	return api.GetNodeRuleContext(ctx, a.machinePanelClient)
+}
+
 func (a *machineReportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
-	if reporter, ok := a.reporter.(NodeStatusReporter); ok {
+	return a.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (a *machineReportingAPI) ReportNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) error {
+	if reporter, ok := a.reporter.(ContextNodeStatusReporter); ok {
+		_ = reporter.ReportNodeStatusContext(ctx, a.nodeID, nodeStatus)
+	} else if reporter, ok := a.reporter.(NodeStatusReporter); ok && ctx.Err() == nil {
 		_ = reporter.ReportNodeStatus(a.nodeID, nodeStatus)
 	}
-	return a.machinePanelClient.ReportNodeStatus(nodeStatus)
+	return api.ReportNodeStatusContext(ctx, a.machinePanelClient, nodeStatus)
+}
+
+func (a *machineReportingAPI) ReportNodeOnlineUsersContext(ctx context.Context, users *[]api.OnlineUser) error {
+	return api.ReportNodeOnlineUsersContext(ctx, a.machinePanelClient, users)
+}
+
+func (a *machineReportingAPI) ReportUserTrafficContext(ctx context.Context, traffic *[]api.UserTraffic) error {
+	return api.ReportUserTrafficContext(ctx, a.machinePanelClient, traffic)
+}
+
+func (a *machineReportingAPI) ReportIllegalContext(ctx context.Context, results *[]api.DetectResult) error {
+	return api.ReportIllegalContext(ctx, a.machinePanelClient, results)
+}
+
+func (a *machineReportingAPI) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	return api.GetXrayRCertConfigContext(ctx, a.machinePanelClient)
+}
+
+func (a *machineReportingAPI) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	return api.GetAliveListContext(ctx, a.machinePanelClient)
+}
+
+func (a *machineReportingAPI) DiscoverWSEndpointContext(ctx context.Context) (string, error) {
+	return api.DiscoverWSEndpointContext(ctx, a.machinePanelClient)
 }
 
 func (a *machineReportingAPI) ReportNodeDevices(devices map[int][]string) error {

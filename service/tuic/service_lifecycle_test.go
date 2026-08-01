@@ -283,6 +283,28 @@ func TestStartAppliesEmptyRuleSnapshot(t *testing.T) {
 	}
 }
 
+func TestStartRuleFetchFailureClosesCandidateBeforeRuntimeStart(t *testing.T) {
+	ruleErr := errors.New("rule fetch failed")
+	events := &lifecycleEvents{}
+	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
+	service.config.DisableGetRule = false
+	service.apiClient.(*configurablePanelClient).nodeRuleErr = ruleErr
+	service.startRuntime = func(runtimeInstance) error {
+		t.Fatal("runtime started before audit rules were ready")
+		return nil
+	}
+
+	err := service.Start()
+	if !errors.Is(err, ruleErr) {
+		t.Fatalf("Start() error = %v, want %v", err, ruleErr)
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "stop", "close"}) {
+		t.Fatalf("events = %v, want candidate build and cleanup without start", got)
+	}
+	if service.state != stateFailed || service.box != nil || service.nodeInfo != nil || service.tasks != nil {
+		t.Fatalf("rule failure published runtime ownership: state=%v box=%v node=%v tasks=%v", service.state, service.box, service.nodeInfo, service.tasks)
+	}
+}
 func TestStartBuildsRuntimeWithIncomingTag(t *testing.T) {
 	events := &lifecycleEvents{}
 	service := newStartTestService(events, &fakeRuntimeInstance{events: events})
@@ -446,8 +468,8 @@ func TestStartRuntimeFailureCleansRuntimeAndSkipsTasks(t *testing.T) {
 	if !errors.Is(err, startErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("Start() error = %v, want joined start and close errors", err)
 	}
-	if service.box != nil || service.nodeInfo != nil || service.tasks != nil {
-		t.Fatalf("failed Start published runtime state: box=%v nodeInfo=%v tasks=%v", service.box, service.nodeInfo, service.tasks)
+	if service.state != stateFailed || service.box != runtime || service.nodeInfo == nil || service.tasks != nil || service.closed {
+		t.Fatalf("failed Start lost runtime ownership: state=%v box=%v nodeInfo=%v tasks=%v closed=%v", service.state, service.box, service.nodeInfo, service.tasks, service.closed)
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, []string{"build", "start", "stop", "close"}) {
 		t.Fatalf("events = %v, want [build start stop close]", got)
@@ -476,8 +498,8 @@ func TestStartTaskFailureCleansStartedTasksInReverseThenRuntime(t *testing.T) {
 	}) {
 		t.Fatalf("events = %v, want reverse task cleanup then runtime cleanup", got)
 	}
-	if service.tasks != nil || service.box != nil || service.nodeInfo != nil {
-		t.Fatalf("failed Start published state: tasks=%v box=%v nodeInfo=%v", service.tasks, service.box, service.nodeInfo)
+	if service.state != stateFailed || service.tasks == nil || service.box != runtime || service.nodeInfo == nil || service.closed {
+		t.Fatalf("failed Start lost cleanup ownership: state=%v tasks=%v box=%v nodeInfo=%v closed=%v", service.state, service.tasks, service.box, service.nodeInfo, service.closed)
 	}
 }
 

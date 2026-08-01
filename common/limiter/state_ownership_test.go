@@ -1066,7 +1066,7 @@ func TestConcurrentAdmissionReplacementSnapshotDeviceSyncAndClose(t *testing.T) 
 	}
 	userKey := "inbound|user@example.test|1"
 
-	const workers = 5
+	const workers = 6
 	ready := make(chan struct{}, workers)
 	start := make(chan struct{})
 	var wait sync.WaitGroup
@@ -1087,6 +1087,9 @@ func TestConcurrentAdmissionReplacementSnapshotDeviceSyncAndClose(t *testing.T) 
 	})
 	go run(func() {
 		_, _ = limiter.SnapshotInboundLimiterState("inbound")
+	})
+	go run(func() {
+		_ = limiter.StateSnapshot()
 	})
 	go run(func() {
 		_ = limiter.UpdateGlobalDevices("inbound", map[int][]string{1: {"192.0.2.1"}})

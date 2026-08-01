@@ -1,6 +1,7 @@
 package v2raysocks
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/internal/buildinfo"
 )
 
 // APIClient create an api client to the panel.
@@ -46,7 +48,7 @@ func New(apiConfig *api.Config) *APIClient {
 		TimeoutSeconds: apiConfig.Timeout,
 		Credentials:    []string{apiConfig.Key},
 	})
-	client.SetHeader("User-Agent", "XrayR/0.9.6")
+	client.SetHeader("User-Agent", buildinfo.UserAgent())
 
 	// Create Key for each requests
 	client.SetQueryParams(map[string]string{
@@ -81,6 +83,13 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig is not provided by V2RaySocks panel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (*APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
@@ -105,7 +114,11 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 }
 
 // GetNodeInfo will pull NodeInfo Config from panel
-func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
+func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
 	var nodeType string
 	switch strings.ToLower(c.NodeType) {
 	case "v2ray", "vmess", "vless":
@@ -117,6 +130,7 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	}
 	configETag := c.eTags.Get("config")
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetHeader("If-None-Match", configETag).
 		SetQueryParams(map[string]string{
 			"act":       "config",
@@ -154,6 +168,9 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 		return nil, fmt.Errorf("parse node info failed: %v", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.access.Lock()
 	c.ConfigResp = response
 	c.eTags.Publish("config", candidateETag)
@@ -162,7 +179,11 @@ func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 }
 
 // GetUserList will pull user form panel
-func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 	var nodeType string
 	switch c.NodeType {
 	case "V2ray", "Vmess", "Vless", "Trojan", "Shadowsocks":
@@ -172,6 +193,7 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	}
 	userETag := c.eTags.Get("user")
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetHeader("If-None-Match", userETag).
 		SetQueryParams(map[string]string{
 			"act":       "user",
@@ -235,17 +257,31 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 
 		userList[i] = user
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	c.eTags.Publish("user", candidateETag)
 	return &userList, nil
 }
 
 // GetAliveList is not supported by V2RaySocks.
 func (c *APIClient) GetAliveList() (map[int][]string, error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (*APIClient) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // ReportUserTraffic reports the user traffic
 func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {
 
 	data := make([]UserTraffic, len(*userTraffic))
 	for i, traffic := range *userTraffic {
@@ -256,6 +292,7 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetQueryParams(map[string]string{
 			"act":       "submit",
@@ -273,6 +310,13 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ruleList := c.LocalRuleList
 
 	// fix: reuse config response
@@ -296,7 +340,11 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 }
 
 // ReportNodeStatus implements the API interface
-func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
+func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (c *APIClient) ReportNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) (err error) {
 	systemload := NodeStatus{
 		Uptime: int(nodeStatus.Uptime),
 		CPU:    fmt.Sprintf("%d%%", int(nodeStatus.CPU)),
@@ -305,6 +353,7 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetQueryParams(map[string]string{
 			"act":       "nodestatus",
@@ -322,12 +371,17 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 
 // ReportNodeOnlineUsers implements the API interface
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUserList)
+}
+
+func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 	data := make([]NodeOnline, len(*onlineUserList))
 	for i, user := range *onlineUserList {
 		data[i] = NodeOnline{UID: user.UID, IP: user.IP}
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetQueryParams(map[string]string{
 			"act":       "onlineusers",
@@ -345,6 +399,10 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 
 // ReportIllegal implements the API interface
 func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *[]api.DetectResult) error {
 	data := make([]IllegalItem, len(*detectResultList))
 	for i, r := range *detectResultList {
 		data[i] = IllegalItem{
@@ -353,6 +411,7 @@ func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
 	}
 
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetQueryParam("node_id", strconv.Itoa(c.NodeID)).
 		SetQueryParams(map[string]string{
 			"act":       "illegal",

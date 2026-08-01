@@ -2,7 +2,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sync"
+
+	"github.com/Mtoly/XrayRP/service"
 )
 
 type syncActionExecutor interface {
@@ -12,6 +15,24 @@ type syncActionExecutor interface {
 type syncCoordinatorLifecycle interface {
 	Submit(syncAction)
 	Stop()
+}
+
+type contextSyncCoordinatorLifecycle interface {
+	StopContext(context.Context) error
+}
+
+func stopSyncCoordinatorContext(ctx context.Context, coordinator syncCoordinatorLifecycle) error {
+	if coordinator == nil {
+		return nil
+	}
+	if contextual, ok := coordinator.(contextSyncCoordinatorLifecycle); ok {
+		return contextual.StopContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	coordinator.Stop()
+	return ctx.Err()
 }
 
 type queuedSyncAction struct {
@@ -31,6 +52,8 @@ type syncCoordinator struct {
 	recorder *syncExecutionState
 	observer syncExecutionObserver
 	results  chan syncExecutionResult
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -38,27 +61,38 @@ type syncCoordinator struct {
 	pending map[syncActionType]queuedSyncAction
 	dirty   map[syncActionType]syncAction
 
-	inflight *syncAction
-	nextSeq  uint64
-	stopped  bool
-	done     chan struct{}
+	inflight     *syncAction
+	nextSeq      uint64
+	stopped      bool
+	done         chan struct{}
+	observerDone chan struct{}
 }
 
 func newSyncCoordinator(executor syncActionExecutor) *syncCoordinator {
-	return newSyncCoordinatorWithResultHandling(executor, nil, nil)
+	return newSyncCoordinatorWithResultHandlingContext(context.Background(), executor, nil, nil)
 }
 
 func newSyncCoordinatorWithObserver(executor syncActionExecutor, observer syncExecutionObserver) *syncCoordinator {
-	return newSyncCoordinatorWithResultHandling(executor, nil, observer)
+	return newSyncCoordinatorWithResultHandlingContext(context.Background(), executor, nil, observer)
 }
 
 func newSyncCoordinatorWithResultHandling(executor syncActionExecutor, recorder *syncExecutionState, observer syncExecutionObserver) *syncCoordinator {
+	return newSyncCoordinatorWithResultHandlingContext(context.Background(), executor, recorder, observer)
+}
+
+func newSyncCoordinatorWithResultHandlingContext(ctx context.Context, executor syncActionExecutor, recorder *syncExecutionState, observer syncExecutionObserver) *syncCoordinator {
 	if executor == nil {
 		panic("controller: nil sync coordinator executor")
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	coordinator := &syncCoordinator{
 		executor: executor,
+		ctx:      runCtx,
+		cancel:   cancel,
 		recorder: recorder,
 		observer: observer,
 		results:  make(chan syncExecutionResult, 1),
@@ -70,6 +104,7 @@ func newSyncCoordinatorWithResultHandling(executor syncActionExecutor, recorder 
 
 	go coordinator.run()
 	if observer != nil {
+		coordinator.observerDone = make(chan struct{})
 		go coordinator.observeResults()
 	}
 
@@ -116,21 +151,47 @@ func (c *syncCoordinator) WaitIdle() {
 }
 
 func (c *syncCoordinator) Stop() {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	_ = c.StopContext(ctx)
+}
+
+func (c *syncCoordinator) StopContext(ctx context.Context) error {
 	c.mu.Lock()
 	if c.stopped {
 		done := c.done
+		observerDone := c.observerDone
 		c.mu.Unlock()
-		<-done
-		return
+		return errors.Join(waitCoordinatorDone(ctx, done), waitCoordinatorDone(ctx, observerDone))
 	}
 	c.stopped = true
 	c.pending = make(map[syncActionType]queuedSyncAction)
 	c.dirty = make(map[syncActionType]syncAction)
 	done := c.done
+	observerDone := c.observerDone
+	cancel := c.cancel
 	c.cond.Broadcast()
 	c.mu.Unlock()
 
-	<-done
+	if cancel != nil {
+		cancel()
+	}
+	return errors.Join(waitCoordinatorDone(ctx, done), waitCoordinatorDone(ctx, observerDone))
+}
+
+func waitCoordinatorDone(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 func (c *syncCoordinator) run() {
@@ -142,12 +203,14 @@ func (c *syncCoordinator) run() {
 		if !ok {
 			return
 		}
-		err := c.executor.ExecuteSyncAction(context.Background(), action)
-		if c.recorder != nil {
+		err := c.executor.ExecuteSyncAction(c.ctx, action)
+		if c.ctx.Err() == nil && c.recorder != nil {
 			c.recorder.Record(action, err)
 		}
 		c.finishAction(action)
-		c.notifyObserver(action, err)
+		if c.ctx.Err() == nil {
+			c.notifyObserver(action, err)
+		}
 	}
 }
 
@@ -164,7 +227,11 @@ func (c *syncCoordinator) notifyObserver(action syncAction, err error) {
 }
 
 func (c *syncCoordinator) observeResults() {
+	defer close(c.observerDone)
 	for result := range c.results {
+		if c.ctx.Err() != nil {
+			continue
+		}
 		func() {
 			defer func() {
 				_ = recover()

@@ -1,6 +1,7 @@
 package tuic
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
+	"github.com/Mtoly/XrayRP/internal/operation"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
@@ -65,6 +68,17 @@ func defaultTaskFactory(tag string, interval time.Duration, execute func() error
 	return specialruntime.NewPeriodic(interval, execute)
 }
 
+func (s *TuicService) newTask(tag string, interval time.Duration, execute func(context.Context) error) lifecycleTask {
+	if s.taskFactory != nil {
+		return s.taskFactory(tag, interval, func() error {
+			ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+			defer cancel()
+			return execute(ctx)
+		})
+	}
+	return specialruntime.NewPeriodicContext(interval, execute)
+}
+
 type TuicService struct {
 	apiClient PanelClient
 	config    *controller.Config
@@ -73,6 +87,7 @@ type TuicService struct {
 	nodeInfo   *api.NodeInfo
 
 	box                        runtimeInstance
+	cleanupRuntimes            []runtimeInstance
 	runtimeFactory             runtimeFactory
 	reloadRuntimeFactory       reloadRuntimeFactory
 	startRuntime               startRuntimeFunc
@@ -86,11 +101,13 @@ type TuicService struct {
 	state       lifecycleState
 	runtimeErr  error
 	closed      bool
+	health      service.RuntimeHealthState
 
-	tag     string
-	startAt time.Time
-	tasks   *specialruntime.Tasks
-	logger  *log.Entry
+	tag             string
+	startAt         time.Time
+	tasks           *specialruntime.Tasks
+	syncCoordinator *specialruntime.SnapshotSyncCoordinator
+	logger          *log.Entry
 
 	rules *rule.Manager
 
@@ -104,7 +121,7 @@ type TuicService struct {
 
 	// reloadMu prevents concurrent rebuilds of the underlying sing-box
 	// instance when node configuration or certificates change.
-	reloadMu sync.Mutex
+	reloadMu operation.Gate
 }
 
 type userRecord struct {

@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
@@ -41,6 +43,22 @@ type joinablePeriodicRunner interface {
 	Wait() error
 }
 
+type contextStartPeriodicRunner interface {
+	StartContext(context.Context) error
+}
+
+type contextStopPeriodicRunner interface {
+	StopContext(context.Context) error
+}
+
+type contextWaitPeriodicRunner interface {
+	WaitContext(context.Context) error
+}
+
+type contextClosePeriodicRunner interface {
+	CloseContext(context.Context) error
+}
+
 type controllerManagedPeriodic struct {
 	mu              sync.Mutex
 	runner          joinablePeriodicRunner
@@ -51,15 +69,21 @@ type controllerManagedPeriodic struct {
 }
 
 func newControllerPeriodicTask(interval time.Duration, execute func() error) periodicRunner {
+	return newControllerPeriodicTaskContext(interval, func(context.Context) error {
+		return execute()
+	})
+}
+
+func newControllerPeriodicTaskContext(interval time.Duration, execute func(context.Context) error) periodicRunner {
 	periodic := &controllerManagedPeriodic{}
-	periodic.runner = specialruntime.NewPeriodic(interval, func() error {
+	periodic.runner = specialruntime.NewPeriodicContext(interval, func(ctx context.Context) error {
 		periodic.mu.Lock()
 		closed := periodic.closed
 		periodic.mu.Unlock()
 		if closed {
 			return nil
 		}
-		return execute()
+		return execute(ctx)
 	})
 	return periodic
 }
@@ -90,51 +114,139 @@ func (p *controllerManagedPeriodic) beginStart() (chan struct{}, bool) {
 }
 
 func (p *controllerManagedPeriodic) Start() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return p.StartContext(ctx)
+}
+
+func (p *controllerManagedPeriodic) StartContext(ctx context.Context) error {
 	done, ok := p.beginStart()
 	if !ok {
 		return nil
 	}
-	err := p.runner.Start()
+	err := startPeriodicRunnerContext(ctx, p.runner)
 	if p.isClosed() {
-		err = errors.Join(err, p.runner.Stop())
+		err = errors.Join(err, stopPeriodicRunnerContext(ctx, p.runner))
 	}
 	p.finishStart(done)
 	return err
 }
 
 func (p *controllerManagedPeriodic) Stop() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return p.StopContext(ctx)
+}
+
+func (p *controllerManagedPeriodic) StopContext(ctx context.Context) error {
 	p.mu.Lock()
 	p.closed = true
 	p.mu.Unlock()
-	return p.runner.Stop()
+	return stopPeriodicRunnerContext(ctx, p.runner)
 }
 
 func (p *controllerManagedPeriodic) Wait() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
+	defer cancel()
+	return p.WaitContext(ctx)
+}
+
+func (p *controllerManagedPeriodic) WaitContext(ctx context.Context) error {
 	p.mu.Lock()
 	startDone := p.startDone
 	startInProgress := p.startInProgress
 	p.mu.Unlock()
 	if startInProgress {
-		<-startDone
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-startDone:
+		}
 	}
-	return p.runner.Wait()
+	return waitPeriodicRunnerContext(ctx, p.runner)
 }
 
 func (p *controllerManagedPeriodic) Close() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return p.CloseContext(ctx)
+}
+
+func (p *controllerManagedPeriodic) CloseContext(ctx context.Context) error {
 	p.mu.Lock()
 	p.closed = true
 	startDone := p.startDone
 	startInProgress := p.startInProgress
 	p.mu.Unlock()
 
-	stopErr := p.runner.Stop()
+	stopErr := stopPeriodicRunnerContext(ctx, p.runner)
 	if startInProgress {
-		<-startDone
+		select {
+		case <-ctx.Done():
+			return errors.Join(stopErr, ctx.Err())
+		case <-startDone:
+		}
 	}
-	return errors.Join(stopErr, p.runner.Wait())
+	return errors.Join(stopErr, waitPeriodicRunnerContext(ctx, p.runner))
 }
 
+func startPeriodicRunnerContext(ctx context.Context, runner periodicRunner) error {
+	if contextual, ok := runner.(contextStartPeriodicRunner); ok {
+		return contextual.StartContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runner.Start()
+}
+
+func stopPeriodicRunnerContext(ctx context.Context, runner periodicRunner) error {
+	if contextual, ok := runner.(contextStopPeriodicRunner); ok {
+		return contextual.StopContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if joinable, ok := runner.(joinablePeriodicRunner); ok {
+		return joinable.Stop()
+	}
+	return nil
+}
+
+func waitPeriodicRunnerContext(ctx context.Context, runner periodicRunner) error {
+	if contextual, ok := runner.(contextWaitPeriodicRunner); ok {
+		return contextual.WaitContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if joinable, ok := runner.(joinablePeriodicRunner); ok {
+		return joinable.Wait()
+	}
+	return nil
+}
+
+func closePeriodicRunnerContext(ctx context.Context, runner periodicRunner) error {
+	if contextual, ok := runner.(contextClosePeriodicRunner); ok {
+		return contextual.CloseContext(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runner.Close()
+}
 func (*controllerManagedPeriodic) startAsynchronously() {}
+
+func (c *Controller) periodicTaskFactoryContext(interval time.Duration, execute func(context.Context) error) periodicRunner {
+	if c == nil || c.newPeriodicTask == nil {
+		return newControllerPeriodicTaskContext(interval, execute)
+	}
+	return c.newPeriodicTask(interval, func() error {
+		ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+		defer cancel()
+		return execute(ctx)
+	})
+}
 
 func (c *Controller) periodicTaskFactory() periodicTaskFactory {
 	if c == nil || c.newPeriodicTask == nil {
@@ -144,10 +256,9 @@ func (c *Controller) periodicTaskFactory() periodicTaskFactory {
 }
 
 func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) error {
-	if periodic == nil {
-		return nil
-	}
-	err := periodic.Start()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	err := startPeriodicRunnerContext(ctx, periodic)
 	c.logPeriodicTaskError(tag, err)
 	return err
 }
@@ -168,16 +279,27 @@ func (c *Controller) showErrorDetails() bool {
 }
 
 func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) (error, bool) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return c.launchPeriodicTaskContext(ctx, tag, periodic)
+}
+
+func (c *Controller) launchPeriodicTaskContext(ctx context.Context, tag string, periodic periodicRunner) (error, bool) {
+	if err := ctx.Err(); err != nil {
+		return err, false
+	}
 	if _, ok := periodic.(interface{ startAsynchronously() }); ok {
+		startCtx, cancel := service.WithDefaultTimeout(context.WithoutCancel(ctx), service.DefaultStartTimeout)
 		c.periodicJoinWG.Add(1)
 		go func() {
+			defer cancel()
 			launchDone := false
 			defer func() {
 				if !launchDone {
 					c.periodicJoinWG.Done()
 				}
 			}()
-			err := periodic.Start()
+			err := startPeriodicRunnerContext(startCtx, periodic)
 			if err != nil {
 				c.periodicMu.Lock()
 				c.periodicAsyncErrs = append(c.periodicAsyncErrs, err)
@@ -195,9 +317,8 @@ func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) (er
 		}()
 		return nil, true
 	}
-	return periodic.Start(), false
+	return startPeriodicRunnerContext(ctx, periodic), false
 }
-
 func (c *Controller) recordPeriodicReplacementError(err error) error {
 	if err == nil {
 		return nil
@@ -228,6 +349,24 @@ func (c *Controller) launchPeriodicCleanup(cleanup func() error) {
 }
 
 func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Duration, execute func() error) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, false)
+}
+
+func (c *Controller) startInitialPeriodicTask(tag string, interval time.Duration, execute func() error) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, true)
+}
+
+func (c *Controller) startOrReplacePeriodicTaskWithMode(tag string, interval time.Duration, execute func() error, synchronous bool) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, synchronous)
+}
+
+func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag string, interval time.Duration, execute func(context.Context) error, synchronous bool) error {
 	if interval <= 0 || execute == nil {
 		return nil
 	}
@@ -268,7 +407,10 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 		}
 	}()
 
-	periodic := c.periodicTaskFactory()(interval, execute)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	periodic := c.periodicTaskFactoryContext(interval, execute)
 	if periodic == nil {
 		return nil
 	}
@@ -276,7 +418,7 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 	c.periodicMu.Lock()
 	if c.periodicClosed {
 		c.periodicMu.Unlock()
-		return c.recordPeriodicReplacementError(periodic.Close())
+		return c.recordPeriodicReplacementError(closePeriodicRunnerContext(ctx, periodic))
 	}
 
 	replacementIndex := -1
@@ -299,7 +441,7 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 	c.stateMu.Unlock()
 	c.periodicMu.Unlock()
 	if !stateUnchanged {
-		return c.recordPeriodicReplacementError(periodic.Close())
+		return c.recordPeriodicReplacementError(closePeriodicRunnerContext(ctx, periodic))
 	}
 
 	releaseReplacementOwnership := func() bool {
@@ -324,16 +466,16 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 	var stoppedOld joinablePeriodicRunner
 	if old != nil {
 		if joinable, ok := old.(joinablePeriodicRunner); ok {
-			if err := joinable.Stop(); err != nil {
+			if err := stopPeriodicRunnerContext(ctx, joinable); err != nil {
 				if releaseReplacementOwnership() {
 					c.launchPeriodicCleanup(old.Close)
 				}
-				return c.recordPeriodicReplacementError(errors.Join(err, periodic.Close()))
+				return c.recordPeriodicReplacementError(errors.Join(err, closePeriodicRunnerContext(ctx, periodic)))
 			}
 			stoppedOld = joinable
-		} else if err := old.Close(); err != nil {
+		} else if err := closePeriodicRunnerContext(ctx, old); err != nil {
 			releaseReplacementOwnership()
-			return c.recordPeriodicReplacementError(errors.Join(err, periodic.Close()))
+			return c.recordPeriodicReplacementError(errors.Join(err, closePeriodicRunnerContext(ctx, periodic)))
 		}
 	}
 
@@ -343,7 +485,7 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 		if stoppedOld != nil {
 			c.launchPeriodicCleanup(stoppedOld.Wait)
 		}
-		return c.recordPeriodicReplacementError(periodic.Close())
+		return c.recordPeriodicReplacementError(closePeriodicRunnerContext(ctx, periodic))
 	}
 
 	replacementIndex = -1
@@ -366,7 +508,7 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 		if stoppedOld != nil {
 			c.launchPeriodicCleanup(stoppedOld.Wait)
 		}
-		return c.recordPeriodicReplacementError(periodic.Close())
+		return c.recordPeriodicReplacementError(closePeriodicRunnerContext(ctx, periodic))
 	}
 
 	c.periodicGeneration++
@@ -408,7 +550,11 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 	var startErr error
 	startedAsynchronously := false
 	if predecessorsDone == nil {
-		startErr, startedAsynchronously = c.launchPeriodicTask(tag, periodic)
+		if synchronous {
+			startErr = startPeriodicRunnerContext(ctx, periodic)
+		} else {
+			startErr, startedAsynchronously = c.launchPeriodicTaskContext(ctx, tag, periodic)
+		}
 	}
 	c.periodicJoinWG.Done()
 	replacementTransactionDone = true
@@ -418,6 +564,9 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 		if predecessorsDone == nil && c.logger != nil {
 			c.logger.Printf("Start %s periodic task", tag)
 		}
+	}
+	if synchronous {
+		return startErr
 	}
 	return nil
 }
@@ -466,7 +615,9 @@ func (c *Controller) joinAndLaunchPeriodicReplacement(
 	var startErr error
 	startedAsynchronously := false
 	if shouldStart {
-		startErr, startedAsynchronously = c.launchPeriodicTask(tag, replacement)
+		startCtx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+		startErr, startedAsynchronously = c.launchPeriodicTaskContext(startCtx, tag, replacement)
+		cancel()
 	}
 	c.periodicJoinWG.Done()
 	replacementJoinDone = true
@@ -479,12 +630,22 @@ func (c *Controller) joinAndLaunchPeriodicReplacement(
 }
 
 func (c *Controller) closePeriodicTasks() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return c.closePeriodicTasksContext(ctx)
+}
+
+func (c *Controller) closePeriodicTasksContext(ctx context.Context) error {
 	c.periodicMu.Lock()
 	if c.periodicClosed {
 		done := c.periodicCloseDone
 		c.periodicMu.Unlock()
 		if done != nil {
-			<-done
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+			}
 		}
 		c.periodicMu.Lock()
 		err := c.periodicCloseErr
@@ -517,12 +678,22 @@ func (c *Controller) closePeriodicTasks() error {
 		if tasks[i].Periodic == nil {
 			continue
 		}
-		if err := tasks[i].Periodic.Close(); err != nil {
+		if err := closePeriodicRunnerContext(ctx, tasks[i].Periodic); err != nil {
 			errs = append(errs, err)
 			closeFailures = append(closeFailures, closeFailure{tag: tasks[i].tag, err: err})
 		}
 	}
-	c.periodicJoinWG.Wait()
+
+	joinDone := make(chan struct{})
+	go func() {
+		c.periodicJoinWG.Wait()
+		close(joinDone)
+	}()
+	select {
+	case <-ctx.Done():
+		errs = append(errs, ctx.Err())
+	case <-joinDone:
+	}
 
 	c.periodicMu.Lock()
 	errs = append(errs, c.periodicAsyncErrs...)
@@ -538,18 +709,23 @@ func (c *Controller) closePeriodicTasks() error {
 	}
 	return closeErr
 }
-
 func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return c.startControllerPeriodicTasksContext(ctx, nodeInfo)
+}
+
+func (c *Controller) startControllerPeriodicTasksContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
 	schedule := materializeControllerRuntimeSchedule(c.config.UpdatePeriodic, c.currentBaseConfig())
 
-	if err := c.startOrReplacePeriodicTask(periodicTaskNodeMonitor, schedule.pullInterval, c.nodeInfoMonitor); err != nil {
+	if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskNodeMonitor, schedule.pullInterval, c.nodeInfoMonitorContext, true); err != nil {
 		return err
 	}
-	if err := c.startOrReplacePeriodicTask(periodicTaskUserMonitor, schedule.pushInterval, c.userInfoMonitor); err != nil {
+	if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskUserMonitor, schedule.pushInterval, c.userInfoMonitorContext, true); err != nil {
 		return err
 	}
 	if nodeInfo != nil && nodeInfo.EnableTLS && c.config.EnableREALITY == false {
-		if err := c.startOrReplacePeriodicTask(periodicTaskCertMonitor, time.Duration(c.config.UpdatePeriodic)*time.Second*60, c.certMonitorPeriodic); err != nil {
+		if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskCertMonitor, time.Duration(c.config.UpdatePeriodic)*time.Second*60, c.certMonitorPeriodicContext, true); err != nil {
 			return err
 		}
 	}
@@ -599,17 +775,23 @@ func normalizeBaseConfigInterval(seconds, min int) int {
 }
 
 func (c *Controller) applyBaseConfig(baseConfig *api.BaseConfig) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.applyBaseConfigContext(ctx, baseConfig)
+}
+
+func (c *Controller) applyBaseConfigContext(ctx context.Context, baseConfig *api.BaseConfig) error {
 	if baseConfig == nil {
 		return nil
 	}
 
 	if pullInterval := normalizeBaseConfigInterval(baseConfig.PullInterval, minBaseConfigPullInterval); pullInterval > 0 {
-		if err := c.startOrReplacePeriodicTask(periodicTaskNodeMonitor, time.Duration(pullInterval)*time.Second, c.nodeInfoMonitor); err != nil {
+		if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskNodeMonitor, time.Duration(pullInterval)*time.Second, c.nodeInfoMonitorContext, false); err != nil {
 			return err
 		}
 	}
 	if pushInterval := normalizeBaseConfigInterval(baseConfig.PushInterval, minBaseConfigPushInterval); pushInterval > 0 {
-		if err := c.startOrReplacePeriodicTask(periodicTaskUserMonitor, time.Duration(pushInterval)*time.Second, c.userInfoMonitor); err != nil {
+		if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskUserMonitor, time.Duration(pushInterval)*time.Second, c.userInfoMonitorContext, false); err != nil {
 			return err
 		}
 	}

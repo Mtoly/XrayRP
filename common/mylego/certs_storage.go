@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
-	"golang.org/x/net/idna"
 )
 
 const (
@@ -259,56 +258,4 @@ func validateCertificateExtension(extension string) error {
 		return errors.New("certificate extension must not contain path syntax")
 	}
 	return nil
-}
-
-// sanitizedDomain Make sure no funny chars are in the cert names (like wildcards ;)).
-func sanitizedDomain(domain string) string {
-	safe, err := sanitizeDomain(domain)
-	if err != nil {
-		panic(err)
-	}
-	return safe
-}
-
-func sanitizeDomain(domain string) (string, error) {
-	if domain == "" || strings.TrimSpace(domain) != domain {
-		return "", errors.New("certificate domain is empty or contains surrounding whitespace")
-	}
-	wildcard := strings.HasPrefix(domain, "*.")
-	lookupDomain := domain
-	if wildcard {
-		lookupDomain = strings.TrimPrefix(domain, "*.")
-	}
-	if lookupDomain == "" ||
-		strings.ContainsRune(lookupDomain, '*') ||
-		strings.Contains(lookupDomain, "..") ||
-		strings.ContainsAny(lookupDomain, `/\:`) ||
-		strings.ContainsRune(lookupDomain, '\x00') ||
-		filepath.IsAbs(lookupDomain) ||
-		filepath.VolumeName(lookupDomain) != "" {
-		return "", errors.New("certificate domain must not contain path syntax")
-	}
-	if _, err := idna.Lookup.ToASCII(lookupDomain); err != nil {
-		return "", fmt.Errorf("validate certificate domain: %w", err)
-	}
-
-	// Preserve the historical Punycode file mapping after validating the
-	// input with the stricter DNS lookup profile.
-	safe, err := idna.ToASCII(lookupDomain)
-	if err != nil {
-		return "", err
-	}
-	if wildcard {
-		safe = "_." + safe
-	}
-	if safe == "" ||
-		strings.ContainsAny(safe, `/\:`) ||
-		strings.ContainsRune(safe, '\x00') {
-		return "", errors.New("certificate domain maps to an invalid file name")
-	}
-	reservedPrefix := strings.TrimSuffix(fileTransactionJournalName, ".json")
-	if strings.HasPrefix(strings.ToLower(safe), strings.ToLower(reservedPrefix)) {
-		return "", errors.New("certificate domain uses the reserved transaction namespace")
-	}
-	return safe, nil
 }

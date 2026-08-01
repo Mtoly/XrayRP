@@ -21,7 +21,11 @@ import (
 )
 
 func (c *Controller) removeInbound(tag string) error {
-	err := c.ibm.RemoveHandler(context.Background(), tag)
+	return c.removeInboundContext(context.Background(), tag)
+}
+
+func (c *Controller) removeInboundContext(ctx context.Context, tag string) error {
+	err := c.ibm.RemoveHandler(ctx, tag)
 	return err
 }
 
@@ -153,11 +157,19 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 }
 
 func (c *Controller) removeOutbound(tag string) error {
-	err := c.obm.RemoveHandler(context.Background(), tag)
+	return c.removeOutboundContext(context.Background(), tag)
+}
+
+func (c *Controller) removeOutboundContext(ctx context.Context, tag string) error {
+	err := c.obm.RemoveHandler(ctx, tag)
 	return err
 }
 
 func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
+	return c.addInboundContext(context.Background(), config)
+}
+
+func (c *Controller) addInboundContext(ctx context.Context, config *core.InboundHandlerConfig) error {
 	rawHandler, err := core.CreateObject(c.server, config)
 	if err != nil {
 		return err
@@ -166,13 +178,17 @@ func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
 	if !ok {
 		return fmt.Errorf("not an InboundHandler: %s", err)
 	}
-	if err := c.ibm.AddHandler(context.Background(), handler); err != nil {
+	if err := c.ibm.AddHandler(ctx, handler); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string, routePolicy routingPolicyValue) error {
+	return c.addOutboundContext(context.Background(), config, tag, routePolicy)
+}
+
+func (c *Controller) addOutboundContext(ctx context.Context, config *core.OutboundHandlerConfig, tag string, routePolicy routingPolicyValue) error {
 	rawHandler, err := core.CreateObject(c.server, config)
 	if err != nil {
 		return err
@@ -193,14 +209,18 @@ func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string,
 		logger:      c.logger.WithField("outbound_tag", tag),
 	}
 	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)
-	if err := c.obm.AddHandler(context.Background(), wrapper); err != nil {
+	if err := c.obm.AddHandler(ctx, wrapper); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *Controller) addUsers(users []*protocol.User, tag string) error {
-	handler, err := c.ibm.GetHandler(context.Background(), tag)
+	return c.addUsersContext(context.Background(), users, tag)
+}
+
+func (c *Controller) addUsersContext(ctx context.Context, users []*protocol.User, tag string) error {
+	handler, err := c.ibm.GetHandler(ctx, tag)
 	if err != nil {
 		return fmt.Errorf("no such inbound tag: %s", err)
 	}
@@ -218,7 +238,7 @@ func (c *Controller) addUsers(users []*protocol.User, tag string) error {
 		if err != nil {
 			return err
 		}
-		err = userManager.AddUser(context.Background(), mUser)
+		err = userManager.AddUser(ctx, mUser)
 		if err != nil {
 			return err
 		}
@@ -236,7 +256,11 @@ func (c *Controller) addUsers(users []*protocol.User, tag string) error {
 }
 
 func (c *Controller) removeUsers(users []string, tag string) error {
-	handler, err := c.ibm.GetHandler(context.Background(), tag)
+	return c.removeUsersContext(context.Background(), users, tag)
+}
+
+func (c *Controller) removeUsersContext(ctx context.Context, users []string, tag string) error {
+	handler, err := c.ibm.GetHandler(ctx, tag)
 	if err != nil {
 		return fmt.Errorf("no such inbound tag: %s", err)
 	}
@@ -250,7 +274,7 @@ func (c *Controller) removeUsers(users []string, tag string) error {
 		return fmt.Errorf("handler %s is not implement proxy.UserManager", err)
 	}
 	for _, email := range users {
-		err = userManager.RemoveUser(context.Background(), email)
+		err = userManager.RemoveUser(ctx, email)
 		if err != nil {
 			return err
 		}

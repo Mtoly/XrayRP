@@ -2,26 +2,19 @@ package gov2panel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/api/internal/panelhttp"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
-	"github.com/gogf/gf/v2/encoding/gjson"
-	"github.com/gogf/gf/v2/frame/g"
-	"github.com/gogf/gf/v2/net/gclient"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/infra/conf"
 )
 
 // APIClient API config
 type APIClient struct {
-	ctx                 context.Context
 	APIHost             string
 	NodeID              int
 	Key                 string
@@ -47,7 +40,6 @@ func New(apiConfig *api.Config) *APIClient {
 	}
 
 	apiClient := &APIClient{
-		ctx:                 context.Background(),
 		APIHost:             apiConfig.APIHost,
 		NodeID:              apiConfig.NodeID,
 		Key:                 apiConfig.Key,
@@ -64,34 +56,38 @@ func New(apiConfig *api.Config) *APIClient {
 	return apiClient
 }
 
-func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
+func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return c.GetNodeInfoContext(context.Background())
+}
+
+func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
 
 	apiPath := "/api/server/config"
-	reslutJson, err := c.sendRequest(
+	response, err := c.sendRequestContext(ctx,
 		nil,
 		"POST",
 		apiPath,
-		g.Map{})
+		map[string]any{})
 	if err != nil {
 		return nil, err
 	}
 
-	if reslutJson.Get("data").String() == "" {
+	if response.stringAt("data") == "" {
 		return nil, errors.New("gov2panel node config data is null")
 	}
 
-	if reslutJson.Get("data.port").Int() == 0 {
+	if response.intAt("data.port") == 0 {
 		return nil, errors.New("server port must > 0")
 	}
 
 	nodeInfo = new(api.NodeInfo)
-	err = reslutJson.Get("data").Scan(nodeInfo)
+	err = response.scanAt("data", nodeInfo)
 	if err != nil {
 		return nil, fmt.Errorf("parse node info failed: \nError: %v", err)
 	}
 
 	routes := make([]route, 0)
-	err = reslutJson.Get("data.routes").Scan(&routes)
+	err = response.scanAt("data.routes", &routes)
 	if err != nil {
 		return nil, fmt.Errorf("parse node routes failed: \nError: %v", err)
 	}
@@ -125,7 +121,11 @@ func parseDNSConfig(routes []route) (nameServerList []*conf.NameServerConfig) {
 }
 
 // GetUserList will pull user form panel
-func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
+func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
+	return c.GetUserListContext(context.Background())
+}
+
+func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.UserInfo, err error) {
 
 	apiPath := "/api/server/user"
 
@@ -136,17 +136,17 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 		return nil, fmt.Errorf("unsupported node type: %s", c.NodeType)
 	}
 
-	reslutJson, err := c.sendRequest(
+	response, err := c.sendRequestContext(ctx,
 		nil,
 		"GET",
 		apiPath,
-		g.Map{})
+		map[string]any{})
 	if err != nil {
 		return nil, err
 	}
 
 	var users []*user
-	reslutJson.Get("data.users").Scan(&users)
+	response.scanAt("data.users", &users)
 
 	userList := make([]api.UserInfo, len(users))
 	for i := 0; i < len(users); i++ {
@@ -173,35 +173,54 @@ func (c *APIClient) GetUserList() (UserList *[]api.UserInfo, err error) {
 	return &userList, nil
 }
 
-func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
-	return
+func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) error {
+	return c.ReportNodeStatusContext(context.Background(), nodeStatus)
+}
+
+func (*APIClient) ReportNodeStatusContext(ctx context.Context, _ *api.NodeStatus) error {
+	return ctx.Err()
 }
 
 // GetAliveList is not supported by GoV2Panel.
-func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
+func (c *APIClient) GetAliveList() (map[int][]string, error) {
+	return c.GetAliveListContext(context.Background())
+}
+
+func (*APIClient) GetAliveListContext(ctx context.Context) (map[int][]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
-func (c *APIClient) ReportNodeOnlineUsers(onlineUser *[]api.OnlineUser) (err error) {
-	return
+func (c *APIClient) ReportNodeOnlineUsers(onlineUser *[]api.OnlineUser) error {
+	return c.ReportNodeOnlineUsersContext(context.Background(), onlineUser)
+}
+
+func (*APIClient) ReportNodeOnlineUsersContext(ctx context.Context, _ *[]api.OnlineUser) error {
+	return ctx.Err()
 }
 
 // ReportUserTraffic reports the user traffic
-func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) (err error) {
+func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
+	return c.ReportUserTrafficContext(context.Background(), userTraffic)
+}
+
+func (c *APIClient) ReportUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) (err error) {
 	apiPath := "/api/server/push"
-	reslutJson, err := c.sendRequest(
+	response, err := c.sendRequestContext(ctx,
 		nil,
 		"POST",
 		apiPath,
-		g.Map{
+		map[string]any{
 			"data": userTraffic,
 		})
 	if err != nil {
 		return err
 	}
 
-	if reslutJson.Get("code").Int() != 0 {
-		return errors.New(reslutJson.Get("message").String())
+	if response.intAt("code") != 0 {
+		return errors.New(response.stringAt("message"))
 	}
 
 	return
@@ -213,25 +232,36 @@ func (c *APIClient) Describe() api.ClientInfo {
 
 // GetXrayRCertConfig is not provided by GoV2Panel.
 func (c *APIClient) GetXrayRCertConfig() (*api.XrayRCertConfig, error) {
+	return c.GetXrayRCertConfigContext(context.Background())
+}
+
+func (*APIClient) GetXrayRCertConfigContext(ctx context.Context) (*api.XrayRCertConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return nil, api.ErrUnsupportedPanelFeature
 }
 
 // GetNodeRule implements the API interface
 func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
+	return c.GetNodeRuleContext(context.Background())
+}
+
+func (c *APIClient) GetNodeRuleContext(ctx context.Context) (*[]api.DetectRule, error) {
 	ruleList := c.LocalRuleList
 
 	apiPath := "/api/server/config"
-	reslutJson, err := c.sendRequest(
+	response, err := c.sendRequestContext(ctx,
 		nil,
 		"POST",
 		apiPath,
-		g.Map{})
+		map[string]any{})
 	if err != nil {
 		return nil, err
 	}
 
 	routes := make([]route, 0)
-	err = reslutJson.Get("data.routes").Scan(&routes)
+	err = response.scanAt("data.routes", &routes)
 	if err != nil {
 		return nil, fmt.Errorf("parse node routes failed: \nError: %v", err)
 	}
@@ -257,69 +287,14 @@ func (c *APIClient) GetNodeRule() (*[]api.DetectRule, error) {
 
 }
 
-func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) (err error) {
-	return
+func (c *APIClient) ReportIllegal(detectResultList *[]api.DetectResult) error {
+	return c.ReportIllegalContext(context.Background(), detectResultList)
+}
+
+func (*APIClient) ReportIllegalContext(ctx context.Context, _ *[]api.DetectResult) error {
+	return ctx.Err()
 }
 
 func (c *APIClient) Debug() {
 
-}
-
-// request 统一请求接口
-func (c *APIClient) sendRequest(headerM map[string]string, method string, url string, data g.Map) (reslutJson *gjson.Json, err error) {
-	url = c.APIHost + url
-
-	client := gclient.New()
-
-	var gResponse *gclient.Response
-
-	if c.Timeout > 0 {
-		client.SetTimeout(time.Duration(c.Timeout) * time.Second) //方法用于设置当前请求超时时间
-	} else {
-		client.SetTimeout(5 * time.Second)
-	}
-	client.Retry(3, 10*time.Second) //方法用于设置请求失败时重连次数和重连间隔。
-
-	client.SetHeaderMap(headerM)
-	client.SetHeader("Content-Type", "application/json")
-	client.SetHeader("Accept-Encoding", "gzip")
-
-	data["token"] = c.Key
-	data["node_id"] = c.NodeID
-
-	switch method {
-	case "GET":
-		gResponse, err = client.Get(c.ctx, url, data)
-	case "POST":
-		gResponse, err = client.Post(c.ctx, url, data)
-	default:
-		err = fmt.Errorf("unsupported method: %s", method)
-		return
-	}
-
-	if err != nil {
-		return
-	}
-	defer gResponse.Close()
-
-	if gResponse.StatusCode >= 400 {
-		err = fmt.Errorf("request %s failed: status %d", url, gResponse.StatusCode)
-		return
-	}
-	body, err := panelhttp.ReadEncodedResponseBody(gResponse.Body, gResponse.Header.Get("Content-Encoding"))
-	if err != nil {
-		err = fmt.Errorf("http response read failed: %w", err)
-		return
-	}
-	if !json.Valid(body) {
-		err = fmt.Errorf("http response is not valid JSON")
-		return
-	}
-	reslutJson = gjson.New(body)
-	if reslutJson.Get("code").Int() != 0 {
-		err = errors.New(reslutJson.Get("message").String())
-		return
-	}
-
-	return
 }

@@ -386,11 +386,19 @@ func TestTransportProfileAdaptersProduceEquivalentNodeInfoAndRuntime(t *testing.
 				t.Fatalf("equivalent payloads produced different node info:\nV2raySocks: %#v\nBunPanel:   %#v", fromV2raySocks, fromBunPanel)
 			}
 
-			fromV2raySocksRuntime, err := controller.InboundBuilder(&controller.Config{}, fromV2raySocks, "transport-contract")
+			v2raySocksBuilder, err := controller.NewNodeHandlerBuilder(&controller.Config{}, fromV2raySocks)
+			if err != nil {
+				t.Fatalf("prepare V2raySocks runtime: %v", err)
+			}
+			fromV2raySocksRuntime, err := v2raySocksBuilder.BuildInbound("transport-contract")
 			if err != nil {
 				t.Fatalf("build V2raySocks runtime: %v", err)
 			}
-			fromBunPanelRuntime, err := controller.InboundBuilder(&controller.Config{}, fromBunPanel, "transport-contract")
+			bunPanelBuilder, err := controller.NewNodeHandlerBuilder(&controller.Config{}, fromBunPanel)
+			if err != nil {
+				t.Fatalf("prepare BunPanel runtime: %v", err)
+			}
+			fromBunPanelRuntime, err := bunPanelBuilder.BuildInbound("transport-contract")
 			if err != nil {
 				t.Fatalf("build BunPanel runtime: %v", err)
 			}

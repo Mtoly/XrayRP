@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"context"
 	"net/http"
 	"strings"
 )
@@ -16,12 +17,17 @@ type wsHandshakeResponse struct {
 // It returns an empty endpoint on unsupported/disabled/malformed handshakes so
 // callers can fall back to the legacy UniProxy websocket endpoint.
 func (c *APIClient) DiscoverWSEndpoint() (string, error) {
+	return c.DiscoverWSEndpointContext(context.Background())
+}
+
+func (c *APIClient) DiscoverWSEndpointContext(ctx context.Context) (string, error) {
 	if c == nil || c.client == nil {
 		return "", nil
 	}
 
 	var payload wsHandshakeResponse
 	res, err := c.client.R().
+		SetContext(ctx).
 		SetResult(&payload).
 		ForceContentType("application/json").
 		Get("/api/v2/server/handshake")

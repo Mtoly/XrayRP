@@ -3,6 +3,7 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -21,7 +22,7 @@ func TestReplacePortHopRulesDoesNotClaimUnsupportedInstallation(t *testing.T) {
 
 	service := &Hysteria2Service{}
 	rules := []portHopRule{{FromPortStart: 30001, FromPortEnd: 30002, ToPort: 30000}}
-	restored, err := service.replacePortHopRulesLocked(rules)
+	restored, err := service.replacePortHopRulesLocked(context.Background(), rules)
 	if err != nil {
 		t.Fatalf("replacePortHopRulesLocked() error = %v", err)
 	}
@@ -38,7 +39,7 @@ func TestCloseRemovesPortHopRulesOnce(t *testing.T) {
 	defer func() { deletePortHopRules = original }()
 
 	calls := 0
-	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		calls++
 		if len(rules) != 1 {
 			t.Fatalf("removed rules = %v, want one rule", rules)
@@ -72,7 +73,7 @@ func TestCloseRetainsRestoredPortHopOwnershipAndRetriesCleanup(t *testing.T) {
 
 	rules := []portHopRule{{FromPortStart: 30001, FromPortEnd: 30002, ToPort: 30000}}
 	calls := 0
-	deletePortHopRules = func(got []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(_ context.Context, got []portHopRule, _ *log.Entry) error {
 		calls++
 		if !reflect.DeepEqual(got, rules) {
 			t.Fatalf("removed rules = %v, want %v", got, rules)

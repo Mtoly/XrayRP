@@ -2,6 +2,7 @@ package anytls
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -352,8 +353,50 @@ func TestReloadRestorationFailureJoinsErrorsAndRecordsFailure(t *testing.T) {
 	}
 }
 
-func TestReloadSurfacesOldCloseFailureAfterSuccessfulReplacement(t *testing.T) {
+func TestReloadOldCloseFailureRetainsOwnershipAndSkipsCandidateStart(t *testing.T) {
 	closeErr := errors.New("old close failed")
+	service, oldRuntime, oldNode := newReloadTestService()
+	candidate := &reloadRuntime{name: "candidate"}
+	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		return candidate, spec.inboundTag, nil
+	}
+	candidateCloseCalls := 0
+	service.closeRuntime = func(runtime runtimeInstance) error {
+		if runtime == oldRuntime {
+			return closeErr
+		}
+		candidateCloseCalls++
+		return nil
+	}
+	startCalls := 0
+	service.startRuntime = func(runtimeInstance) error {
+		startCalls++
+		return nil
+	}
+
+	err := service.reloadNode(newReloadNode(8443, "new.example.com"))
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("reloadNode() error = %v, want %v", err, closeErr)
+	}
+	if startCalls != 0 || candidateCloseCalls != 1 {
+		t.Fatalf("candidate lifecycle after old close failure: starts=%d closes=%d, want 0/1", startCalls, candidateCloseCalls)
+	}
+	if service.state != stateFailed || service.box != oldRuntime || service.nodeInfo != oldNode || len(service.cleanupRuntimes) != 0 {
+		t.Fatalf("failed reload ownership: state=%v box=%v node=%v cleanup=%v", service.state, service.box, service.nodeInfo, service.cleanupRuntimes)
+	}
+
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if service.state != stateStopped || service.box != nil || len(service.cleanupRuntimes) != 0 {
+		t.Fatalf("cleanup retry state: state=%v box=%v cleanup=%v", service.state, service.box, service.cleanupRuntimes)
+	}
+}
+
+func TestReloadOldAndCandidateCleanupFailuresRetainBothOwners(t *testing.T) {
+	oldCloseErr := errors.New("old close failed")
+	candidateCloseErr := errors.New("candidate close failed")
 	service, oldRuntime, _ := newReloadTestService()
 	candidate := &reloadRuntime{name: "candidate"}
 	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
@@ -361,21 +404,31 @@ func TestReloadSurfacesOldCloseFailureAfterSuccessfulReplacement(t *testing.T) {
 	}
 	service.closeRuntime = func(runtime runtimeInstance) error {
 		if runtime == oldRuntime {
-			return closeErr
+			return oldCloseErr
 		}
+		return candidateCloseErr
+	}
+	service.startRuntime = func(runtimeInstance) error {
+		t.Fatal("candidate started before old runtime was released")
 		return nil
 	}
-	service.startRuntime = func(runtimeInstance) error { return nil }
 
 	err := service.reloadNode(newReloadNode(8443, "new.example.com"))
-	if !errors.Is(err, closeErr) {
-		t.Fatalf("reloadNode() error = %v, want surfaced old close error %v", err, closeErr)
+	if !errors.Is(err, oldCloseErr) || !errors.Is(err, candidateCloseErr) {
+		t.Fatalf("reloadNode() error = %v, want both cleanup errors", err)
 	}
-	if service.box != candidate || service.nodeInfo.Port != 8443 {
-		t.Fatalf("successful replacement not published after old close error: box=%v node=%v", service.box, service.nodeInfo)
+	if service.state != stateFailed || service.box != oldRuntime || len(service.cleanupRuntimes) != 1 || service.cleanupRuntimes[0] != candidate {
+		t.Fatalf("failed reload lost owners: state=%v box=%v cleanup=%v", service.state, service.box, service.cleanupRuntimes)
+	}
+
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if service.box != nil || len(service.cleanupRuntimes) != 0 || service.state != stateStopped {
+		t.Fatalf("cleanup retry retained ownership: state=%v box=%v cleanup=%v", service.state, service.box, service.cleanupRuntimes)
 	}
 }
-
 func TestReloadPublishesCandidateOnlyAfterSynchronousStart(t *testing.T) {
 	service, oldRuntime, oldNode := newReloadTestService()
 	candidate := &reloadRuntime{name: "candidate"}
@@ -515,24 +568,35 @@ func TestCertificateReloadUsesSameSerializedTransaction(t *testing.T) {
 	if !locked {
 		service.reloadMu.Unlock()
 	}
-	if closeErr := service.Close(); closeErr == nil {
+
+	closeCtx, cancelClose := context.WithCancel(context.Background())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- service.CloseContext(closeCtx) }()
+	cancelClose()
+	if closeErr := <-closeDone; !errors.Is(closeErr, context.Canceled) {
 		close(releaseRenew)
 		<-done
-		t.Fatal("Close() succeeded while certificate reload transaction was active")
+		t.Fatalf("CloseContext() error = %v, want context cancellation", closeErr)
 	}
-	runtimeAfterRejectedClose := service.box
-	stateAfterRejectedClose := service.state
-	if runtimeAfterRejectedClose != oldRuntime || stateAfterRejectedClose != stateReloading {
+	service.lifecycleMu.Lock()
+	runtimeAfterCanceledClose := service.box
+	stateAfterCanceledClose := service.state
+	service.lifecycleMu.Unlock()
+	if runtimeAfterCanceledClose != oldRuntime || stateAfterCanceledClose != stateReloading {
 		close(releaseRenew)
 		<-done
-		t.Fatalf("rejected Close() mutated active transaction: box=%v state=%d", runtimeAfterRejectedClose, stateAfterRejectedClose)
+		t.Fatalf("canceled CloseContext mutated active transaction: box=%v state=%d", runtimeAfterCanceledClose, stateAfterCanceledClose)
 	}
+
 	close(releaseRenew)
 	if err := <-done; err != nil {
 		t.Fatalf("certMonitor() error = %v", err)
 	}
 	if !locked || service.box != candidate {
 		t.Fatalf("certificate reload transaction = locked:%v box:%v", locked, service.box)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() cleanup error = %v", err)
 	}
 }
 
@@ -794,7 +858,7 @@ func TestCertificateReloadFailureRetriesWhenRenewalIsAlreadyCurrent(t *testing.T
 	}
 }
 
-func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
+func TestCertificateReloadOldCloseFailureBlocksRetryUntilCleanup(t *testing.T) {
 	closeErr := errors.New("old runtime close failed")
 	service, oldRuntime, _ := newReloadTestService()
 	service.config.CertConfig.CertMode = "dns"
@@ -803,7 +867,7 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 	service.prepareRenewal = func(*mylego.CertConfig) (preparedCertificateRenewal, error) {
 		renewCalls++
 		return &fakePreparedRenewal{
-			renewed:     renewCalls == 1,
+			renewed:     true,
 			certificate: []byte("candidate-cert"),
 			privateKey:  []byte("candidate-key"),
 		}, nil
@@ -824,17 +888,21 @@ func TestCertificateReloadAppliedWithCloseErrorDoesNotRetry(t *testing.T) {
 	if err := service.certMonitor(); !errors.Is(err, closeErr) {
 		t.Fatalf("first certMonitor() error = %v, want %v", err, closeErr)
 	}
-	if service.box != candidate {
-		t.Fatalf("certificate runtime was not published: box=%v want=%v", service.box, candidate)
+	if service.state != stateFailed || service.box != oldRuntime || service.box == candidate {
+		t.Fatalf("certificate reload published replacement after old close failure: state=%v box=%v", service.state, service.box)
 	}
-	if err := service.certMonitor(); err != nil {
-		t.Fatalf("second certMonitor() error = %v", err)
+	if err := service.certMonitor(); err == nil {
+		t.Fatal("second certMonitor() error = nil, want failed-owned rejection")
 	}
-	if builds != 1 {
-		t.Fatalf("runtime builds = %d, want no retry after certificate was applied", builds)
+	if builds != 1 || renewCalls != 1 {
+		t.Fatalf("failed-owned certificate reload retried: builds=%d renewals=%d, want 1/1", builds, renewCalls)
+	}
+
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
 	}
 }
-
 func TestSuccessfulReloadKeepsStableRuntimeTagAndDetectRules(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	oldTag := service.tag
@@ -907,7 +975,44 @@ func TestSuccessfulReloadSharesNewNodeLimiterAcrossUserAliases(t *testing.T) {
 	}
 }
 
-func TestCloseRacingWithReloadIsRejectedWithoutMutation(t *testing.T) {
+func TestReloadContextCancellationAfterCandidateStartRestoresAppliedRuntime(t *testing.T) {
+	service, _, oldNode := newReloadTestService()
+	candidate := &reloadRuntime{name: "candidate"}
+	restored := &reloadRuntime{name: "restored"}
+	builds := 0
+	service.reloadRuntimeFactory = func(_ *AnyTLSService, spec runtimeBuildSpec) (runtimeInstance, string, error) {
+		builds++
+		if builds == 1 {
+			return candidate, spec.inboundTag, nil
+		}
+		return restored, spec.inboundTag, nil
+	}
+	startEntered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	service.startRuntime = func(runtime runtimeInstance) error {
+		if runtime == candidate {
+			close(startEntered)
+			<-releaseStart
+		}
+		return nil
+	}
+	service.closeRuntime = func(runtimeInstance) error { return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.reloadNodeContext(ctx, newReloadNode(8443, "new.example.com")) }()
+	<-startEntered
+	cancel()
+	close(releaseStart)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("reloadNodeContext() error = %v, want context cancellation", err)
+	}
+	if service.box != restored || service.box == candidate || service.nodeInfo != oldNode || service.state != stateRunning {
+		t.Fatalf("canceled reload published candidate or lost LKG: box=%v node=%v state=%v", service.box, service.nodeInfo, service.state)
+	}
+}
+
+func TestCloseRacingWithReloadHonorsDeadlineAndRetainsOwnership(t *testing.T) {
 	service, _, _ := newReloadTestService()
 	candidate := &reloadRuntime{name: "candidate"}
 	startEntered := make(chan struct{})
@@ -925,13 +1030,32 @@ func TestCloseRacingWithReloadIsRejectedWithoutMutation(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- service.reloadNode(newReloadNode(8443, "new.example.com")) }()
 	<-startEntered
-	closeErr := service.Close()
+	closeCtx, cancelClose := context.WithCancel(context.Background())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- service.CloseContext(closeCtx) }()
+	cancelClose()
+	if closeErr := <-closeDone; !errors.Is(closeErr, context.Canceled) {
+		close(releaseStart)
+		<-done
+		t.Fatalf("CloseContext() error = %v, want context cancellation", closeErr)
+	}
+	service.lifecycleMu.Lock()
 	closed, state := service.closed, service.state
+	service.lifecycleMu.Unlock()
+	if closed || state != stateReloading {
+		close(releaseStart)
+		<-done
+		t.Fatalf("deadline close mutated active reload: closed=%v state=%v", closed, state)
+	}
+
 	close(releaseStart)
 	if err := <-done; err != nil {
 		t.Fatalf("reloadNode() error = %v", err)
 	}
-	if closeErr == nil || closed || state != stateReloading {
-		t.Fatalf("Close during reload = error:%v closed:%v state:%v, want rejection without mutation", closeErr, closed, state)
+	if service.box != candidate {
+		t.Fatalf("completed reload box = %v, want candidate", service.box)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
 	}
 }

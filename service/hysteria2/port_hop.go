@@ -1,11 +1,13 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 var (
@@ -34,10 +36,10 @@ func portHopMutationRestored(err error) bool {
 
 // replacePortHopRulesLocked replaces installed port-hop rules only after a
 // replacement runtime is ready. The caller must hold reloadMu.
-func (h *Hysteria2Service) replacePortHopRulesLocked(rules []portHopRule) (bool, error) {
+func (h *Hysteria2Service) replacePortHopRulesLocked(ctx context.Context, rules []portHopRule) (bool, error) {
 	oldRules := append([]portHopRule(nil), h.portHopRules...)
 	if len(oldRules) > 0 {
-		if err := deletePortHopRules(oldRules, h.logger); err != nil {
+		if err := deletePortHopRules(ctx, oldRules, h.logger); err != nil {
 			restored := portHopMutationRestored(err)
 			if restored {
 				h.portHopRules = oldRules
@@ -48,14 +50,14 @@ func (h *Hysteria2Service) replacePortHopRulesLocked(rules []portHopRule) (bool,
 		}
 	}
 	if len(rules) > 0 {
-		if err := applyPortHopRules(rules, h.logger); err != nil {
+		if err := applyPortHopRules(ctx, rules, h.logger); err != nil {
 			if errors.Is(err, errPortHopUnsupported) {
 				h.portHopRules = nil
 				return true, nil
 			}
 			var restoreErr error
 			if len(oldRules) > 0 {
-				restoreErr = applyPortHopRules(oldRules, h.logger)
+				restoreErr = applyPortHopRules(ctx, oldRules, h.logger)
 			}
 			if portHopMutationRestored(err) && restoreErr == nil {
 				h.portHopRules = oldRules
@@ -70,12 +72,20 @@ func (h *Hysteria2Service) replacePortHopRulesLocked(rules []portHopRule) (bool,
 }
 
 func (h *Hysteria2Service) cleanupPortHopRules() error {
-	h.reloadMu.Lock()
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return h.cleanupPortHopRulesContext(ctx)
+}
+
+func (h *Hysteria2Service) cleanupPortHopRulesContext(ctx context.Context) error {
+	if err := h.reloadMu.Lock(ctx); err != nil {
+		return err
+	}
 	defer h.reloadMu.Unlock()
 	if len(h.portHopRules) == 0 {
 		return nil
 	}
-	err := deletePortHopRules(h.portHopRules, h.logger)
+	err := deletePortHopRules(ctx, h.portHopRules, h.logger)
 	if err == nil || !portHopMutationRestored(err) {
 		h.portHopRules = nil
 	}

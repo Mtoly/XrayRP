@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,6 +17,12 @@ type runtimeConfigMode string
 const (
 	runtimeConfigModeStatic  runtimeConfigMode = "static"
 	runtimeConfigModeMachine runtimeConfigMode = "machine"
+)
+
+var (
+	ErrStaticRuntimeConfigEmptyNodes = errors.New("static mode requires at least one Nodes entry")
+	ErrRuntimeConfigModeConflict     = errors.New("static Nodes and enabled MachineConfig are mutually exclusive")
+	ErrRuntimeConfigModeChange       = errors.New("online runtime mode change is not supported")
 )
 
 type runtimeConfigPlan struct {
@@ -41,6 +48,37 @@ func (plan staticRuntimeNodePlan) materializeControllerConfig() (*controller.Con
 		return nil, fmt.Errorf("failed to clone controller config: %w", err)
 	}
 	return controllerConfig, nil
+}
+
+func ValidateRuntimeConfig(config *Config) error {
+	_, err := buildValidatedRuntimeConfigPlan(config)
+	return err
+}
+
+func ValidateRuntimeConfigReload(current, candidate *Config) error {
+	currentPlan, err := buildValidatedRuntimeConfigPlan(current)
+	if err != nil {
+		return fmt.Errorf("validate applied runtime config: %w", err)
+	}
+	candidatePlan, err := buildValidatedRuntimeConfigPlan(candidate)
+	if err != nil {
+		return fmt.Errorf("validate candidate runtime config: %w", err)
+	}
+	if currentPlan.mode != candidatePlan.mode {
+		return fmt.Errorf("%w: %s to %s", ErrRuntimeConfigModeChange, currentPlan.mode, candidatePlan.mode)
+	}
+	return nil
+}
+
+func buildValidatedRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		return plan, err
+	}
+	if plan.mode == runtimeConfigModeStatic && len(plan.staticNodes) == 0 {
+		return plan, ErrStaticRuntimeConfigEmptyNodes
+	}
+	return plan, nil
 }
 
 func buildRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
@@ -103,7 +141,7 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*MachineConfig, panelClientFactory, string, error) {
 	machineConfig := config.MachineConfig
 	if len(config.NodesConfig) > 0 {
-		return nil, nil, "", fmt.Errorf("machine mode cannot be enabled with static Nodes config")
+		return nil, nil, "", fmt.Errorf("%w: machine mode cannot be enabled with static Nodes config", ErrRuntimeConfigModeConflict)
 	}
 	if strings.TrimSpace(machineConfig.ApiHost) == "" {
 		return nil, nil, "", fmt.Errorf("machine mode ApiHost must not be empty")

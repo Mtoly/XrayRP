@@ -58,7 +58,7 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		"Host": clientInfo.APIHost,
 		"ID":   clientInfo.NodeID,
 	})
-	return &Hysteria2Service{
+	serviceRuntime := &Hysteria2Service{
 		apiClient:            apiClient,
 		config:               cfg,
 		serverConfigFactory:  defaultServerConfigFactory,
@@ -66,7 +66,6 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		serveRuntime:         defaultServeRuntime,
 		closeRuntime:         defaultCloseRuntime,
 		prepareRenewal:       defaultPrepareCertificateRenewal,
-		taskFactory:          defaultTaskFactory,
 		serveHandshake:       defaultServeHandshake,
 		logger:               logger,
 		rules:                rule.New(),
@@ -77,6 +76,8 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		ipLastActive:         make(map[string]map[string]time.Time),
 		blockedIDs:           make(map[string]bool),
 	}
+	serviceRuntime.initializeSnapshotSyncCoordinator()
+	return serviceRuntime
 }
 
 func (h *Hysteria2Service) buildRuntimeServer(spec serverBuildSpec) (runtimeServer, error) {
@@ -106,10 +107,42 @@ func (h *Hysteria2Service) appliedTag() string {
 	return tag
 }
 
+func (h *Hysteria2Service) failWithRuntimeOwnership(primary error, clientInfo api.ClientInfo, nodeInfo *api.NodeInfo, candidate reloadRuntime, tag string, startAt time.Time, tasks *specialruntime.Tasks) error {
+	h.lifecycleMu.Lock()
+	h.clientInfo = clientInfo
+	h.nodeInfo = nodeInfo
+	h.server = candidate.runtime
+	h.tag = tag
+	h.startAt = startAt
+	h.tasks = tasks
+	if candidate.serve != nil {
+		h.serveDone = candidate.serve.done
+	} else {
+		h.serveDone = nil
+	}
+	h.watcherDone = nil
+	h.trafficCancel = candidate.cancel
+	h.state = stateFailed
+	h.runtimeErr = primary
+	h.closed = false
+	h.lifecycleMu.Unlock()
+	h.health.RecordFailure(service.FailureStageCleanup, time.Now())
+	return primary
+}
+
 func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRuntime, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return h.startReloadCandidateContext(ctx, spec)
+}
+
+func (h *Hysteria2Service) startReloadCandidateContext(ctx context.Context, spec serverBuildSpec) (reloadRuntime, error) {
+	if err := ctx.Err(); err != nil {
+		return reloadRuntime{}, err
+	}
 	authGate := newRuntimeAuthGate()
 	spec.authGate = authGate
-	trafficContext, cancelTraffic := context.WithCancel(context.Background())
+	trafficContext, cancelTraffic := context.WithCancel(context.WithoutCancel(ctx))
 	spec.trafficContext = trafficContext
 	runtime, err := h.buildRuntimeServer(spec)
 	if err != nil {
@@ -121,7 +154,8 @@ func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRun
 	if serveRuntime == nil {
 		serveRuntime = defaultServeRuntime
 	}
-	serve, err := h.startReloadRuntime(runtime, serveRuntime)
+	serve, err := h.startReloadRuntimeContext(ctx, runtime, serveRuntime)
+	candidate := reloadRuntime{runtime: runtime, serve: serve, authGate: authGate, cancel: cancelTraffic}
 	if err != nil {
 		authGate.resolve(false)
 		cancelTraffic()
@@ -130,13 +164,29 @@ func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRun
 			closeRuntime = defaultCloseRuntime
 		}
 		cleanupErr := closeRuntime(runtime)
-		h.waitRuntime(serve.done, nil)
-		return reloadRuntime{}, errors.Join(err, cleanupErr)
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		joinErr := h.waitRuntimeContext(cleanupCtx, serve.done, nil)
+		cleanupCancel()
+		if cleanupErr != nil || joinErr != nil {
+			return candidate, errors.Join(err, cleanupErr, joinErr)
+		}
+		return reloadRuntime{}, err
 	}
-	return reloadRuntime{runtime: runtime, serve: serve, authGate: authGate, cancel: cancelTraffic}, nil
+	return candidate, nil
 }
 
-func (h *Hysteria2Service) Start() (err error) {
+func (h *Hysteria2Service) Start() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return h.StartContext(ctx)
+}
+
+func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultStartTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.lifecycleMu.Lock()
 	if h.closed {
 		h.lifecycleMu.Unlock()
@@ -156,11 +206,12 @@ func (h *Hysteria2Service) Start() (err error) {
 		h.state = stateFailed
 		h.runtimeErr = primary
 		h.lifecycleMu.Unlock()
+		h.health.RecordFailure(service.FailureStageStart, time.Now())
 		return primary
 	}
 
 	clientInfo := h.apiClient.Describe()
-	nodeInfo, err := h.apiClient.GetNodeInfo()
+	nodeInfo, err := api.GetNodeInfoContext(ctx, h.apiClient)
 	if err != nil {
 		return fail(err)
 	}
@@ -181,19 +232,49 @@ func (h *Hysteria2Service) Start() (err error) {
 	tag := fmt.Sprintf("%s_%s_%d_%d", nodeInfo.NodeType, h.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
 	startAt := time.Now()
 
-	userInfo, err := h.apiClient.GetUserList()
+	userInfo, err := api.GetUserListContext(ctx, h.apiClient)
 	if err != nil {
 		return fail(err)
 	}
 
 	startupUsers := h.buildCandidateUserState(userInfo, nodeInfo)
 
-	candidate, err := h.startReloadCandidate(serverBuildSpec{
+	rulesApplied := false
+	if !h.config.DisableGetRule && h.rules != nil {
+		ruleList, ruleErr := api.GetNodeRuleContext(ctx, h.apiClient)
+		if ruleErr != nil {
+			return fail(fmt.Errorf("get rule list: %w", ruleErr))
+		}
+		var startupRules []api.DetectRule
+		if ruleList != nil {
+			startupRules = *ruleList
+		}
+		if ruleErr := h.rules.UpdateRule(tag, startupRules); ruleErr != nil {
+			return fail(ruleErr)
+		}
+		rulesApplied = true
+	}
+	clearStartupRules := func() error {
+		if !rulesApplied {
+			return nil
+		}
+		return h.rules.UpdateRule(tag, nil)
+	}
+
+	candidate, err := h.startReloadCandidateContext(ctx, serverBuildSpec{
 		nodeInfo:   nodeInfo,
 		certConfig: cloneCertConfig(h.config.CertConfig),
 	})
 	if err != nil {
-		return fail(err)
+		if candidate.runtime != nil {
+			return h.failWithRuntimeOwnership(err, clientInfo, nodeInfo, candidate, tag, startAt, nil)
+		}
+		ruleCleanupErr := clearStartupRules()
+		joined := errors.Join(err, ruleCleanupErr)
+		if ruleCleanupErr != nil {
+			return h.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, candidate, tag, startAt, nil)
+		}
+		return fail(joined)
 	}
 	srv := candidate.runtime
 	serve := candidate.serve
@@ -203,37 +284,58 @@ func (h *Hysteria2Service) Start() (err error) {
 		closeRuntime = defaultCloseRuntime
 	}
 
-	factory := h.taskFactory
-	if factory == nil {
-		factory = defaultTaskFactory
-	}
 	interval := time.Duration(h.config.UpdatePeriodic) * time.Second
+	h.initializeSnapshotSyncCoordinator()
 	tasks := specialruntime.NewTasks()
-	tasks.Add(factory(tag, interval, h.userMonitor))
-	tasks.Add(factory("node monitor", interval, h.nodeMonitor))
+	tasks.Add(h.syncCoordinator)
+	tasks.Add(h.newTask(tag, interval, h.userMonitorContext))
+	tasks.Add(h.newTask("node monitor", interval, h.nodeMonitorContext))
 	if nodeInfo.EnableTLS {
-		tasks.Add(factory("cert monitor", interval*60, h.certMonitorPeriodic))
+		tasks.Add(h.newTask("cert monitor", interval*60, h.certMonitorPeriodicContext))
+	}
+	stopStartup := func() error {
+		candidate.authGate.resolve(false)
+		candidate.cancel()
+		if runtimeErr := closeRuntime(srv); runtimeErr != nil {
+			return runtimeErr
+		}
+		return clearStartupRules()
 	}
 	startupShutdown := specialruntime.RuntimeShutdown{
-		Stop: func() error {
-			candidate.authGate.resolve(false)
-			candidate.cancel()
-			return closeRuntime(srv)
-		},
+		Stop:        stopStartup,
+		StopContext: func(context.Context) error { return stopStartup() },
 		Join: func() error {
 			h.waitRuntime(serve.done, nil)
 			return nil
 		},
+		JoinContext: func(ctx context.Context) error {
+			return h.waitRuntimeContext(ctx, serve.done, nil)
+		},
 	}
-	if err := tasks.Start(startupShutdown); err != nil {
+	if err := tasks.StartContext(ctx, startupShutdown); err != nil {
+		if specialruntime.StartCleanupFailed(err) {
+			return h.failWithRuntimeOwnership(err, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
+		}
 		return fail(err)
 	}
 
-	h.reloadMu.Lock()
-	_, ruleErr := h.replacePortHopRulesLocked(buildPortHopRulesFromNode(nodeInfo))
+	if err := h.reloadMu.Lock(ctx); err != nil {
+		rollbackErr := tasks.RollbackContext(ctx, startupShutdown)
+		joined := errors.Join(err, rollbackErr)
+		if rollbackErr != nil {
+			return h.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
+		}
+		return fail(joined)
+	}
+	rulesRestored, ruleErr := h.replacePortHopRulesLocked(ctx, buildPortHopRulesFromNode(nodeInfo))
 	h.reloadMu.Unlock()
 	if ruleErr != nil {
-		return fail(errors.Join(ruleErr, tasks.Rollback(startupShutdown)))
+		rollbackErr := tasks.RollbackContext(ctx, startupShutdown)
+		joined := errors.Join(ruleErr, rollbackErr)
+		if rollbackErr != nil || !rulesRestored {
+			return h.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
+		}
+		return fail(joined)
 	}
 
 	watcherDone := make(chan struct{})
@@ -258,18 +360,10 @@ func (h *Hysteria2Service) Start() (err error) {
 	h.watcherDone = watcherDone
 	h.trafficCancel = candidate.cancel
 	h.lifecycleMu.Unlock()
+	h.health.RecordSuccessfulSync(time.Now())
+	h.refreshCertificateExpiry()
 	candidate.authGate.resolve(true)
 	go h.watchRuntime(srv, serve, candidate.cancel, watcherDone)
-
-	if !h.config.DisableGetRule && h.rules != nil {
-		if ruleList, ruleErr := h.apiClient.GetNodeRule(); ruleErr != nil {
-			h.logger.Printf("Get rule list filed: %s", ruleErr)
-		} else if ruleList != nil {
-			if ruleErr := h.rules.UpdateRule(tag, *ruleList); ruleErr != nil {
-				h.logger.Print(ruleErr)
-			}
-		}
-	}
 
 	h.logger.Infof("Hysteria2 node started on %s:%d (hysteria core %s)", h.config.ListenIP, nodeInfo.Port, getHysteriaCoreVersion())
 	return nil
@@ -277,85 +371,217 @@ func (h *Hysteria2Service) Start() (err error) {
 
 // Close implements service.Service.Close.
 func (h *Hysteria2Service) Close() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return h.CloseContext(ctx)
+}
+
+func (h *Hysteria2Service) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
+
 	h.lifecycleMu.Lock()
-	if h.closed {
+	if h.closed && h.state == stateStopped {
+		h.lifecycleMu.Unlock()
+		return h.cleanupPortHopRulesContext(ctx)
+	}
+	if h.state == stateStarting || h.state == stateStopping {
+		h.lifecycleMu.Unlock()
+		return errors.New("Hysteria2 service cannot close while starting or stopping")
+	}
+	tasks := h.tasks
+	h.lifecycleMu.Unlock()
+
+	// Stop periodic producers before waiting for an in-flight node or
+	// certificate replacement to release the operation gate.
+	var producerStopErr error
+	if tasks != nil {
+		producerStopErr = tasks.StopContext(ctx)
+	}
+	var syncWaitErr error
+	if h.syncCoordinator != nil {
+		syncWaitErr = h.syncCoordinator.WaitContext(ctx)
+	}
+	if err := h.reloadMu.Lock(ctx); err != nil {
+		return errors.Join(producerStopErr, syncWaitErr, err)
+	}
+	if err := ctx.Err(); err != nil {
+		h.reloadMu.Unlock()
+		return errors.Join(producerStopErr, syncWaitErr, err)
+	}
+
+	h.lifecycleMu.Lock()
+	if h.closed && h.state == stateStopped {
+		h.lifecycleMu.Unlock()
+		h.reloadMu.Unlock()
+		return errors.Join(producerStopErr, syncWaitErr, h.cleanupPortHopRulesContext(ctx))
+	}
+	if h.state == stateStarting || h.state == stateReloading || h.state == stateStopping {
 		state := h.state
 		h.lifecycleMu.Unlock()
-		if state == stateStopped {
-			return h.cleanupPortHopRules()
-		}
-		return nil
+		h.reloadMu.Unlock()
+		return errors.Join(producerStopErr, syncWaitErr, fmt.Errorf("Hysteria2 service cannot close from state %d", state))
 	}
-	if h.state == stateStarting || h.state == stateReloading {
-		h.lifecycleMu.Unlock()
-		return errors.New("Hysteria2 service cannot close while starting or reloading")
-	}
-	h.closed = true
 	h.state = stateStopping
-	tasks := h.tasks
+	tasks = h.tasks
 	srv := h.server
 	serveDone := h.serveDone
 	watcherDone := h.watcherDone
 	cancelTraffic := h.trafficCancel
+	cleanupRuntimes := append([]reloadRuntime(nil), h.cleanupRuntimes...)
 	h.lifecycleMu.Unlock()
+	h.reloadMu.Unlock()
 
+	closeRuntime := h.closeRuntime
+	if closeRuntime == nil {
+		closeRuntime = defaultCloseRuntime
+	}
+	var runtimeCloseErr error
+	stopRuntime := func() error {
+		if cancelTraffic != nil {
+			cancelTraffic()
+		}
+		runtimeCloseErr = closeRuntime(srv)
+		return runtimeCloseErr
+	}
+	shutdown := specialruntime.RuntimeShutdown{
+		Stop:        stopRuntime,
+		StopContext: func(context.Context) error { return stopRuntime() },
+		Join: func() error {
+			h.waitRuntime(serveDone, watcherDone)
+			return nil
+		},
+		JoinContext: func(ctx context.Context) error {
+			return h.waitRuntimeContext(ctx, serveDone, watcherDone)
+		},
+	}
 	var shutdownErr error
 	if srv != nil {
-		closeRuntime := h.closeRuntime
-		if closeRuntime == nil {
-			closeRuntime = defaultCloseRuntime
-		}
-		shutdown := specialruntime.RuntimeShutdown{
-			Stop: func() error {
-				if cancelTraffic != nil {
-					cancelTraffic()
-				}
-				return closeRuntime(srv)
-			},
-			Join: func() error {
-				h.waitRuntime(serveDone, watcherDone)
-				return nil
-			},
-		}
 		if tasks != nil {
-			shutdownErr = tasks.Close(shutdown)
+			shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, shutdown))
 		} else {
-			shutdownErr = errors.Join(shutdown.Stop(), shutdown.Join())
+			shutdownErr = errors.Join(producerStopErr, syncWaitErr, shutdown.StopContext(ctx), shutdown.JoinContext(ctx))
 		}
 	} else if tasks != nil {
-		shutdownErr = tasks.Close(specialruntime.RuntimeShutdown{})
+		shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, specialruntime.RuntimeShutdown{}))
+	} else {
+		shutdownErr = errors.Join(producerStopErr, syncWaitErr)
 	}
 
-	cleanupErr := h.cleanupPortHopRules()
+	remainingRuntimes := make([]reloadRuntime, 0, len(cleanupRuntimes))
+	var cleanupErr error
+	for _, owned := range cleanupRuntimes {
+		owned.authGate.resolve(false)
+		if owned.cancel != nil {
+			owned.cancel()
+		}
+		if owned.runtime == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			remainingRuntimes = append(remainingRuntimes, owned)
+			cleanupErr = errors.Join(cleanupErr, err)
+			continue
+		}
+		closeOwnedErr := closeRuntime(owned.runtime)
+		var joinOwnedErr error
+		if owned.serve != nil {
+			joinOwnedErr = h.waitRuntimeContext(ctx, owned.serve.done, nil)
+		}
+		if closeOwnedErr != nil || joinOwnedErr != nil {
+			remainingRuntimes = append(remainingRuntimes, owned)
+			cleanupErr = errors.Join(cleanupErr, closeOwnedErr, joinOwnedErr)
+		}
+	}
+
+	closeErr := errors.Join(shutdownErr, cleanupErr)
+	if closeErr == nil {
+		closeErr = h.cleanupPortHopRulesContext(ctx)
+	}
+	if closeErr == nil && h.rules != nil && h.tag != "" {
+		closeErr = h.rules.UpdateRule(h.tag, nil)
+	}
 
 	h.lifecycleMu.Lock()
-	h.tasks = nil
-	h.server = nil
-	h.serveDone = nil
-	h.watcherDone = nil
-	h.trafficCancel = nil
+	if runtimeCloseErr == nil && runtimeLifecycleJoined(serveDone, watcherDone) {
+		h.server = nil
+		h.serveDone = nil
+		h.watcherDone = nil
+		h.trafficCancel = nil
+	}
+	h.cleanupRuntimes = remainingRuntimes
+	if shutdownErr == nil {
+		h.tasks = nil
+	}
+	if closeErr != nil {
+		h.state = stateFailed
+		h.runtimeErr = closeErr
+		h.closed = false
+		h.lifecycleMu.Unlock()
+		stage := service.FailureStageClose
+		if runtimeCloseErr != nil || len(remainingRuntimes) != 0 {
+			stage = service.FailureStageCleanup
+		}
+		h.health.RecordFailure(stage, time.Now())
+		return closeErr
+	}
+	h.nodeInfo = nil
+	h.tag = ""
+	h.startAt = time.Time{}
 	h.runtimeErr = nil
 	h.state = stateStopped
+	h.closed = true
+	h.mu.Lock()
+	h.users = make(map[string]userRecord)
+	h.traffic = make(map[string]*userTraffic)
+	h.overLimit = make(map[string]bool)
+	h.onlineIPs = make(map[string]map[string]struct{})
+	h.ipLastActive = make(map[string]map[string]time.Time)
+	h.blockedIDs = make(map[string]bool)
+	h.rateLimiters = nil
+	h.mu.Unlock()
 	h.lifecycleMu.Unlock()
-	return errors.Join(shutdownErr, cleanupErr)
+	return nil
 }
 
 // reloadNode replaces the active Hysteria2 server while preserving the last
 // successfully applied node runtime state when replacement fails.
 func (h *Hysteria2Service) reloadNode(nodeInfo *api.NodeInfo) error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.reloadNodeContext(ctx, nodeInfo)
+}
+
+func (h *Hysteria2Service) reloadNodeContext(parent context.Context, nodeInfo *api.NodeInfo) error {
 	if nodeInfo == nil {
 		return nil
 	}
-	h.reloadMu.Lock()
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultSyncTimeout)
+	defer cancel()
+	if err := h.reloadMu.Lock(ctx); err != nil {
+		return err
+	}
 	defer h.reloadMu.Unlock()
-	return h.reloadNodeLocked(nodeInfo)
+	return h.reloadNodeLockedContext(ctx, nodeInfo)
 }
 
 func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
-	return h.reloadNodeWithCertificateLocked(nodeInfo, nil)
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.reloadNodeLockedContext(ctx, nodeInfo)
+}
+
+func (h *Hysteria2Service) reloadNodeLockedContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
+	return h.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, nil)
 }
 
 func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
+}
+
+func (h *Hysteria2Service) reloadNodeWithCertificateLockedContext(ctx context.Context, nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
 	if renewal != nil {
 		defer func() {
 			err = errors.Join(err, renewal.Rollback())
@@ -363,6 +589,9 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 	}
 	if nodeInfo == nil {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if nodeInfo.NodeType != "Hysteria2" {
 		return fmt.Errorf("Hysteria2Service reloadNode: unexpected node type %s", nodeInfo.NodeType)
@@ -416,113 +645,174 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInf
 	if closeRuntime == nil {
 		closeRuntime = defaultCloseRuntime
 	}
-
-	sameEndpoint := candidateNode.Port == oldNodeInfo.Port
-	var (
-		candidate   reloadRuntime
-		oldCloseErr error
-	)
-	if sameEndpoint {
-		if oldTrafficCancel != nil {
-			oldTrafficCancel()
-		}
-		oldCloseErr = closeRuntime(oldRuntime)
-		h.waitRuntime(oldServeDone, oldWatcherDone)
-		candidate, err = h.startReloadCandidate(candidateSpec)
-	} else {
-		candidate, err = h.startReloadCandidate(candidateSpec)
-		if err == nil {
-			if oldTrafficCancel != nil {
-				oldTrafficCancel()
-			}
-			oldCloseErr = closeRuntime(oldRuntime)
-			h.waitRuntime(oldServeDone, oldWatcherDone)
-		}
-	}
-	if err != nil {
-		if !sameEndpoint {
-			h.finishExistingReload(stateRunning, nil)
-			return err
-		}
-		rollbackErr := rollbackCertificateRenewal(renewal)
-		reloadErr := errors.Join(oldCloseErr, err, rollbackErr)
-		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
-			nodeInfo:   oldNodeInfo,
-			certConfig: oldCertConfig,
-		})
-		if restoreErr != nil {
-			joined := errors.Join(reloadErr, restoreErr)
-			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, oldRules, nil, nil, nil, stateFailed, joined)
-			return joined
-		}
-		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
-		return reloadErr
-	}
-
-	if !sameEndpoint {
-		// Old close errors are surfaced, but the ready candidate remains the
-		// last-known-good runtime because the old endpoint is already released.
-	}
-	rulesRestored, ruleErr := h.replacePortHopRulesLocked(candidateRules)
-	if ruleErr != nil {
-		rollbackErr := rollbackCertificateRenewal(renewal)
+	cleanupCandidate := func(candidate reloadRuntime) ([]reloadRuntime, error) {
 		candidate.authGate.resolve(false)
-		candidate.cancel()
+		if candidate.cancel != nil {
+			candidate.cancel()
+		}
+		if candidate.runtime == nil {
+			return nil, nil
+		}
 		cleanupErr := closeRuntime(candidate.runtime)
-		h.waitRuntime(candidate.serve.done, nil)
-		restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
+		var joinErr error
+		if candidate.serve != nil {
+			cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+			joinErr = h.waitRuntimeContext(cleanupCtx, candidate.serve.done, nil)
+			cleanupCancel()
+		}
+		if cleanupErr != nil || joinErr != nil {
+			return []reloadRuntime{candidate}, errors.Join(cleanupErr, joinErr)
+		}
+		return nil, nil
+	}
+	restoreOldRuntime := func() (reloadRuntime, []reloadRuntime, error) {
+		restoreCtx, restoreCancel := service.WithDefaultTimeout(context.WithoutCancel(ctx), service.DefaultStartTimeout)
+		defer restoreCancel()
+		restored, restoreErr := h.startReloadCandidateContext(restoreCtx, serverBuildSpec{
 			nodeInfo:   oldNodeInfo,
 			certConfig: oldCertConfig,
 		})
 		if restoreErr != nil {
-			joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, rollbackErr, restoreErr)
-			restoredRules := oldRules
-			if !rulesRestored {
-				restoredRules = nil
+			if restored.runtime != nil {
+				return reloadRuntime{}, []reloadRuntime{restored}, restoreErr
 			}
-			h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, restoredRules, nil, nil, nil, stateFailed, joined)
+			return reloadRuntime{}, nil, restoreErr
+		}
+		return restored, nil, nil
+	}
+	abortBeforeRetire := func(primary error, candidate reloadRuntime) error {
+		owned, cleanupErr := cleanupCandidate(candidate)
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		joined := errors.Join(primary, cleanupErr, rollbackErr)
+		if cleanupErr != nil {
+			h.finishExistingReloadWithOwnership(owned, stateFailed, joined)
+		} else {
+			h.finishExistingReload(stateRunning, nil)
+		}
+		return joined
+	}
+	retainOldFailure := func(primary error, candidate reloadRuntime) error {
+		owned, cleanupErr := cleanupCandidate(candidate)
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		joined := errors.Join(primary, cleanupErr, rollbackErr)
+		h.finishExistingReloadWithOwnership(owned, stateFailed, joined)
+		return joined
+	}
+	rollbackCandidate := func(primary error, candidate reloadRuntime, restoreRules bool) error {
+		owned, cleanupErr := cleanupCandidate(candidate)
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		actualRules := append([]portHopRule(nil), h.portHopRules...)
+		if cleanupErr != nil {
+			joined := errors.Join(primary, cleanupErr, rollbackErr)
+			h.finishReloadWithOwnership(nil, owned, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
 			return joined
 		}
-		joined := errors.Join(oldCloseErr, ruleErr, cleanupErr, rollbackErr)
-		if !rulesRestored {
-			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, nil, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
+		var rulesErr error
+		if restoreRules {
+			rulesCtx, rulesCancel := service.CleanupContext(ctx)
+			_, rulesErr = h.replacePortHopRulesLocked(rulesCtx, oldRules)
+			rulesCancel()
+			actualRules = append([]portHopRule(nil), h.portHopRules...)
+		}
+		restored, restoreOwned, restoreErr := restoreOldRuntime()
+		joined := errors.Join(primary, rollbackErr, rulesErr, restoreErr)
+		if restoreErr != nil {
+			h.finishReloadWithOwnership(nil, restoreOwned, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
+			return joined
+		}
+		if rulesErr != nil {
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
 			return joined
 		}
 		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
 		return joined
 	}
 
+	sameEndpoint := candidateNode.Port == oldNodeInfo.Port
+	var candidate reloadRuntime
+	if sameEndpoint {
+		if err := ctx.Err(); err != nil {
+			return abortBeforeRetire(err, candidate)
+		}
+		if oldTrafficCancel != nil {
+			oldTrafficCancel()
+		}
+		oldCloseErr := closeRuntime(oldRuntime)
+		joinErr := h.waitRuntimeContext(ctx, oldServeDone, oldWatcherDone)
+		if oldCloseErr != nil || joinErr != nil {
+			return retainOldFailure(errors.Join(oldCloseErr, joinErr), candidate)
+		}
+		candidate, err = h.startReloadCandidateContext(ctx, candidateSpec)
+	} else {
+		candidate, err = h.startReloadCandidateContext(ctx, candidateSpec)
+		if err == nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return abortBeforeRetire(ctxErr, candidate)
+			}
+			if oldTrafficCancel != nil {
+				oldTrafficCancel()
+			}
+			oldCloseErr := closeRuntime(oldRuntime)
+			joinErr := h.waitRuntimeContext(ctx, oldServeDone, oldWatcherDone)
+			if oldCloseErr != nil || joinErr != nil {
+				return retainOldFailure(errors.Join(oldCloseErr, joinErr), candidate)
+			}
+		}
+	}
+	if err != nil {
+		if !sameEndpoint {
+			rollbackErr := rollbackCertificateRenewal(renewal)
+			reloadErr := errors.Join(err, rollbackErr)
+			if candidate.runtime != nil {
+				h.finishExistingReloadWithOwnership([]reloadRuntime{candidate}, stateFailed, reloadErr)
+				return reloadErr
+			}
+			h.finishExistingReload(stateRunning, nil)
+			return reloadErr
+		}
+		return rollbackCandidate(err, candidate, false)
+	}
+	if err := ctx.Err(); err != nil {
+		return rollbackCandidate(err, candidate, false)
+	}
+
+	rulesRestored, ruleErr := h.replacePortHopRulesLocked(ctx, candidateRules)
+	if ruleErr != nil {
+		rollbackErr := rollbackCertificateRenewal(renewal)
+		owned, cleanupErr := cleanupCandidate(candidate)
+		actualRules := append([]portHopRule(nil), h.portHopRules...)
+		if cleanupErr != nil {
+			joined := errors.Join(ruleErr, cleanupErr, rollbackErr)
+			h.finishReloadWithOwnership(nil, owned, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
+			return joined
+		}
+		restored, restoreOwned, restoreErr := restoreOldRuntime()
+		joined := errors.Join(ruleErr, rollbackErr, restoreErr)
+		if restoreErr != nil {
+			h.finishReloadWithOwnership(nil, restoreOwned, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
+			return joined
+		}
+		if !rulesRestored {
+			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
+			return joined
+		}
+		h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
+		return joined
+	}
+	if err := ctx.Err(); err != nil {
+		return rollbackCandidate(err, candidate, true)
+	}
+
 	if renewal != nil {
 		if commitErr := renewal.Commit(); commitErr != nil {
-			candidate.authGate.resolve(false)
-			candidate.cancel()
-			cleanupErr := closeRuntime(candidate.runtime)
-			h.waitRuntime(candidate.serve.done, nil)
-			_, rulesErr := h.replacePortHopRulesLocked(oldRules)
-			actualRules := append([]portHopRule(nil), h.portHopRules...)
-			restored, restoreErr := h.startReloadCandidate(serverBuildSpec{
-				nodeInfo:   oldNodeInfo,
-				certConfig: oldCertConfig,
-			})
-			joined := errors.Join(oldCloseErr, commitErr, cleanupErr, rulesErr, restoreErr)
-			if restoreErr != nil {
-				h.finishReload(nil, oldNodeInfo, oldTag, oldCertConfig, actualRules, nil, nil, nil, stateFailed, joined)
-				return joined
-			}
-			if rulesErr != nil {
-				h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, actualRules, restored.serve, restored.authGate, restored.cancel, stateFailed, joined)
-				return joined
-			}
-			h.finishReload(restored.runtime, oldNodeInfo, oldTag, oldCertConfig, oldRules, restored.serve, restored.authGate, restored.cancel, stateRunning, nil)
-			return joined
+			return rollbackCandidate(commitErr, candidate, true)
 		}
 	}
 
 	h.finishReload(candidate.runtime, candidateNode, oldTag, candidateCertConfig, candidateRules, candidate.serve, candidate.authGate, candidate.cancel, stateRunning, nil)
 	h.logger.Infof("Hysteria2 node reloaded on %s:%d", h.config.ListenIP, candidateNode.Port)
-	return oldCloseErr
+	return nil
 }
-
 func certificatePEM(renewal preparedCertificateRenewal) []byte {
 	if renewal == nil {
 		return nil
@@ -545,6 +835,15 @@ func rollbackCertificateRenewal(renewal preparedCertificateRenewal) error {
 }
 
 func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return h.startReloadRuntimeContext(ctx, runtime, serveRuntime)
+}
+
+func (h *Hysteria2Service) startReloadRuntimeContext(ctx context.Context, runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	serveResult := make(chan error, 1)
 	serve := &runtimeServeOutcome{done: make(chan struct{})}
 	serveStarted := make(chan struct{})
@@ -560,12 +859,20 @@ func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntim
 	if handshake == nil {
 		handshake = defaultServeHandshake
 	}
-	if err := handshake(startServe, serveStarted, serveResult); err != nil {
-		return serve, err
+	handshakeDone := make(chan error, 1)
+	go func() {
+		handshakeDone <- handshake(startServe, serveStarted, serveResult)
+	}()
+	select {
+	case <-ctx.Done():
+		return serve, ctx.Err()
+	case err := <-handshakeDone:
+		if err != nil {
+			return serve, err
+		}
+		return serve, ctx.Err()
 	}
-	return serve, nil
 }
-
 func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeServeOutcome, cancelTraffic context.CancelFunc, watcherDone chan struct{}) {
 	defer close(watcherDone)
 	<-serve.done
@@ -581,28 +888,71 @@ func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeSer
 		}
 	}
 	h.lifecycleMu.Unlock()
+	if recordFailure {
+		h.health.RecordFailure(service.FailureStageRuntime, time.Now())
+	}
 	if recordFailure && serve.err != nil && h.logger != nil {
 		h.logger.Errorf("Hysteria2 Serve error: %v", serve.err)
 	}
 }
 
 func (h *Hysteria2Service) waitRuntime(serveDone, watcherDone <-chan struct{}) {
-	if serveDone != nil {
-		<-serveDone
-	}
-	if watcherDone != nil {
-		<-watcherDone
-	}
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
+	defer cancel()
+	_ = h.waitRuntimeContext(ctx, serveDone, watcherDone)
 }
 
+func runtimeLifecycleJoined(doneChannels ...<-chan struct{}) bool {
+	for _, done := range doneChannels {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (h *Hysteria2Service) waitRuntimeContext(ctx context.Context, serveDone, watcherDone <-chan struct{}) error {
+	for _, done := range []<-chan struct{}{serveDone, watcherDone} {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+	}
+	return nil
+}
 func (h *Hysteria2Service) finishExistingReload(state lifecycleState, runtimeErr error) {
+	h.finishExistingReloadWithOwnership(nil, state, runtimeErr)
+}
+
+func (h *Hysteria2Service) finishExistingReloadWithOwnership(cleanupRuntimes []reloadRuntime, state lifecycleState, runtimeErr error) {
 	h.lifecycleMu.Lock()
+	h.cleanupRuntimes = append([]reloadRuntime(nil), cleanupRuntimes...)
 	h.state = state
 	h.runtimeErr = runtimeErr
 	h.lifecycleMu.Unlock()
+	if runtimeErr != nil {
+		stage := service.FailureStageRuntime
+		if len(cleanupRuntimes) != 0 {
+			stage = service.FailureStageCleanup
+		}
+		h.health.RecordFailure(stage, time.Now())
+	}
 }
 
-func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.NodeInfo, _ string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, authGate *runtimeAuthGate, cancelTraffic context.CancelFunc, state lifecycleState, runtimeErr error) {
+func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.NodeInfo, tag string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, authGate *runtimeAuthGate, cancelTraffic context.CancelFunc, state lifecycleState, runtimeErr error) {
+	h.finishReloadWithOwnership(runtime, nil, nodeInfo, tag, certConfig, rules, serve, authGate, cancelTraffic, state, runtimeErr)
+}
+
+func (h *Hysteria2Service) finishReloadWithOwnership(runtime runtimeServer, cleanupRuntimes []reloadRuntime, nodeInfo *api.NodeInfo, _ string, certConfig *mylego.CertConfig, rules []portHopRule, serve *runtimeServeOutcome, authGate *runtimeAuthGate, cancelTraffic context.CancelFunc, state lifecycleState, runtimeErr error) {
 	var watcherDone chan struct{}
 	if runtime != nil && serve != nil {
 		watcherDone = make(chan struct{})
@@ -616,6 +966,7 @@ func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.Nod
 	h.applyNodeRateLimitLocked(nodeLimit)
 	h.mu.Unlock()
 	h.server = runtime
+	h.cleanupRuntimes = append([]reloadRuntime(nil), cleanupRuntimes...)
 	h.nodeInfo = nodeInfo
 	*h.config.CertConfig = *cloneCertConfig(certConfig)
 	h.portHopRules = append([]portHopRule(nil), rules...)
@@ -629,6 +980,16 @@ func (h *Hysteria2Service) finishReload(runtime runtimeServer, nodeInfo *api.Nod
 	h.state = state
 	h.runtimeErr = runtimeErr
 	h.lifecycleMu.Unlock()
+	if runtimeErr != nil {
+		stage := service.FailureStageRuntime
+		if len(cleanupRuntimes) != 0 {
+			stage = service.FailureStageCleanup
+		}
+		h.health.RecordFailure(stage, time.Now())
+	} else if state == stateRunning {
+		h.health.RecordSuccessfulSync(time.Now())
+		h.refreshCertificateExpiry()
+	}
 	authGate.resolve(runtime != nil)
 	if watcherDone != nil {
 		go h.watchRuntime(runtime, serve, cancelTraffic, watcherDone)

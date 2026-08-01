@@ -2,8 +2,6 @@ package hysteria2
 
 import (
 	"context"
-	"errors"
-	"reflect"
 	"time"
 
 	"github.com/apernet/hysteria/core/v2/server"
@@ -12,6 +10,7 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	commonlimiter "github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
+	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
@@ -478,69 +477,68 @@ func (h *Hysteria2Service) restoreTraffic(snapshot map[string]userTraffic) {
 // - refresh user list
 // - report user traffic and online users.
 func (h *Hysteria2Service) userMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.userMonitorContext(ctx)
+}
+
+func (h *Hysteria2Service) userMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// delay to start
 	_, tag, startAt := h.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
+	h.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncUsers | service.SnapshotSyncRules,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 
 	// Get server status
 	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 	if err != nil {
 		h.logger.Print(err)
 	} else {
-		if err = h.apiClient.ReportNodeStatus(&api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
+		if err = api.ReportNodeStatusContext(ctx, h.apiClient, &api.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
 			h.logger.Print(err)
 		}
-	}
-
-	// Update User
-	usersChanged := true
-	newUserInfo, err := h.apiClient.GetUserList()
-	if err != nil {
-		if errors.Is(err, api.ErrUserNotModified) {
-			usersChanged = false
-		} else {
-			h.logger.Print(err)
-			return nil
-		}
-	}
-	if usersChanged {
-		h.syncUsers(newUserInfo)
 	}
 
 	h.mu.Lock()
 	h.cleanupStaleOnlineIPsLocked(time.Now())
 	h.mu.Unlock()
 
-	// Check Rule
-	if !h.config.DisableGetRule && h.rules != nil {
-		if ruleList, err := h.apiClient.GetNodeRule(); err != nil {
-			if !errors.Is(err, api.ErrRuleNotModified) {
-				h.logger.Printf("Get rule list filed: %s", err)
-			}
-		} else if ruleList != nil {
-			if err := h.rules.UpdateRule(tag, *ruleList); err != nil {
-				h.logger.Print(err)
-			}
-		}
-	}
-
 	// Collect traffic & online users
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	userTraffic, onlineUsers, snapshot := h.collectUsage()
+	h.health.SetTrafficBacklog(len(userTraffic))
+	if err := ctx.Err(); err != nil {
+		h.restoreTraffic(snapshot)
+		return err
+	}
 	if len(userTraffic) > 0 {
 		var reportErr error
 		if !h.config.DisableUploadTraffic {
-			reportErr = h.apiClient.ReportUserTraffic(&userTraffic)
+			reportErr = api.ReportUserTrafficContext(ctx, h.apiClient, &userTraffic)
 		}
 		if reportErr != nil {
 			h.logger.Print(reportErr)
 			// Restore counters so traffic is not lost and can be retried.
 			h.restoreTraffic(snapshot)
+			h.health.RecordFailure(service.FailureStageReport, time.Now())
+		} else {
+			h.health.SetTrafficBacklog(0)
 		}
+	} else {
+		h.health.SetTrafficBacklog(0)
 	}
 	if len(onlineUsers) > 0 {
-		if err = h.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
+		if err = api.ReportNodeOnlineUsersContext(ctx, h.apiClient, &onlineUsers); err != nil {
 			h.logger.Print(err)
 		}
 	}
@@ -550,7 +548,7 @@ func (h *Hysteria2Service) userMonitor() error {
 		if detectResult, err := h.rules.GetDetectResult(tag); err != nil {
 			h.logger.Print(err)
 		} else if len(*detectResult) > 0 {
-			if err = h.apiClient.ReportIllegal(detectResult); err != nil {
+			if err = api.ReportIllegalContext(ctx, h.apiClient, detectResult); err != nil {
 				h.logger.Print(err)
 			} else {
 				h.logger.Printf("Report %d illegal behaviors", len(*detectResult))
@@ -566,44 +564,25 @@ func (h *Hysteria2Service) userMonitor() error {
 // Hysteria2 server when needed. This avoids having to restart the whole
 // XrayR process when you edit the node on the panel.
 func (h *Hysteria2Service) nodeMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return h.nodeMonitorContext(ctx)
+}
+
+func (h *Hysteria2Service) nodeMonitorContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// delay to start, keep in sync with userMonitor behaviour
-	currentNode, _, startAt := h.appliedStateSnapshot()
+	_, _, startAt := h.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil
 	}
 
-	nodeInfo, err := h.apiClient.GetNodeInfo()
-	if err != nil {
-		if errors.Is(err, api.ErrNodeNotModified) {
-			return nil
-		}
-		h.logger.Print(err)
-		return nil
-	}
-
-	if nodeInfo == nil || nodeInfo.NodeType != "Hysteria2" {
-		if h.logger != nil {
-			if nodeInfo == nil {
-				h.logger.Warn("Hysteria2 node monitor: unexpected node info: <nil>")
-			} else {
-				h.logger.Warnf("Hysteria2 node monitor: unexpected node info: type=%s id=%d", nodeInfo.NodeType, nodeInfo.NodeID)
-			}
-		}
-		return nil
-	}
-
-	// Panels may update node metadata (such as statistics) frequently without
-	// changing the actual Hysteria2 node configuration. This can cause the ETag
-	// to change and GetNodeInfo to return 200 each time, leading to unnecessary
-	// server restarts. Avoid that by comparing the new NodeInfo with the current
-	// one and only reloading when there is a real config change.
-	if currentNode != nil && reflect.DeepEqual(currentNode, nodeInfo) {
-		return nil
-	}
-
-	if err := h.reloadNode(nodeInfo); err != nil {
-		h.logger.Printf("Hysteria2 node reload failed: %v", err)
-	}
-
+	h.SubmitSnapshotSync(service.SnapshotSyncTrigger{
+		Scope:      service.SnapshotSyncNode,
+		Source:     service.SnapshotSyncSourcePolling,
+		OccurredAt: time.Now(),
+	})
 	return nil
 }

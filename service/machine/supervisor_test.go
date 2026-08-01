@@ -260,10 +260,11 @@ func TestSupervisorStartStartsAllDiscoveredNodes(t *testing.T) {
 	}
 }
 
-func TestSupervisorCloseClosesAllRunningServices(t *testing.T) {
+func TestSupervisorCloseRetainsFailedOwnedNodesUntilRetrySucceeds(t *testing.T) {
+	closeErr := errors.New("close failed")
 	services := map[int]*fakeService{
 		1: {},
-		2: {closeErr: errors.New("close failed")},
+		2: {closeErr: closeErr},
 		3: {},
 	}
 	discoverer := &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
@@ -280,17 +281,31 @@ func TestSupervisorCloseClosesAllRunningServices(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	err := supervisor.Close()
-	if err == nil {
-		t.Fatal("expected close error from one service")
+	if err := supervisor.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Close() error = %v, want %v", err, closeErr)
 	}
-	for nodeID, service := range services {
-		if service.closes != 1 {
-			t.Fatalf("expected node %d service to close once, got %d", nodeID, service.closes)
-		}
+	if len(supervisor.running) != 1 || supervisor.running[2] == nil {
+		t.Fatalf("failed Close topology = %#v, want only node 2", supervisor.running)
 	}
-	if len(supervisor.running) != 0 {
-		t.Fatalf("expected running map to be cleared, got %d", len(supervisor.running))
+	if runtime := supervisor.running[2]; runtime.state != nodeRuntimeFailedOwned || runtime.service != services[2] {
+		t.Fatalf("node 2 ownership = state:%v service:%v", runtime.state, runtime.service)
+	}
+	if supervisor.closed || !supervisor.cleanupPending {
+		t.Fatalf("failed Close state = closed:%t cleanupPending:%t", supervisor.closed, supervisor.cleanupPending)
+	}
+	if services[1].closes != 1 || services[2].closes != 1 || services[3].closes != 1 {
+		t.Fatalf("first Close counts = %d/%d/%d", services[1].closes, services[2].closes, services[3].closes)
+	}
+
+	services[2].closeErr = nil
+	if err := supervisor.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if len(supervisor.running) != 0 || !supervisor.closed || supervisor.cleanupPending {
+		t.Fatalf("cleanup retry state = running:%d closed:%t cleanupPending:%t", len(supervisor.running), supervisor.closed, supervisor.cleanupPending)
+	}
+	if services[1].closes != 1 || services[2].closes != 2 || services[3].closes != 1 {
+		t.Fatalf("retry Close counts = %d/%d/%d", services[1].closes, services[2].closes, services[3].closes)
 	}
 }
 
@@ -462,7 +477,7 @@ func TestMaterializeMachineReconcilePlanClassifiesDecisions(t *testing.T) {
 	}
 }
 
-func TestSupervisorReconcileCollectsRemoveAndStartErrors(t *testing.T) {
+func TestSupervisorReconcileRetainsRemoveFailureAndIsolatesAddedNodeFailure(t *testing.T) {
 	closeErr := errors.New("close failed")
 	startErr := errors.New("start failed")
 	removedService := &fakeService{closeErr: closeErr}
@@ -480,20 +495,93 @@ func TestSupervisorReconcileCollectsRemoveAndStartErrors(t *testing.T) {
 	}
 
 	err := supervisor.reconcile([]NodeBinding{{NodeID: 2, NodeType: "trojan", Name: "added"}})
-	if !errors.Is(err, closeErr) {
-		t.Fatalf("expected remove close error in joined error, got %v", err)
-	}
-	if !errors.Is(err, startErr) {
-		t.Fatalf("expected added node start error in joined error, got %v", err)
+	if !errors.Is(err, closeErr) || !errors.Is(err, startErr) {
+		t.Fatalf("reconcile() error = %v, want remove and add failures", err)
 	}
 	if removedService.closes != 1 {
-		t.Fatalf("expected removed service to close once, got %d", removedService.closes)
+		t.Fatalf("removed service closes = %d, want 1", removedService.closes)
 	}
-	if _, exists := supervisor.running[1]; exists {
-		t.Fatal("expected removed node to be deleted even when close returns an error")
+	retained := supervisor.running[1]
+	if retained == nil || retained.state != nodeRuntimeFailedOwned || retained.service != removedService {
+		t.Fatalf("remove failure lost ownership: %#v", retained)
 	}
 	if _, exists := supervisor.running[2]; exists {
-		t.Fatal("expected failed added node to stay absent from running map")
+		t.Fatal("cleanup-successful added node failure remained in topology")
+	}
+}
+
+func TestSupervisorFailedOwnedNodeBlocksDuplicateStartUntilCleanupAndLocalRestore(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	failedService := &localRestorableService{fakeService: &fakeService{closeErr: cleanupErr}}
+	restoredService := &fakeService{}
+	failedService.restore = restoredService
+	binding := NodeBinding{NodeID: 1, NodeType: "vless", Name: "node"}
+	runtime := newNodeRuntime(binding, failedService)
+	runtime.state = nodeRuntimeFailedOwned
+	runtime.failure = cleanupErr
+	factoryCalls := 0
+	supervisor := &Supervisor{
+		discoverer: &fakeDiscoverer{responses: []*newV2board.MachineNodesResponse{
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "node"}),
+			machineNodesResponse(newV2board.MachineNode{ID: 1, Type: "vless", Name: "node"}),
+		}},
+		factory: func(NodeBinding) (service.Service, error) {
+			factoryCalls++
+			return nil, errors.New("duplicate factory call")
+		},
+		running: map[int]*nodeRuntime{1: runtime},
+	}
+
+	if err := supervisor.ReconcileNow(); !errors.Is(err, cleanupErr) {
+		t.Fatalf("first ReconcileNow() error = %v, want %v", err, cleanupErr)
+	}
+	if factoryCalls != 0 || failedService.restoreCalls != 0 || restoredService.starts != 0 {
+		t.Fatalf("cleanup failure started duplicate: factory=%d restore=%d starts=%d", factoryCalls, failedService.restoreCalls, restoredService.starts)
+	}
+	if retained := supervisor.running[1]; retained == nil || retained.state != nodeRuntimeFailedOwned || retained.service != failedService {
+		t.Fatalf("failed-owned node not retained: %#v", retained)
+	}
+
+	failedService.closeErr = nil
+	if err := supervisor.ReconcileNow(); err != nil {
+		t.Fatalf("second ReconcileNow() error = %v", err)
+	}
+	if factoryCalls != 0 || failedService.restoreCalls != 1 || restoredService.starts != 1 {
+		t.Fatalf("local restore calls = factory:%d restore:%d starts:%d", factoryCalls, failedService.restoreCalls, restoredService.starts)
+	}
+	if restored := supervisor.running[1]; restored == nil || restored.state != nodeRuntimeRunning || restored.service != restoredService {
+		t.Fatalf("restored runtime = %#v", restored)
+	}
+}
+
+func TestSupervisorRemovedFailedOwnedNodeDeletesOnlyAfterCleanupSucceeds(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	ownedService := &fakeService{closeErr: cleanupErr}
+	runtime := &nodeRuntime{
+		binding:      NodeBinding{NodeID: 1, NodeType: "vless", Name: "removed"},
+		service:      ownedService,
+		state:        nodeRuntimeRunning,
+		missingCount: removedNodeMissingThreshold - 1,
+	}
+	supervisor := &Supervisor{running: map[int]*nodeRuntime{1: runtime}, factory: func(NodeBinding) (service.Service, error) {
+		return nil, errors.New("unexpected factory call")
+	}}
+
+	if err := supervisor.reconcile(nil); !errors.Is(err, cleanupErr) {
+		t.Fatalf("first reconcile() error = %v, want %v", err, cleanupErr)
+	}
+	if retained := supervisor.running[1]; retained == nil || retained.state != nodeRuntimeFailedOwned {
+		t.Fatalf("remove failure lost topology owner: %#v", retained)
+	}
+	ownedService.closeErr = nil
+	if err := supervisor.reconcile(nil); err != nil {
+		t.Fatalf("cleanup retry reconcile() error = %v", err)
+	}
+	if _, exists := supervisor.running[1]; exists {
+		t.Fatal("node remained in topology after confirmed release")
+	}
+	if ownedService.closes != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", ownedService.closes)
 	}
 }
 
@@ -1018,6 +1106,47 @@ func TestSupervisorRestartRuntimeContracts(t *testing.T) {
 	})
 }
 
+type localRestorableService struct {
+	*fakeService
+	restore      service.Service
+	restoreErr   error
+	restoreCalls int
+}
+
+func (s *localRestorableService) RestoreMachineRuntime() (service.Service, error) {
+	s.restoreCalls++
+	return s.restore, s.restoreErr
+}
+
+func TestSupervisorRestartRollbackUsesLocalRestorer(t *testing.T) {
+	replacementStartErr := errors.New("replacement start failed")
+	oldService := &localRestorableService{fakeService: &fakeService{}}
+	replacement := &fakeService{startErr: replacementStartErr}
+	rollback := &fakeService{}
+	oldService.restore = rollback
+	factoryCalls := 0
+	supervisor := &Supervisor{factory: func(binding NodeBinding) (service.Service, error) {
+		factoryCalls++
+		if factoryCalls != 1 || binding.NodeType != "trojan" {
+			t.Fatalf("rollback accessed factory/panel: call=%d binding=%#v", factoryCalls, binding)
+		}
+		return replacement, nil
+	}}
+	oldRuntime := newNodeRuntime(NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}, oldService)
+	oldRuntime.state = nodeRuntimeRunning
+
+	runtime, err := supervisor.restartRuntime(oldRuntime, NodeBinding{NodeID: 1, NodeType: "trojan", Name: "new"})
+	if !errors.Is(err, replacementStartErr) {
+		t.Fatalf("restartRuntime() error = %v, want %v", err, replacementStartErr)
+	}
+	if runtime == nil || runtime.binding.NodeType != "vless" || runtime.service != rollback || runtime.state != nodeRuntimeRunning {
+		t.Fatalf("local rollback runtime = %#v", runtime)
+	}
+	if oldService.restoreCalls != 1 || factoryCalls != 1 {
+		t.Fatalf("restore/factory calls = %d/%d, want 1/1", oldService.restoreCalls, factoryCalls)
+	}
+}
+
 func TestSupervisorRollbackRuntimeContracts(t *testing.T) {
 	oldBinding := NodeBinding{NodeID: 1, NodeType: "vless", Name: "old"}
 	oldRuntime := &nodeRuntime{binding: oldBinding}
@@ -1081,8 +1210,8 @@ func TestSupervisorRollbackRuntimeContracts(t *testing.T) {
 		}}
 
 		runtime, err := supervisor.rollbackRuntime(oldRuntime)
-		if runtime != nil {
-			t.Fatalf("expected no rollback runtime, got %#v", runtime)
+		if runtime == nil || runtime.state != nodeRuntimeFailedOwned || runtime.service != rollbackService {
+			t.Fatalf("rollback cleanup failure lost ownership: %#v", runtime)
 		}
 		if !errors.Is(err, startErr) || !errors.Is(err, cleanupErr) {
 			t.Fatalf("expected start and cleanup errors, got %v", err)

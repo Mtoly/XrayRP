@@ -1,7 +1,9 @@
 package panel
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -20,6 +22,10 @@ type newV2boardMachineStatusReporter struct {
 
 func (r *newV2boardMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
 	return newV2board.ReportMachineStatus(r.config, status)
+}
+
+func (r *newV2boardMachineStatusReporter) ReportMachineStatusContext(ctx context.Context, status api.MachineStatus) error {
+	return newV2board.ReportMachineStatusContext(ctx, r.config, status)
 }
 
 func (plan runtimeConfigPlan) machineDiscoveryConfig() newV2board.MachineDiscoveryConfig {
@@ -93,18 +99,79 @@ func (p *Panel) buildMachineRuntimeNodeService(server *core.Instance, nodePlan m
 	if err != nil {
 		return nil, err
 	}
+	return p.buildMachineRuntimeNodeServiceFromApplied(
+		server,
+		nodePlan,
+		plan,
+		runtimeNode.apiClient,
+		runtimeNode.controllerConfig,
+		nil,
+	)
+}
 
-	machineConfig := plan.machineConfig
+func (p *Panel) buildMachineRuntimeNodeServiceFromApplied(
+	server *core.Instance,
+	nodePlan machineRuntimeNodePlan,
+	plan runtimeConfigPlan,
+	source runtimePanelClient,
+	controllerConfig *controller.Config,
+	seed *machineAppliedNodeValue,
+) (service.Service, error) {
+	appliedClient := newMachineAppliedPanelClient(source, seed)
 	construction := runtimeServiceConstruction{
 		server:           server,
-		apiClient:        runtimeNode.apiClient,
-		controllerConfig: runtimeNode.controllerConfig,
-		panelType:        machineConfig.PanelType,
+		apiClient:        appliedClient,
+		controllerConfig: controllerConfig,
+		panelType:        plan.machineConfig.PanelType,
 	}
 	if nodePlan.useSharedWSRuntime() {
 		construction.wsEventRuntimeFactory = nodePlan.sharedWS.NewNodeRuntimeFactory(nodePlan.binding.NodeID)
 	}
-	return defaultRuntimeServiceRegistry().build(construction, ""), nil
+	inner, err := defaultRuntimeServiceRegistry().build(construction, "")
+	if err != nil {
+		return nil, fmt.Errorf("build machine runtime node %d: %w", nodePlan.binding.NodeID, err)
+	}
+	if inner == nil {
+		return nil, fmt.Errorf("build machine runtime node %d: nil service", nodePlan.binding.NodeID)
+	}
+	snapshotRuntime, err := buildMachineSnapshotRuntime(nodePlan, inner)
+	if err != nil {
+		return nil, err
+	}
+	restore := func(value machineAppliedNodeValue, appliedConfig *controller.Config) (service.Service, error) {
+		return p.buildMachineRuntimeNodeServiceFromApplied(
+			server,
+			nodePlan,
+			plan,
+			source,
+			appliedConfig,
+			&value,
+		)
+	}
+	runtime := newMachineRuntimeNodeService(inner, appliedClient, controllerConfig, seed, restore)
+	runtime.snapshotRuntime = snapshotRuntime
+	return runtime, nil
+}
+
+func buildMachineSnapshotRuntime(nodePlan machineRuntimeNodePlan, inner service.Service) (machineSnapshotRuntime, error) {
+	if !nodePlan.useSharedWSRuntime() {
+		return nil, nil
+	}
+	if _, specialized := specializedRuntimeServiceKind(strings.TrimSpace(nodePlan.binding.NodeType)); !specialized {
+		return nil, nil
+	}
+	submitter, ok := inner.(service.SnapshotSyncSubmitter)
+	if !ok {
+		return nil, fmt.Errorf(
+			"build machine runtime node %d: specialized shared websocket runtime does not support snapshot sync",
+			nodePlan.binding.NodeID,
+		)
+	}
+	mailbox, err := nodePlan.sharedWS.NewSnapshotMailbox(nodePlan.binding.NodeID, submitter)
+	if err != nil {
+		return nil, fmt.Errorf("build machine runtime node %d snapshot mailbox: %w", nodePlan.binding.NodeID, err)
+	}
+	return mailbox, nil
 }
 
 func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRuntimeNodePlan, logger *log.Entry) (*machineRuntimeNode, error) {
@@ -132,7 +199,6 @@ func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRunt
 		materializeCertConfig = materializeRuntimeCertConfig
 	}
 	materializeCertConfig(rawAPIClient, controllerConfig, logger)
-
 	return &machineRuntimeNode{
 		apiClient:        apiClient,
 		controllerConfig: controllerConfig,

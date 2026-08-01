@@ -64,8 +64,8 @@ func TestPanelReloadModulePublishesCandidateOnlyAfterStart(t *testing.T) {
 
 	<-startEntered
 	inFlight := module.stateSnapshot()
-	if inFlight.config != initialConfig || inFlight.runtime != initialRuntime {
-		t.Fatal("candidate state published before Start completed")
+	if inFlight.config != initialConfig || inFlight.runtime != nil {
+		t.Fatal("closed old runtime or candidate state was published during candidate Start")
 	}
 	if inFlight.status != panelReloadStatusReloading {
 		t.Fatalf("in-flight status = %v, want reloading", inFlight.status)
@@ -90,9 +90,9 @@ func TestPanelReloadModulePublishesCandidateOnlyAfterStart(t *testing.T) {
 	}
 	wantEvents := []string{
 		"load",
-		"build-candidate",
 		"initial.close",
 		"gc",
+		"build-candidate",
 		"candidate.start",
 		"apply-process",
 	}
@@ -166,9 +166,9 @@ func TestPanelReloadModuleRestoresLastKnownGoodAfterCandidateStartFailure(t *tes
 	}
 	wantEvents := []string{
 		"load",
-		"build-candidate",
 		"initial.close",
 		"gc",
+		"build-candidate",
 		"candidate.start",
 		"candidate.close",
 		"build-restore",
@@ -179,13 +179,11 @@ func TestPanelReloadModuleRestoresLastKnownGoodAfterCandidateStartFailure(t *tes
 	}
 }
 
-func TestPanelReloadModuleJoinsCandidateCleanupAndRestoreFailures(t *testing.T) {
+func TestPanelReloadModuleCandidateCleanupFailureBlocksLastKnownGoodRestore(t *testing.T) {
 	startErr := errors.New("start candidate")
 	candidateCleanupErr := errors.New("cleanup candidate")
-	restoreErr := errors.New("start restored")
-	restoreCleanupErr := errors.New("cleanup restored")
 	initialTime := time.Unix(700, 0)
-	events := make([]string, 0, 9)
+	events := make([]string, 0, 4)
 	initialConfig := reloadTestPanelConfig("initial")
 	candidateConfig := reloadTestPanelConfig("candidate")
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
@@ -195,12 +193,6 @@ func TestPanelReloadModuleJoinsCandidateCleanupAndRestoreFailures(t *testing.T) 
 		startErr: startErr,
 		closeErr: candidateCleanupErr,
 	}
-	restoredRuntime := &reloadTestRuntime{
-		name:     "restored",
-		events:   &events,
-		startErr: restoreErr,
-		closeErr: restoreCleanupErr,
-	}
 	buildCalls := 0
 
 	module := newPanelReloadModule(initialConfig, initialRuntime, panelReloadOptions{
@@ -208,61 +200,88 @@ func TestPanelReloadModuleJoinsCandidateCleanupAndRestoreFailures(t *testing.T) 
 		loadCandidate: func(string, string) (*panel.Config, error) {
 			return candidateConfig, nil
 		},
-		buildRuntime: func(*panel.Config) panelRuntime {
+		buildRuntime: func(config *panel.Config) panelRuntime {
 			buildCalls++
-			if buildCalls == 1 {
-				return candidateRuntime
+			if buildCalls != 1 || config != candidateConfig {
+				t.Fatalf("unexpected build call %d for config %p", buildCalls, config)
 			}
-			return restoredRuntime
+			return candidateRuntime
 		},
 		applyProcessConfig: func(*panel.Config) {
 			t.Fatal("candidate process state applied after failed Start")
 		},
-		collectGarbage: func() {},
+		collectGarbage: func() {
+			events = append(events, "gc")
+		},
 		now: func() time.Time {
 			return initialTime.Add(4 * time.Second)
 		},
 	})
 
 	err := module.Reload("changed.yml")
-	for _, wantErr := range []error{startErr, candidateCleanupErr, restoreErr, restoreCleanupErr} {
+	for _, wantErr := range []error{startErr, candidateCleanupErr} {
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("Reload() error = %v, want joined error %v", err, wantErr)
 		}
 	}
 	failed := module.stateSnapshot()
-	if failed.config != initialConfig || failed.runtime != nil {
-		t.Fatal("restore failure claimed a runtime was applied")
+	if failed.config != initialConfig || failed.runtime != candidateRuntime || failed.status != panelReloadStatusFailedOwned {
+		t.Fatalf("candidate cleanup failure state = config:%p runtime:%v status:%v", failed.config, failed.runtime, failed.status)
 	}
-	if failed.status != panelReloadStatusFailed {
-		t.Fatalf("restore failure status = %v, want failed", failed.status)
-	}
-	for _, wantErr := range []error{startErr, candidateCleanupErr, restoreErr, restoreCleanupErr} {
+	for _, wantErr := range []error{startErr, candidateCleanupErr} {
 		if !errors.Is(failed.failure, wantErr) {
 			t.Fatalf("stored failure = %v, want joined error %v", failed.failure, wantErr)
 		}
 	}
-}
+	if got, want := events, []string{"initial.close", "gc", "candidate.start", "candidate.close"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+	if err := module.Reload("again.yml"); !errors.Is(err, errPanelReloadFailedOwned) {
+		t.Fatalf("second Reload() error = %v, want failed-owned rejection", err)
+	}
 
-func TestPanelReloadModuleKeepsOldRuntimeWhenCandidateBuildReturnsNil(t *testing.T) {
+	candidateRuntime.closeErr = nil
+	if err := module.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
+	}
+}
+func TestPanelReloadModuleRestoresLastKnownGoodWhenCandidateBuildReturnsNil(t *testing.T) {
 	initialTime := time.Unix(750, 0)
-	events := make([]string, 0)
+	events := make([]string, 0, 3)
 	initialConfig := reloadTestPanelConfig("initial")
+	candidateConfig := reloadTestPanelConfig("candidate")
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events}
+	restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
+	buildCalls := 0
 
 	module := newPanelReloadModule(initialConfig, initialRuntime, panelReloadOptions{
 		lastAppliedAt: initialTime,
 		loadCandidate: func(string, string) (*panel.Config, error) {
-			return reloadTestPanelConfig("candidate"), nil
+			return candidateConfig, nil
 		},
-		buildRuntime: func(*panel.Config) panelRuntime {
-			return nil
+		buildRuntime: func(config *panel.Config) panelRuntime {
+			buildCalls++
+			switch buildCalls {
+			case 1:
+				if config != candidateConfig {
+					t.Fatal("candidate build received wrong config")
+				}
+				return nil
+			case 2:
+				if config != initialConfig {
+					t.Fatal("restore build received wrong config")
+				}
+				return restoredRuntime
+			default:
+				t.Fatalf("unexpected build call %d", buildCalls)
+				return nil
+			}
 		},
 		applyProcessConfig: func(*panel.Config) {
 			t.Fatal("candidate process state applied after nil build")
 		},
 		collectGarbage: func() {
-			t.Fatal("garbage collection ran before a runtime was replaced")
+			events = append(events, "gc")
 		},
 		now: func() time.Time {
 			return initialTime.Add(4 * time.Second)
@@ -273,77 +292,61 @@ func TestPanelReloadModuleKeepsOldRuntimeWhenCandidateBuildReturnsNil(t *testing
 		t.Fatal("Reload() error = nil, want candidate build error")
 	}
 	applied := module.stateSnapshot()
-	if applied.config != initialConfig || applied.runtime != initialRuntime {
-		t.Fatal("nil candidate build changed the applied runtime")
+	if applied.config != initialConfig || applied.runtime != restoredRuntime || applied.status != panelReloadStatusReady {
+		t.Fatalf("nil candidate build restore state = config:%p runtime:%v status:%v", applied.config, applied.runtime, applied.status)
 	}
-	if applied.status != panelReloadStatusReady || applied.failure != nil {
-		t.Fatalf("state = status %v, failure %v; want unchanged ready state", applied.status, applied.failure)
-	}
-	if len(events) != 0 {
-		t.Fatalf("nil candidate build produced lifecycle events: %#v", events)
+	if got, want := events, []string{"initial.close", "gc", "restored.start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
 }
-
-func TestPanelReloadModuleRestoresOldRuntimeAfterCloseFailure(t *testing.T) {
+func TestPanelReloadModuleOldCloseFailureDoesNotBuildCandidateOrRestore(t *testing.T) {
 	closeErr := errors.New("close initial")
-	candidateCleanupErr := errors.New("cleanup candidate")
 	initialTime := time.Unix(800, 0)
-	events := make([]string, 0, 6)
+	events := make([]string, 0, 2)
 	initialConfig := reloadTestPanelConfig("initial")
-	candidateConfig := reloadTestPanelConfig("candidate")
 	initialRuntime := &reloadTestRuntime{name: "initial", events: &events, closeErr: closeErr}
-	candidateRuntime := &reloadTestRuntime{name: "candidate", events: &events, closeErr: candidateCleanupErr}
-	restoredRuntime := &reloadTestRuntime{name: "restored", events: &events}
 	buildCalls := 0
 
 	module := newPanelReloadModule(initialConfig, initialRuntime, panelReloadOptions{
 		lastAppliedAt: initialTime,
 		loadCandidate: func(string, string) (*panel.Config, error) {
-			return candidateConfig, nil
+			return reloadTestPanelConfig("candidate"), nil
 		},
 		buildRuntime: func(*panel.Config) panelRuntime {
 			buildCalls++
-			if buildCalls == 1 {
-				events = append(events, "build-candidate")
-				return candidateRuntime
-			}
-			events = append(events, "build-restore")
-			return restoredRuntime
+			return &reloadTestRuntime{name: "candidate", events: &events}
 		},
 		applyProcessConfig: func(*panel.Config) {
 			t.Fatal("candidate process state applied after old Close failure")
 		},
-		collectGarbage: func() {},
+		collectGarbage: func() {
+			t.Fatal("garbage collection ran after old Close failure")
+		},
 		now: func() time.Time {
 			return initialTime.Add(4 * time.Second)
 		},
 	})
 
 	err := module.Reload("changed.yml")
-	for _, wantErr := range []error{closeErr, candidateCleanupErr} {
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("Reload() error = %v, want joined error %v", err, wantErr)
-		}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("Reload() error = %v, want %v", err, closeErr)
 	}
 	applied := module.stateSnapshot()
-	if applied.config != initialConfig || applied.runtime != restoredRuntime {
-		t.Fatal("old Close failure did not retain restored last-known-good state")
+	if applied.config != initialConfig || applied.runtime != initialRuntime || applied.status != panelReloadStatusFailedOwned {
+		t.Fatalf("old Close failure state = config:%p runtime:%v status:%v", applied.config, applied.runtime, applied.status)
 	}
-	if applied.status != panelReloadStatusReady || applied.failure != nil {
-		t.Fatalf("restored state = status %v, failure %v; want ready without failure", applied.status, applied.failure)
+	if buildCalls != 0 {
+		t.Fatalf("runtime builds = %d, want 0", buildCalls)
 	}
-	wantEvents := []string{
-		"build-candidate",
-		"initial.close",
-		"candidate.close",
-		"build-restore",
-		"restored.start",
+	if got, want := events, []string{"initial.close"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
 	}
-	if !reflect.DeepEqual(events, wantEvents) {
-		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+
+	initialRuntime.closeErr = nil
+	if err := module.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
 	}
 }
-
 func TestPanelReloadModuleSerializesConcurrentReloads(t *testing.T) {
 	initialTime := time.Unix(900, 0)
 	times := []time.Time{

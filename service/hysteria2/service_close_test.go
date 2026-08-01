@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"sync/atomic"
@@ -116,13 +117,13 @@ func TestStartOwnsPortHopRuleInstallationBeforePublishingRunning(t *testing.T) {
 
 	applyEntered := make(chan struct{})
 	releaseApply := make(chan struct{})
-	applyPortHopRules = func([]portHopRule, *log.Entry) error {
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error {
 		close(applyEntered)
 		<-releaseApply
 		return nil
 	}
 	deleted := make(chan []portHopRule, 1)
-	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		deleted <- append([]portHopRule(nil), rules...)
 		return nil
 	}
@@ -173,9 +174,9 @@ func TestStartRecordsInstalledPortHopRulesForCloseOwnership(t *testing.T) {
 		applyPortHopRules = originalApply
 		deletePortHopRules = originalDelete
 	})
-	applyPortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return nil }
 	deleted := make(chan []portHopRule, 1)
-	deletePortHopRules = func(rules []portHopRule, _ *log.Entry) error {
+	deletePortHopRules = func(_ context.Context, rules []portHopRule, _ *log.Entry) error {
 		deleted <- append([]portHopRule(nil), rules...)
 		return nil
 	}
@@ -209,8 +210,8 @@ func TestStartPortHopFailureCleansRuntimeAndDoesNotPublishOwnership(t *testing.T
 		applyPortHopRules = originalApply
 		deletePortHopRules = originalDelete
 	})
-	applyPortHopRules = func([]portHopRule, *log.Entry) error { return applyErr }
-	deletePortHopRules = func([]portHopRule, *log.Entry) error { return nil }
+	applyPortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return applyErr }
+	deletePortHopRules = func(context.Context, []portHopRule, *log.Entry) error { return nil }
 
 	events := &lifecycleEvents{}
 	runtime := &fakeRuntimeServer{events: events, serveBlock: make(chan struct{}), serving: make(chan struct{})}
@@ -331,6 +332,45 @@ func TestCloseWaitsForServeAndWatcherGoroutines(t *testing.T) {
 	}
 }
 
+func TestCloseContextDeadlineRetainsRuntimeUntilServeJoins(t *testing.T) {
+	events := &lifecycleEvents{}
+	serveDone := make(chan struct{})
+	closeCalls := 0
+	runtime := &fakeRuntimeServer{events: events}
+	service := &Hysteria2Service{
+		state:     stateRunning,
+		server:    runtime,
+		serveDone: serveDone,
+		closeRuntime: func(runtimeServer) error {
+			closeCalls++
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := service.CloseContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext() error = %v, want deadline exceeded", err)
+	}
+	if service.state != stateFailed || service.server != runtime || service.serveDone != serveDone || service.closed {
+		t.Fatalf("join deadline lost runtime ownership: state=%v server=%v serveDone=%v closed=%v", service.state, service.server, service.serveDone, service.closed)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("runtime close calls = %d, want 1", closeCalls)
+	}
+
+	close(serveDone)
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if service.state != stateStopped || service.server != nil || service.serveDone != nil || !service.closed {
+		t.Fatalf("joined cleanup state = %v server=%v serveDone=%v closed=%v", service.state, service.server, service.serveDone, service.closed)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("runtime close calls after retry = %d, want 2", closeCalls)
+	}
+}
+
 func TestCloseWaitsForServeAndWatcherGoroutinesWhenRuntimeCloseFails(t *testing.T) {
 	closeErr := errors.New("runtime close failed")
 	events := &lifecycleEvents{}
@@ -366,8 +406,16 @@ func TestCloseWaitsForServeAndWatcherGoroutinesWhenRuntimeCloseFails(t *testing.
 	default:
 		t.Fatal("Close() did not call runtime close")
 	}
-	if service.state != stateStopped || service.runtimeErr != nil {
-		t.Fatalf("state/error after Close = %v/%v, want stopped/nil", service.state, service.runtimeErr)
+	if service.state != stateFailed || !errors.Is(service.runtimeErr, closeErr) || service.closed || service.server != runtime {
+		t.Fatalf("failed Close lost ownership: state=%v error=%v closed=%v server=%v", service.state, service.runtimeErr, service.closed, service.server)
+	}
+
+	service.closeRuntime = func(runtimeServer) error { return nil }
+	if err := service.Close(); err != nil {
+		t.Fatalf("retry Close() error = %v", err)
+	}
+	if service.state != stateStopped || service.runtimeErr != nil || !service.closed || service.server != nil {
+		t.Fatalf("state after retry Close = %v/%v closed=%v server=%v, want stopped/nil/true/nil", service.state, service.runtimeErr, service.closed, service.server)
 	}
 }
 

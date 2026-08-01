@@ -3,6 +3,7 @@
 package hysteria2
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -14,7 +15,7 @@ func TestApplyPortHopIptablesRulesReturnsFailureAndRollsBackAppliedPrefix(t *tes
 	t.Cleanup(func() { runPortHopCommand = original })
 
 	var calls [][]string
-	runPortHopCommand = func(args ...string) ([]byte, error) {
+	runPortHopCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if args[2] == "-A" && args[7] == "31002" {
 			return []byte("add failed"), commandErr
@@ -26,7 +27,7 @@ func TestApplyPortHopIptablesRulesReturnsFailureAndRollsBackAppliedPrefix(t *tes
 		{FromPortStart: 31002, FromPortEnd: 31002, ToPort: 10443},
 	}
 
-	err := applyPortHopIptablesRules(rules, nil)
+	err := applyPortHopIptablesRules(context.Background(), rules, nil)
 	if !errors.Is(err, commandErr) {
 		t.Fatalf("applyPortHopIptablesRules() error = %v, want %v", err, commandErr)
 	}
@@ -46,7 +47,7 @@ func TestDeletePortHopIptablesRulesReturnsFailureAndRestoresDeletedPrefix(t *tes
 	t.Cleanup(func() { runPortHopCommand = original })
 
 	var calls [][]string
-	runPortHopCommand = func(args ...string) ([]byte, error) {
+	runPortHopCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if args[2] == "-D" && args[7] == "31002" {
 			return []byte("delete failed"), commandErr
@@ -58,7 +59,7 @@ func TestDeletePortHopIptablesRulesReturnsFailureAndRestoresDeletedPrefix(t *tes
 		{FromPortStart: 31002, FromPortEnd: 31002, ToPort: 10443},
 	}
 
-	err := deletePortHopIptablesRules(rules, nil)
+	err := deletePortHopIptablesRules(context.Background(), rules, nil)
 	if !errors.Is(err, commandErr) || !portHopMutationRestored(err) {
 		t.Fatalf("deletePortHopIptablesRules() error/restored = %v/%v, want failure with restored rules", err, portHopMutationRestored(err))
 	}
@@ -78,7 +79,7 @@ func TestDeletePortHopIptablesRulesReportsFailedRollback(t *testing.T) {
 	original := runPortHopCommand
 	t.Cleanup(func() { runPortHopCommand = original })
 
-	runPortHopCommand = func(args ...string) ([]byte, error) {
+	runPortHopCommand = func(_ context.Context, args ...string) ([]byte, error) {
 		if args[2] == "-D" && args[7] == "31002" {
 			return nil, deleteErr
 		}
@@ -92,11 +93,41 @@ func TestDeletePortHopIptablesRulesReportsFailedRollback(t *testing.T) {
 		{FromPortStart: 31002, FromPortEnd: 31002, ToPort: 10443},
 	}
 
-	err := deletePortHopIptablesRules(rules, nil)
+	err := deletePortHopIptablesRules(context.Background(), rules, nil)
 	if !errors.Is(err, deleteErr) || !errors.Is(err, rollbackErr) {
 		t.Fatalf("deletePortHopIptablesRules() error = %v, want delete and rollback failures", err)
 	}
 	if portHopMutationRestored(err) {
 		t.Fatal("deletePortHopIptablesRules() reported restored after rollback failed")
+	}
+}
+
+func TestPortHopIptablesCommandHonorsCancellation(t *testing.T) {
+	original := runPortHopCommand
+	t.Cleanup(func() { runPortHopCommand = original })
+
+	entered := make(chan struct{})
+	returned := make(chan struct{})
+	runPortHopCommand = func(ctx context.Context, _ ...string) ([]byte, error) {
+		close(entered)
+		<-ctx.Done()
+		close(returned)
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- applyPortHopIptablesRules(ctx, []portHopRule{{FromPortStart: 31001, FromPortEnd: 31001, ToPort: 10443}}, nil)
+	}()
+	<-entered
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("applyPortHopIptablesRules() error = %v, want context cancellation", err)
+	}
+	select {
+	case <-returned:
+	default:
+		t.Fatal("canceled iptables command did not return")
 	}
 }

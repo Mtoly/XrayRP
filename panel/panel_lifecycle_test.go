@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -157,7 +158,7 @@ func TestPanelStartRollsBackEarlierServicesWhenLaterServiceFails(t *testing.T) {
 	if !errors.Is(err, startErr) {
 		t.Fatalf("Start() error = %v, want errors.Is(..., startErr)", err)
 	}
-	wantEvents := []string{"core:start", "first:start", "second:start", "first:close", "core:close"}
+	wantEvents := []string{"core:start", "first:start", "second:start", "second:close", "first:close", "core:close"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
 	}
@@ -187,7 +188,7 @@ func TestPanelStartRollsBackStartedServicesInReverseOrder(t *testing.T) {
 	}
 	wantEvents := []string{
 		"core:start", "first:start", "second:start", "third:start",
-		"second:close", "first:close", "core:close",
+		"third:close", "second:close", "first:close", "core:close",
 	}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
@@ -198,10 +199,11 @@ func TestPanelStartRollsBackStartedServicesInReverseOrder(t *testing.T) {
 	assertPanelUnpublished(t, p)
 }
 
-func TestPanelStartRollbackErrorsPreservePrimaryError(t *testing.T) {
+func TestPanelStartRollbackErrorsPreservePrimaryErrorAndOwnership(t *testing.T) {
 	startErr := errors.New("service start failed")
 	serviceCloseErr := errors.New("service rollback failed")
 	coreCloseErr := errors.New("core rollback failed")
+	currentCoreCloseErr := coreCloseErr
 	events := []string{}
 	first := &lifecycleTestService{name: "first", events: &events, closeErr: serviceCloseErr}
 	second := &lifecycleTestService{name: "second", events: &events, startErr: startErr}
@@ -210,7 +212,7 @@ func TestPanelStartRollbackErrorsPreservePrimaryError(t *testing.T) {
 	})
 	p.lifecycle.closeCore = func(*core.Instance) error {
 		events = append(events, "core:close")
-		return coreCloseErr
+		return currentCoreCloseErr
 	}
 
 	err := p.Start()
@@ -219,21 +221,35 @@ func TestPanelStartRollbackErrorsPreservePrimaryError(t *testing.T) {
 			t.Errorf("Start() error = %v, want errors.Is(..., %v)", err, want)
 		}
 	}
-	wantEvents := []string{"core:start", "first:start", "second:start", "first:close", "core:close"}
+	wantEvents := []string{"core:start", "first:start", "second:start", "second:close", "first:close", "core:close"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
 	}
+	snapshot := p.publishedStateSnapshot()
+	if snapshot.lifecycle != panelStateFailedOwned || snapshot.server == nil || len(snapshot.services) != 1 || snapshot.services[0] != first {
+		t.Fatalf("failed rollback ownership = lifecycle:%v server:%p services:%v", snapshot.lifecycle, snapshot.server, snapshot.services)
+	}
+	if err := p.Start(); err == nil {
+		t.Fatal("Start() error = nil, want failed-owned rejection")
+	}
+
+	first.closeErr = nil
+	currentCoreCloseErr = nil
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
 	assertPanelUnpublished(t, p)
 }
-
-func TestPanelStartCoreFailurePreservesCloseError(t *testing.T) {
+func TestPanelStartCoreFailureRetainsCoreUntilCloseRetry(t *testing.T) {
 	startErr := errors.New("core start failed")
 	closeErr := errors.New("core close failed")
+	currentCloseErr := closeErr
 	server := &core.Instance{}
 	p := New(&Config{})
 	p.lifecycle.loadCore = func(*Config) (*core.Instance, error) { return server, nil }
 	p.lifecycle.startCore = func(*core.Instance) error { return startErr }
-	p.lifecycle.closeCore = func(*core.Instance) error { return closeErr }
+	p.lifecycle.closeCore = func(*core.Instance) error { return currentCloseErr }
+	p.lifecycle.buildRuntimePlan = func(*Config) (runtimeConfigPlan, error) { return runtimeConfigPlan{}, nil }
 
 	err := p.Start()
 	for _, want := range []error{startErr, closeErr} {
@@ -241,9 +257,18 @@ func TestPanelStartCoreFailurePreservesCloseError(t *testing.T) {
 			t.Errorf("Start() error = %v, want errors.Is(..., %v)", err, want)
 		}
 	}
+	assertPanelPublishedState(t, p, panelStateFailedOwned, server, 0)
+	assertLegacyPanelState(t, p, false, server, 0)
+	if err := p.Start(); err == nil {
+		t.Fatal("Start() error = nil, want failed-owned rejection")
+	}
+
+	currentCloseErr = nil
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
 	assertPanelUnpublished(t, p)
 }
-
 func TestPanelStartCanRetryAfterFailedStartup(t *testing.T) {
 	planErr := errors.New("first plan failed")
 	events := []string{}
@@ -398,6 +423,7 @@ func TestPanelLifecycleIgnoresCompatibilityFieldMutation(t *testing.T) {
 	p.Running = false
 	p.Server = fakeServer
 	p.Service = []service.Service{fakeService}
+	assertPanelAccessors(t, p, true, realServer, []service.Service{realService})
 	if err := p.Start(); err != nil {
 		t.Fatalf("second Start() error = %v", err)
 	}
@@ -456,24 +482,28 @@ func TestPanelPublishedStateIsUnpublishedDuringSlowStartAndClose(t *testing.T) {
 	waitForLifecycleSignal(t, module.startEntered, "service Start")
 	assertPanelPublishedState(t, p, panelStateStarting, nil, 0)
 	assertLegacyPanelState(t, p, false, nil, 0)
+	assertPanelAccessors(t, p, false, nil, nil)
 	closeSignal(module.startRelease)
 	if err := waitForLifecycleResult(t, startResult, "Panel.Start"); err != nil {
 		t.Fatal(err)
 	}
 	assertPanelPublishedState(t, p, panelStateRunning, server, 1)
 	assertLegacyPanelState(t, p, true, server, 1)
+	assertPanelAccessors(t, p, true, server, []service.Service{module})
 
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- p.Close() }()
 	waitForLifecycleSignal(t, module.closeEntered, "service Close")
-	assertPanelPublishedState(t, p, panelStateStopping, nil, 0)
-	assertLegacyPanelState(t, p, false, nil, 0)
+	assertPanelPublishedState(t, p, panelStateStopping, server, 1)
+	assertLegacyPanelState(t, p, false, server, 1)
+	assertPanelAccessors(t, p, false, server, []service.Service{module})
 	closeSignal(module.closeRelease)
 	if err := waitForLifecycleResult(t, closeResult, "Panel.Close"); err != nil {
 		t.Fatal(err)
 	}
 	assertPanelPublishedState(t, p, panelStateStopped, nil, 0)
 	assertLegacyPanelState(t, p, false, nil, 0)
+	assertPanelAccessors(t, p, false, nil, nil)
 }
 
 func TestPanelPublishedServiceSlicesDoNotAliasCompatibilityOrSnapshots(t *testing.T) {
@@ -491,9 +521,15 @@ func TestPanelPublishedServiceSlicesDoNotAliasCompatibilityOrSnapshots(t *testin
 	snapshot := p.publishedStateSnapshot()
 	snapshot.services[0] = replacement
 	p.Service[0] = replacement
+	publicSnapshot := p.ServicesSnapshot()
+	publicSnapshot[0] = replacement
 	fresh := p.publishedStateSnapshot()
 	if fresh.services[0] != first {
 		t.Fatalf("private services aliased a returned or compatibility slice: %#v", fresh.services)
+	}
+	freshPublic := p.ServicesSnapshot()
+	if freshPublic[0] != first {
+		t.Fatalf("read-only service snapshot aliased a previous result: %#v", freshPublic)
 	}
 
 	if err := p.Close(); err != nil {
@@ -609,9 +645,10 @@ func TestPanelCloseRepeatedlyClosesResourcesOnce(t *testing.T) {
 	assertPanelUnpublished(t, p)
 }
 
-func TestPanelClosePreservesCleanupErrorsAndClearsState(t *testing.T) {
+func TestPanelClosePreservesCleanupErrorsRetainsOwnershipAndRetries(t *testing.T) {
 	firstCloseErr := errors.New("first close failed")
 	coreCloseErr := errors.New("core close failed")
+	currentCoreCloseErr := coreCloseErr
 	events := []string{}
 	first := &lifecycleTestService{name: "first", events: &events, closeErr: firstCloseErr}
 	second := &lifecycleTestService{name: "second", events: &events}
@@ -620,7 +657,7 @@ func TestPanelClosePreservesCleanupErrorsAndClearsState(t *testing.T) {
 	})
 	p.lifecycle.closeCore = func(*core.Instance) error {
 		events = append(events, "core:close")
-		return coreCloseErr
+		return currentCoreCloseErr
 	}
 	if err := p.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -639,16 +676,32 @@ func TestPanelClosePreservesCleanupErrorsAndClearsState(t *testing.T) {
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %#v, want %#v", events, wantEvents)
 	}
-	assertPanelUnpublished(t, p)
-	beforeSecondClose := append([]string(nil), events...)
+	snapshot := p.publishedStateSnapshot()
+	if snapshot.lifecycle != panelStateFailedOwned || snapshot.server == nil || len(snapshot.services) != 1 || snapshot.services[0] != first {
+		t.Fatalf("failed Close ownership = lifecycle:%v server:%p services:%v", snapshot.lifecycle, snapshot.server, snapshot.services)
+	}
+	if err := p.Start(); err == nil {
+		t.Fatal("Start() error = nil, want failed-owned rejection")
+	}
+
+	first.closeErr = nil
+	currentCoreCloseErr = nil
 	if err := p.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
-	if !reflect.DeepEqual(events, beforeSecondClose) {
-		t.Fatalf("second Close() added events: before=%#v after=%#v", beforeSecondClose, events)
+	wantEvents = append(wantEvents, "first:close", "core:close")
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("retry Close events = %#v, want %#v", events, wantEvents)
+	}
+	assertPanelUnpublished(t, p)
+	beforeThirdClose := append([]string(nil), events...)
+	if err := p.Close(); err != nil {
+		t.Fatalf("third Close() error = %v", err)
+	}
+	if !reflect.DeepEqual(events, beforeThirdClose) {
+		t.Fatalf("idempotent Close added events: before=%#v after=%#v", beforeThirdClose, events)
 	}
 }
-
 func TestPanelCloseAfterPartialFailureDoesNotCloseResourcesAgain(t *testing.T) {
 	startErr := errors.New("second service failed")
 	events := []string{}
@@ -738,6 +791,99 @@ type noopLifecycleService struct{}
 func (noopLifecycleService) Start() error { return nil }
 func (noopLifecycleService) Close() error { return nil }
 
+type deadlineLifecycleService struct {
+	waitStart     bool
+	waitClose     bool
+	startDeadline chan bool
+	closeDeadline chan bool
+}
+
+func (s *deadlineLifecycleService) Start() error {
+	return s.StartContext(context.Background())
+}
+
+func (s *deadlineLifecycleService) StartContext(ctx context.Context) error {
+	_, hasDeadline := ctx.Deadline()
+	if s.startDeadline != nil {
+		s.startDeadline <- hasDeadline
+	}
+	if s.waitStart {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return ctx.Err()
+}
+
+func (s *deadlineLifecycleService) Close() error {
+	return s.CloseContext(context.Background())
+}
+
+func (s *deadlineLifecycleService) CloseContext(ctx context.Context) error {
+	_, hasDeadline := ctx.Deadline()
+	if s.closeDeadline != nil {
+		s.closeDeadline <- hasDeadline
+	}
+	if s.waitClose {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return ctx.Err()
+}
+
+func TestPanelStartContextPropagatesDeadlineAndRejectsLatePublication(t *testing.T) {
+	events := []string{}
+	runtimeService := &deadlineLifecycleService{
+		waitStart:     true,
+		startDeadline: make(chan bool, 1),
+	}
+	p := newLifecycleTestPanel(t, &events, func() ([]service.Service, error) {
+		return []service.Service{runtimeService}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	if err := p.StartContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StartContext() error = %v, want deadline exceeded", err)
+	}
+	if hasDeadline := <-runtimeService.startDeadline; !hasDeadline {
+		t.Fatal("service StartContext did not receive a deadline")
+	}
+	assertPanelUnpublished(t, p)
+}
+
+func TestPanelCloseContextPropagatesDeadlineAndRetainsOwnership(t *testing.T) {
+	events := []string{}
+	runtimeService := &deadlineLifecycleService{
+		closeDeadline: make(chan bool, 2),
+	}
+	p := newLifecycleTestPanel(t, &events, func() ([]service.Service, error) {
+		return []service.Service{runtimeService}, nil
+	})
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	runtimeService.waitClose = true
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := p.CloseContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CloseContext() error = %v, want deadline exceeded", err)
+	}
+	if hasDeadline := <-runtimeService.closeDeadline; !hasDeadline {
+		t.Fatal("service CloseContext did not receive a deadline")
+	}
+	state := p.publishedStateSnapshot()
+	if state.lifecycle != panelStateFailedOwned || state.server == nil || len(state.services) != 1 {
+		t.Fatalf("deadline cleanup lost ownership: lifecycle=%v server=%v services=%d", state.lifecycle, state.server, len(state.services))
+	}
+	assertPanelAccessors(t, p, false, state.server, state.services)
+
+	runtimeService.waitClose = false
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close() cleanup retry error = %v", err)
+	}
+}
+
 func assertPanelPublishedState(t *testing.T, p *Panel, wantLifecycle panelLifecycleState, wantServer *core.Instance, wantServices int) {
 	t.Helper()
 	snapshot := p.publishedStateSnapshot()
@@ -769,22 +915,41 @@ func assertLegacyPanelState(t *testing.T, p *Panel, wantRunning bool, wantServer
 	}
 }
 
+func assertPanelAccessors(t *testing.T, p *Panel, wantRunning bool, wantServer *core.Instance, wantServices []service.Service) {
+	t.Helper()
+	if got := p.IsRunning(); got != wantRunning {
+		t.Fatalf("IsRunning() = %v, want %v", got, wantRunning)
+	}
+	if got := p.ServerInstance(); got != wantServer {
+		t.Fatalf("ServerInstance() = %p, want %p", got, wantServer)
+	}
+	if got := p.ServicesSnapshot(); !reflect.DeepEqual(got, wantServices) {
+		t.Fatalf("ServicesSnapshot() = %#v, want %#v", got, wantServices)
+	}
+}
+
 func validatePanelPublishedState(snapshot panelPublishedState) error {
-	if snapshot.lifecycle == panelStateRunning {
+	switch snapshot.lifecycle {
+	case panelStateRunning:
 		if snapshot.server == nil {
 			return fmt.Errorf("running snapshot has nil server")
 		}
 		return nil
+	case panelStateStopping, panelStateFailedOwned:
+		return nil
+	case panelStateStopped, panelStateStarting:
+		if snapshot.server != nil || len(snapshot.services) != 0 {
+			return fmt.Errorf(
+				"unowned snapshot has resources: lifecycle=%d server=%p services=%d",
+				snapshot.lifecycle,
+				snapshot.server,
+				len(snapshot.services),
+			)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown panel lifecycle state %d", snapshot.lifecycle)
 	}
-	if snapshot.server != nil || len(snapshot.services) != 0 {
-		return fmt.Errorf(
-			"non-running snapshot has resources: lifecycle=%d server=%p services=%d",
-			snapshot.lifecycle,
-			snapshot.server,
-			len(snapshot.services),
-		)
-	}
-	return nil
 }
 
 func waitForLifecycleSignal(t *testing.T, signal <-chan struct{}, operation string) {

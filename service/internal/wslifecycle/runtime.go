@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 type Client interface {
@@ -15,6 +16,10 @@ type Client interface {
 	Done() <-chan struct{}
 	KeepAlive() error
 	Close() error
+}
+
+type contextClientCloser interface {
+	CloseContext(context.Context) error
 }
 
 type Factory func(context.Context) (Client, error)
@@ -37,11 +42,13 @@ type ticker interface {
 type tickerFactory func(time.Duration) ticker
 
 type Config struct {
-	Factory           Factory
-	HandleEvent       func(Client, *newV2board.WSEvent)
-	HandleOutcome     func(Outcome)
-	ReconnectBackoff  time.Duration
-	HeartbeatInterval time.Duration
+	Factory              Factory
+	HandleEvent          func(Client, *newV2board.WSEvent)
+	HandleEventContext   func(context.Context, Client, *newV2board.WSEvent)
+	HandleOutcome        func(Outcome)
+	HandleOutcomeContext func(context.Context, Outcome)
+	ReconnectBackoff     time.Duration
+	HeartbeatInterval    time.Duration
 }
 
 type Runtime struct {
@@ -76,6 +83,17 @@ func New(config Config) *Runtime {
 }
 
 func (r *Runtime) Start() bool {
+	return r.StartContext(context.Background())
+}
+
+func (r *Runtime) StartContext(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+
 	r.mu.Lock()
 	if r.started {
 		r.mu.Unlock()
@@ -85,7 +103,7 @@ func (r *Runtime) Start() bool {
 		r.done = make(chan struct{})
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := r.done
 	r.started = true
 	r.closing = false
@@ -93,23 +111,29 @@ func (r *Runtime) Start() bool {
 	r.client = nil
 	r.mu.Unlock()
 
-	go r.run(ctx, done)
+	go r.run(runCtx, done)
 	return true
 }
 
 func (r *Runtime) Close() {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	_ = r.CloseContext(ctx)
+}
+
+func (r *Runtime) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r.mu.Lock()
 	if !r.started {
 		r.mu.Unlock()
-		return
+		return nil
 	}
 	if r.closing {
 		done := r.done
 		r.mu.Unlock()
-		if done != nil {
-			<-done
-		}
-		return
+		return waitDoneContext(ctx, done)
 	}
 	r.closing = true
 	cancel := r.cancel
@@ -119,9 +143,7 @@ func (r *Runtime) Close() {
 	if cancel != nil {
 		cancel()
 	}
-	if done != nil {
-		<-done
-	}
+	return waitDoneContext(ctx, done)
 }
 
 func (r *Runtime) Done() <-chan struct{} {
@@ -156,7 +178,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 			if ctx.Err() != nil {
 				return
 			}
-			r.handleOutcome(OutcomeConnectFailed)
+			r.handleOutcome(ctx, OutcomeConnectFailed)
 			needsReconnect = true
 			if !r.sleep(ctx, r.config.ReconnectBackoff) {
 				return
@@ -164,29 +186,42 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 			continue
 		}
 		if !r.publishClient(ctx, client) {
-			_ = client.Close()
+			r.closeClient(client)
 			return
 		}
 
-		r.handleOutcome(OutcomeConnected)
+		r.handleOutcome(ctx, OutcomeConnected)
 		if needsReconnect {
-			r.handleOutcome(OutcomeReconnected)
+			r.handleOutcome(ctx, OutcomeReconnected)
 			needsReconnect = false
 		}
 
 		disconnected := r.consume(ctx, client)
 		r.clearClient(client)
-		_ = client.Close()
+		r.closeClient(client)
 		if ctx.Err() != nil || !disconnected {
 			return
 		}
 
-		r.handleOutcome(OutcomeDisconnected)
+		r.handleOutcome(ctx, OutcomeDisconnected)
 		needsReconnect = true
 		if !r.sleep(ctx, r.config.ReconnectBackoff) {
 			return
 		}
 	}
+}
+
+func (r *Runtime) closeClient(client Client) {
+	if client == nil {
+		return
+	}
+	ctx, cancel := service.CleanupContext(context.Background())
+	defer cancel()
+	if contextual, ok := client.(contextClientCloser); ok {
+		_ = contextual.CloseContext(ctx)
+		return
+	}
+	_ = client.Close()
 }
 
 func (r *Runtime) connect(ctx context.Context) (Client, error) {
@@ -226,9 +261,7 @@ func (r *Runtime) consume(ctx context.Context, client Client) bool {
 			if !ok {
 				return true
 			}
-			if r.config.HandleEvent != nil {
-				r.config.HandleEvent(client, event)
-			}
+			r.handleEvent(ctx, client, event)
 		case err, ok := <-client.Errors():
 			if !ok {
 				return true
@@ -237,7 +270,7 @@ func (r *Runtime) consume(ctx context.Context, client Client) bool {
 				continue
 			}
 			if errors.Is(err, newV2board.ErrWSClientParse) {
-				r.handleOutcome(OutcomeParseError)
+				r.handleOutcome(ctx, OutcomeParseError)
 				continue
 			}
 			return true
@@ -247,7 +280,27 @@ func (r *Runtime) consume(ctx context.Context, client Client) bool {
 	}
 }
 
-func (r *Runtime) handleOutcome(outcome Outcome) {
+func (r *Runtime) handleEvent(ctx context.Context, client Client, event *newV2board.WSEvent) {
+	if ctx.Err() != nil {
+		return
+	}
+	if r.config.HandleEventContext != nil {
+		r.config.HandleEventContext(ctx, client, event)
+		return
+	}
+	if r.config.HandleEvent != nil {
+		r.config.HandleEvent(client, event)
+	}
+}
+
+func (r *Runtime) handleOutcome(ctx context.Context, outcome Outcome) {
+	if ctx.Err() != nil {
+		return
+	}
+	if r.config.HandleOutcomeContext != nil {
+		r.config.HandleOutcomeContext(ctx, outcome)
+		return
+	}
 	if r.config.HandleOutcome != nil {
 		r.config.HandleOutcome(outcome)
 	}
@@ -269,6 +322,18 @@ func (r *Runtime) clearClient(client Client) {
 		r.client = nil
 	}
 	r.mu.Unlock()
+}
+
+func waitDoneContext(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 func doneClosed(done <-chan struct{}) bool {

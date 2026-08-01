@@ -10,6 +10,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/service"
 )
 
 type recordingWSEventSubmitter struct {
@@ -17,6 +18,18 @@ type recordingWSEventSubmitter struct {
 	parseErrors chan struct{}
 	disconnects chan struct{}
 	reconnects  chan struct{}
+}
+
+type recordingSnapshotSyncSubmitter struct {
+	triggers chan service.SnapshotSyncTrigger
+}
+
+func newRecordingSnapshotSyncSubmitter() *recordingSnapshotSyncSubmitter {
+	return &recordingSnapshotSyncSubmitter{triggers: make(chan service.SnapshotSyncTrigger, 8)}
+}
+
+func (s *recordingSnapshotSyncSubmitter) SubmitSnapshotSync(trigger service.SnapshotSyncTrigger) {
+	s.triggers <- trigger
 }
 
 func newRecordingWSEventSubmitter() *recordingWSEventSubmitter {
@@ -120,6 +133,70 @@ func TestSharedWSRuntimeRoutesNodeEventsToMatchingMailboxOnly(t *testing.T) {
 	})
 	assertNoString(t, first.events)
 	assertNoString(t, second.events)
+}
+
+func TestSharedWSRuntimeRoutesSpecializedSnapshotTriggers(t *testing.T) {
+	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{ResyncOnReconnect: true})
+	first := newRecordingSnapshotSyncSubmitter()
+	second := newRecordingSnapshotSyncSubmitter()
+
+	firstMailbox, err := runtime.NewSnapshotMailbox(1, first)
+	if err != nil {
+		t.Fatalf("build first snapshot mailbox: %v", err)
+	}
+	secondMailbox, err := runtime.NewSnapshotMailbox(2, second)
+	if err != nil {
+		t.Fatalf("build second snapshot mailbox: %v", err)
+	}
+	if err := firstMailbox.StartContext(context.Background()); err != nil {
+		t.Fatalf("start first snapshot mailbox: %v", err)
+	}
+	if err := secondMailbox.StartContext(context.Background()); err != nil {
+		t.Fatalf("start second snapshot mailbox: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = firstMailbox.StopContext(context.Background())
+		_ = secondMailbox.StopContext(context.Background())
+	})
+
+	tests := []struct {
+		event  string
+		scope  service.SnapshotSyncScope
+		source service.SnapshotSyncSource
+	}{
+		{event: newV2board.WSEventXboardSyncConfig, scope: service.SnapshotSyncNode, source: service.SnapshotSyncSourceWebSocket},
+		{event: newV2board.WSEventXboardSyncUsers, scope: service.SnapshotSyncUsers, source: service.SnapshotSyncSourceWebSocket},
+		{event: newV2board.WSEventXboardSyncUserDelta, scope: service.SnapshotSyncUsers, source: service.SnapshotSyncSourceWebSocket},
+		{event: newV2board.WSEventResyncAll, scope: service.SnapshotSyncAll, source: service.SnapshotSyncSourceWebSocket},
+	}
+	for _, test := range tests {
+		runtime.handleEvent(nil, &newV2board.WSEvent{
+			Event:   test.event,
+			Payload: map[string]any{"node_id": float64(1)},
+		})
+		trigger := receiveSnapshotTrigger(t, first.triggers)
+		if trigger.Scope != test.scope || trigger.Source != test.source || trigger.OccurredAt.IsZero() {
+			t.Fatalf("event %q trigger = %+v, want scope=%v source=%q", test.event, trigger, test.scope, test.source)
+		}
+		assertNoSnapshotTrigger(t, second.triggers)
+	}
+
+	runtime.handleEvent(nil, &newV2board.WSEvent{
+		Event:   newV2board.WSEventXboardSyncDevices,
+		Payload: map[string]any{"node_id": float64(1)},
+	})
+	assertNoSnapshotTrigger(t, first.triggers)
+
+	runtime.broadcastParseError()
+	parseTrigger := receiveSnapshotTrigger(t, first.triggers)
+	if parseTrigger.Scope != service.SnapshotSyncAll || parseTrigger.Source != service.SnapshotSyncSourceParseError {
+		t.Fatalf("parse-error trigger = %+v", parseTrigger)
+	}
+	runtime.broadcastReconnect()
+	reconnectTrigger := receiveSnapshotTrigger(t, first.triggers)
+	if reconnectTrigger.Scope != service.SnapshotSyncAll || reconnectTrigger.Source != service.SnapshotSyncSourceReconnect {
+		t.Fatalf("reconnect trigger = %+v", reconnectTrigger)
+	}
 }
 
 func TestSharedWSRuntimeSyncNodesTriggersRediscover(t *testing.T) {
@@ -552,6 +629,26 @@ func assertNoString(t *testing.T, ch <-chan string) {
 	select {
 	case got := <-ch:
 		t.Fatalf("unexpected string: %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func receiveSnapshotTrigger(t *testing.T, ch <-chan service.SnapshotSyncTrigger) service.SnapshotSyncTrigger {
+	t.Helper()
+	select {
+	case trigger := <-ch:
+		return trigger
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for snapshot sync trigger")
+		return service.SnapshotSyncTrigger{}
+	}
+}
+
+func assertNoSnapshotTrigger(t *testing.T, ch <-chan service.SnapshotSyncTrigger) {
+	t.Helper()
+	select {
+	case trigger := <-ch:
+		t.Fatalf("unexpected snapshot sync trigger: %+v", trigger)
 	case <-time.After(50 * time.Millisecond):
 	}
 }

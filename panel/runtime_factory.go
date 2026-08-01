@@ -1,15 +1,13 @@
 package panel
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/xtls/xray-core/core"
 
 	"github.com/Mtoly/XrayRP/service"
-	"github.com/Mtoly/XrayRP/service/anytls"
 	"github.com/Mtoly/XrayRP/service/controller"
-	"github.com/Mtoly/XrayRP/service/hysteria2"
-	"github.com/Mtoly/XrayRP/service/tuic"
 )
 
 type runtimeNodeServiceKind string
@@ -43,31 +41,11 @@ type runtimeServiceRegistry struct {
 	controllerFallback runtimeServiceRegistration
 }
 
+var specializedRuntimeServiceRegistrations []runtimeServiceRegistration
+
 func defaultRuntimeServiceRegistry() runtimeServiceRegistry {
 	return runtimeServiceRegistry{
-		registrations: []runtimeServiceRegistration{
-			{
-				kind:    runtimeNodeServiceHysteria2,
-				aliases: []string{"Hysteria2", "Hysteria"},
-				newService: func(construction runtimeServiceConstruction) service.Service {
-					return hysteria2.New(construction.apiClient, construction.controllerConfig)
-				},
-			},
-			{
-				kind:    runtimeNodeServiceTuic,
-				aliases: []string{"Tuic"},
-				newService: func(construction runtimeServiceConstruction) service.Service {
-					return tuic.New(construction.apiClient, construction.controllerConfig)
-				},
-			},
-			{
-				kind:    runtimeNodeServiceAnyTLS,
-				aliases: []string{"AnyTLS"},
-				newService: func(construction runtimeServiceConstruction) service.Service {
-					return anytls.New(construction.apiClient, construction.controllerConfig)
-				},
-			},
-		},
+		registrations: append([]runtimeServiceRegistration(nil), specializedRuntimeServiceRegistrations...),
 		controllerFallback: runtimeServiceRegistration{
 			kind:             runtimeNodeServiceController,
 			supportsSharedWS: true,
@@ -87,20 +65,41 @@ func defaultRuntimeServiceRegistry() runtimeServiceRegistry {
 	}
 }
 
-func (registry runtimeServiceRegistry) build(construction runtimeServiceConstruction, fallbackNodeType string) service.Service {
+func (registry runtimeServiceRegistry) build(construction runtimeServiceConstruction, fallbackNodeType string) (service.Service, error) {
 	registration := registry.controllerFallback
-	if construction.wsEventRuntimeFactory == nil {
-		nodeType := construction.apiClient.Describe().NodeType
-		if nodeType == "" {
-			nodeType = fallbackNodeType
-		}
-		registration = registry.resolve(nodeType)
+	nodeType := construction.apiClient.Describe().NodeType
+	if nodeType == "" {
+		nodeType = fallbackNodeType
 	}
-	return registration.newService(construction)
+	if specializedKind, known := specializedRuntimeServiceKind(nodeType); known {
+		var included bool
+		registration, included = registry.registration(specializedKind)
+		if !included {
+			return nil, fmt.Errorf(
+				"node type %q is not included in this build profile; select the required release profile",
+				nodeType,
+			)
+		}
+	}
+	return registration.newService(construction), nil
 }
 
 func (registry runtimeServiceRegistry) supportsSharedWS(nodeType string) bool {
-	return registry.resolve(strings.TrimSpace(nodeType)).supportsSharedWS
+	normalized := strings.TrimSpace(nodeType)
+	if kind, specialized := specializedRuntimeServiceKind(normalized); specialized {
+		registration, included := registry.registration(kind)
+		return included && registration.supportsSharedWS
+	}
+	return registry.resolve(normalized).supportsSharedWS
+}
+
+func (registry runtimeServiceRegistry) registration(kind runtimeNodeServiceKind) (runtimeServiceRegistration, bool) {
+	for _, registration := range registry.registrations {
+		if registration.kind == kind {
+			return registration, true
+		}
+	}
+	return runtimeServiceRegistration{}, false
 }
 
 func (registry runtimeServiceRegistry) resolve(nodeType string) runtimeServiceRegistration {
@@ -112,4 +111,17 @@ func (registry runtimeServiceRegistry) resolve(nodeType string) runtimeServiceRe
 		}
 	}
 	return registry.controllerFallback
+}
+
+func specializedRuntimeServiceKind(nodeType string) (runtimeNodeServiceKind, bool) {
+	switch {
+	case strings.EqualFold(nodeType, "Hysteria2"), strings.EqualFold(nodeType, "Hysteria"):
+		return runtimeNodeServiceHysteria2, true
+	case strings.EqualFold(nodeType, "Tuic"):
+		return runtimeNodeServiceTuic, true
+	case strings.EqualFold(nodeType, "AnyTLS"):
+		return runtimeNodeServiceAnyTLS, true
+	default:
+		return "", false
+	}
 }
