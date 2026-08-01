@@ -35,6 +35,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Restored release-page artifact builds and uploads for published GitHub Releases, including the repository's historical SemVer tags without a leading `v`.
+- Removed the deleted `tools` source root from the panel adapter isolation check so required test, race, and coverage jobs pass in clean checkouts.
 - Configuration hot reload now supports static-to-static and machine-to-machine updates, rejects static/machine mode changes before closing the current runtime, and restores the last-known-good runtime when a same-mode candidate fails to start.
 - Removed unowned per-inbound cache backfill and local janitor goroutines so limiter replacement, deletion, and shutdown can reclaim local cache state and close Redis deterministically.
 - Preserved the latest confirmed machine Applied node value across specialized runtime synchronization so failed REST, reload, cleanup, or replacement candidates cannot become rollback inputs.

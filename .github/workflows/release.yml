@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+      - "[0-9]*"
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       tag:
@@ -29,7 +33,7 @@ permissions:
   security-events: write
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
 
 jobs:
   metadata:
@@ -433,7 +437,7 @@ jobs:
   publish-release:
     name: Publish GitHub release
     needs: [metadata, required-checks, release-bundle]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
     runs-on: ubuntu-latest
     environment: release
     permissions:

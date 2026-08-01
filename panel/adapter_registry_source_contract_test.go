@@ -27,7 +27,7 @@ var reviewedAdapterImports = map[string]bool{
 func TestPanelAdapterConstructionRemainsIsolated(t *testing.T) {
 	root := filepath.Clean("..")
 	constructorCount := make(map[string]int, len(reviewedAdapterImports))
-	for _, directory := range []string{"api", "app", "cmd", "common", "internal", "panel", "service", "tools"} {
+	for _, directory := range []string{"api", "app", "cmd", "common", "internal", "panel", "service"} {
 		walkProductionGoFiles(t, filepath.Join(root, directory), func(filePath string) {
 			file, err := parser.ParseFile(token.NewFileSet(), filePath, nil, 0)
 			if err != nil {
