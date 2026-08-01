@@ -21,6 +21,8 @@ If you like this project, you can click STAR+WATCH in the upper right corner to 
 
 Tutorial：[Detailed tutorial](https://xrayr-project.github.io/XrayR-doc/)
 
+Xboard / NewV2board compatibility, WebSocket, machine mode, and configuration notes: [compatibility guide](./docs/xboard-newv2board.md).
+
 
 ## Disclaimer
 
@@ -64,6 +66,7 @@ This project is just my personal learning and development and maintenance. I do 
 | [PMPanel](https://github.com/ByteInternetHK/PMPanel)   | √     | √      | √                       |
 | [ProxyPanel](https://github.com/ProxyPanel/ProxyPanel) | √     | √      | √                       |
 | [WHMCS (V2RaySocks)](https://v2raysocks.doxtex.com/)   | √     | √      | √                       |
+| [GoV2Panel](https://github.com/pingProMax/gov2panel)   | √     | √      | √                       |
 | [BunPanel](https://github.com/pennyMorant/bunpanel-release)   | √     | √      | √                       |
 
 ## Software Installation

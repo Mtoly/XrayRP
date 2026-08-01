@@ -19,6 +19,8 @@ Nếu bạn thích dự án này, bạn có thể nhấp vào Star+Watch ở gó
 ## Tài liệu
 Sử dụng hướng dẫn: [Hướng dẫn chi tiết](https://xrayr-project.github.io/XrayR-doc/) ( Tiếng Trung )
 
+Tài liệu về khả năng tương thích Xboard / NewV2board, WebSocket, chế độ máy và cấu hình: [Hướng dẫn tương thích](./docs/xboard-newv2board.md).
+
 ## Tuyên bố miễn trừ
 
 Dự án này chỉ là học tập và phát triển và bảo trì cá nhân của tôi. Tôi không đảm bảo bất kỳ sự sẵn có nào và không chịu trách nhiệm cho bất kỳ hậu quả nào do việc sử dụng phần mềm này.
@@ -61,6 +63,7 @@ Dự án này chỉ là học tập và phát triển và bảo trì cá nhân c
 | [PMPanel](https://github.com/ByteInternetHK/PMPanel)   | √     | √      | √                       |
 | [ProxyPanel](https://github.com/ProxyPanel/ProxyPanel) | √     | √      | √                       |
 | [WHMCS (V2RaySocks)](https://v2raysocks.doxtex.com/)   | √     | √      | √                       |
+| [GoV2Panel](https://github.com/pingProMax/gov2panel)   | √     | √      | √                       |
 | [BunPanel](https://github.com/pennyMorant/bunpanel-release)   | √     | √      | √                       |
 
 ## Cài đặt phần mềm

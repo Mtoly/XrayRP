@@ -1,93 +1,73 @@
-# Xboard / NewV2board Notes
+# Xboard / NewV2board Compatibility
 
-This document describes the current Xboard/NewV2board support scope in XrayRP 0.9-alpha.
+This document describes the Xboard/NewV2board backend compatibility contract implemented by XrayRP. It intentionally focuses on node operation and does not claim parity with panel UI, subscription-template, or future control-plane features.
 
-## Support scope
+## Supported operating modes
 
-The `newV2board` adapter targets the backend side of Xboard/NewV2board node operation. The current implementation follows the key backend integration path rather than every panel-side feature.
+The `newV2board` adapter supports:
 
-Currently covered backend-facing areas:
+- Static-node mode through `Nodes`, with one managed runtime per configured node.
+- Machine/server management mode through `MachineConfig`, with discovery of machine-bound servers, per-node lifecycle management, a shared WebSocket connection, and machine status reporting.
+- REST synchronization for node, user, route, rule, certificate, and `base_config` state.
+- WebSocket + polling dual-active synchronization.
+- Xboard `/api/v2/server/report` with legacy UniProxy report fallback.
 
-- Node config and user sync through REST snapshots.
-- Xboard machine/server management mode: discover machine-bound servers, dynamically start/stop per-node services, and react to `sync.nodes` with immediate rediscovery.
-- Xboard `base_config` runtime interval updates for controller sync/report tasks and machine discovery polling.
-- Route/outbound policy compatibility for the Xboard UniProxy config shape.
-- Panel-provided certificate config (`cert_config`) where available.
-- WebSocket + Polling dual-active control path.
-- `/api/v2/server/report` compatibility for status, online-user, and traffic reports with legacy UniProxy fallback.
-- Polling fallback for final consistency.
+`MachineConfig` and static `Nodes` are mutually exclusive.
 
-Not claimed as complete in this version:
+REST snapshots remain authoritative for complex runtime state. WebSocket events normally trigger the existing REST synchronization pipeline instead of directly publishing event payloads. The exception is `sync.devices`, which carries the panel-provided global device/IP snapshot used by limiter admission.
 
-- Direct application of full WebSocket config payloads without REST confirmation.
-- Panel UI behavior.
-- Subscription template behavior.
-- Full Xboard route engine parity.
-- Every future Xboard control-plane event payload.
+Machine mode keeps one shared WebSocket connection for ordinary Xray, AnyTLS, TUIC, and Hysteria2 nodes. Specialized runtimes receive only node-scoped synchronization triggers: `sync.config` refreshes the complete REST node snapshot, `sync.users` and `sync.user.delta` refresh the complete REST user snapshot, and reconnect or parse recovery refreshes node, user, and rule snapshots. They do not apply WebSocket delta payloads or create per-node WebSocket connections.
 
-Complex runtime objects still use REST snapshots as the authoritative apply source. WebSocket events are treated as triggers to resync, not as trusted complete replacements for node, user, route, or certificate state.
+Each specialized node has one bounded synchronization executor. A fixed 250 ms window merges duplicate and mixed pending triggers, and only one apply may run for that node at a time. Periodic polling submits through the same executor and remains active when WebSocket delivery is unavailable. Traffic, online-user, status, and audit reporting retain their existing periodic ownership and are not amplified by WebSocket user events.
 
-## Current Xboard WebSocket compatibility
+Fetched machine candidates are retained separately from confirmed Applied node values. Failed REST, rule, or runtime replacement attempts leave the last-known-good runtime and rollback snapshot unchanged. Shutdown unregisters the node mailbox, stops periodic producers, cancels and joins in-flight synchronization, and only then retires runtime resources.
 
-XrayRP supports the current Xboard WebSocket control-plane envelope:
+Machine reconciliation preserves healthy node services when discovery or replacement fails. A `sync.nodes` event requests rediscovery; the normal reconciliation path then decides which node services must be started, stopped, or replaced.
 
-- legacy: `{"event":"node_changed","payload":{...}}`
-- current Xboard: `{"event":"sync.config","data":{...}}`
+## WebSocket compatibility
 
-Handled events:
+XrayRP accepts both legacy and current event envelopes:
 
-- `sync.config` triggers node config sync through the existing REST UniProxy snapshot path.
-- `sync.users` triggers user list sync through the existing REST UniProxy user path.
-- `sync.user.delta` currently triggers full user sync; XrayRP intentionally does not directly apply the delta payload in phase 1.
-- `ping` receives an app-level `pong` response.
-- `auth.success` and `error` are accepted and ignored by the sync pipeline.
-- `sync.nodes` schedules a full REST resync in single-node mode. It is treated as a machine-mode invalidation signal and does not start or stop controllers.
-- `sync.devices` applies panel-provided global device/IP state to limiter admission while the WebSocket state is fresh.
+- Legacy: `{"event":"node_changed","payload":{...}}`
+- Current Xboard: `{"event":"sync.config","data":{...}}`
 
-WebSocket endpoint resolution order:
+Important current events:
 
-1. `ControllerConfig.WebSocketConfig.Endpoint`, if configured.
-2. Xboard `/api/v2/server/handshake` `websocket.ws_url`, when enabled.
-3. Legacy `<ApiHost>/api/v1/server/UniProxy/ws` fallback.
+- `sync.config` triggers node configuration synchronization through REST.
+- `sync.users` and `sync.user.delta` trigger a complete REST user synchronization. Delta payloads are not applied as independent partial state.
+- `sync.nodes` triggers a full resync in static-node mode and machine rediscovery in machine mode.
+- `sync.devices` applies the global device/IP snapshot while the WebSocket state is fresh. A malformed device snapshot triggers a full resync instead of publishing partial state.
+- `ping` receives an application-level `pong`.
+- `auth.success`, `pong`, and `error` are accepted without entering the apply pipeline.
 
-The REST UniProxy snapshot remains the authoritative source for complex runtime state. WebSocket payloads are used as change notifications, except `sync.devices`, which is a panel-provided global device/IP snapshot for limiter admission.
+### Endpoint resolution
 
-### Xboard single-node device sync behavior
+Static-node mode resolves the WebSocket endpoint in this order:
 
-Single-node controllers treat `sync.devices` as panel-provided global device/IP state and apply it to limiter admission while the WebSocket state is fresh. WebSocket disconnect clears global device state so stale panel snapshots do not reject new connections. Controllers also send changed-only `report.devices` snapshots over WebSocket, including the empty snapshot after all devices go offline, while retaining REST alive reporting for compatibility.
+1. `ControllerConfig.WebSocketConfig.Endpoint`, when explicitly configured.
+2. Xboard `/api/v2/server/handshake` `websocket.ws_url`, when the handshake enables WebSocket.
+3. `<ApiHost>/api/v1/server/UniProxy/ws`.
 
-`sync.nodes` is treated as a machine-mode invalidation signal. In single-node mode it does not start or stop controllers; it schedules a REST resync so the current node converges safely.
+Machine mode uses one shared WebSocket endpoint:
 
-### Xboard base_config interval updates
+1. `MachineConfig.ControllerConfig.WebSocketConfig.Endpoint`, when explicitly configured.
+2. `<ApiHost>/api/v1/server/UniProxy/ws`.
 
-Xboard/NewV2board can return `base_config` in both node UniProxy config snapshots and machine node discovery snapshots. XrayRP treats these values as runtime scheduling controls, not as Xray protocol config:
+Discovered handshake endpoints must remain on the panel origin. A secure panel endpoint cannot be downgraded from HTTPS/WSS to HTTP/WS. Explicit endpoint overrides are operator-controlled configuration.
 
-- `base_config.pull_interval` updates the controller's config/user/rule polling interval. In machine mode, the machine discovery loop also uses the machine discovery response's `pull_interval`.
-- `base_config.push_interval` updates the controller's status, traffic, online-user, and device-report interval.
-- Local `ControllerConfig.UpdatePeriodic` and `MachineConfig.DiscoveryInterval` remain fallback values when the panel does not provide positive intervals.
-- Very small values are clamped to safe minimums: push/report intervals use at least 5 seconds, and pull/discovery intervals use at least 30 seconds.
+If handshake discovery is unavailable, static-node mode falls back to the legacy UniProxy endpoint. If WebSocket startup or reconnect continues to fail, polling remains active and preserves eventual consistency.
 
-Changing only `base_config` should not rebuild inbound/outbound runtime state. Runtime objects still change only when the REST snapshot shows actual node, user, rule, route, or certificate differences.
+### Connection safety and recovery
 
-## Xboard `/api/v2/server/report` compatibility
+- Incoming WebSocket messages are limited to 1 MiB.
+- Individual parse errors do not terminate the entire WebSocket runtime.
+- Reconnect submits a full resync when `ResyncOnReconnect` is enabled.
+- Parse recovery and reconnect are broadcast as bounded full-snapshot triggers to registered specialized node mailboxes; one node's synchronization failure does not stop delivery to other nodes.
+- Disconnect clears panel-provided global device state so stale snapshots cannot reject new connections.
+- Device reports are sent only when the snapshot changes, including the final empty snapshot after all devices disconnect.
+- Tokens and other credential-bearing diagnostics are redacted by default.
 
-XrayRP attempts the Xboard `/api/v2/server/report` endpoint for NewV2board node status, online-user, and user-traffic reports. If the endpoint is clearly unsupported by the panel, the adapter falls back to the legacy UniProxy report endpoints:
-
-- `/api/v1/server/UniProxy/status`
-- `/api/v1/server/UniProxy/alive`
-- `/api/v1/server/UniProxy/push`
-
-The fallback is only for unsupported endpoint responses. Authentication failures, server errors, malformed successful responses, and transport failures are returned as errors so real panel problems are not hidden.
-
-Follow-up items not covered by this phase:
-
-- Trojan REALITY;
-- outbound safe regex filters;
-- uTLS/xmux advanced field completion.
-
-## WebSocket + Polling dual-active sync
-
-Enable WebSocket sync per node in `release/config/config.yml.example` style config:
+Enable dual-active synchronization with:
 
 ```yaml
 ControllerConfig:
@@ -99,44 +79,58 @@ ControllerConfig:
     ResyncOnReconnect: true
 ```
 
-Field notes:
+`HeartbeatInterval: 0` disables runtime keepalive ticks. Disabling `WebSocketConfig.Enable` leaves the node polling-only.
 
-- `Enable`: enables the websocket control-plane path for adapters that expose websocket capability. If disabled, the node remains polling-only.
-- `Endpoint`: optional override. If empty, the runtime resolves the endpoint from Xboard `/api/v2/server/handshake` when available, then falls back to `<ApiHost>/api/v1/server/UniProxy/ws`.
-- `HeartbeatInterval`: websocket keepalive interval in seconds. Set to `0` to disable runtime keepalive ticks.
-- `ReconnectBackoff`: reconnect delay in seconds after websocket failure.
-- `ResyncOnReconnect`: when true, submit a full resync after the websocket reconnects.
+## `base_config` scheduling
 
-This mode is dual-active, not WS-only:
+Xboard/NewV2board may return `base_config` in node configuration and machine discovery snapshots. These fields control scheduling and do not directly change Xray protocol configuration:
 
-- WebSocket events submit sync actions quickly.
-- Polling remains active and corrects state drift.
-- Reconnect submits `ResyncAll` when configured.
-- Handshake failures degrade to polling-only behavior.
-- Parse errors in individual websocket messages do not kill the whole websocket channel.
+- `pull_interval` updates controller configuration/user/rule polling. In machine mode it also updates machine discovery.
+- `push_interval` updates controller status, traffic, online-user, and device reporting. In machine mode it also updates machine status reporting.
+- `ControllerConfig.UpdatePeriodic` and `MachineConfig.DiscoveryInterval` remain local fallbacks when the panel does not provide a positive value.
 
-## Route / outbound compatibility
+Minimum effective intervals are:
 
-The Xboard UniProxy config can provide custom route and outbound data. XrayRP currently normalizes a backend-focused subset into `PanelRoutePolicy`.
+| Task | Minimum |
+| --- | ---: |
+| Controller reports (`push_interval`) | 5 seconds |
+| Controller synchronization (`pull_interval`) | 30 seconds |
+| Machine status reporting (`push_interval`) | 10 seconds |
+| Machine discovery (`pull_interval`) | 30 seconds |
 
-Supported outbound policy fields include:
+Changing only `base_config` reschedules periodic work without rebuilding inbound or outbound runtime state.
+
+## Report endpoint fallback
+
+XrayRP first attempts `/api/v2/server/report` for node status, online-user, and user-traffic reports. When the panel clearly reports that this endpoint is unsupported, the adapter falls back to:
+
+- `/api/v1/server/UniProxy/status`
+- `/api/v1/server/UniProxy/alive`
+- `/api/v1/server/UniProxy/push`
+
+Authentication failures, server failures, malformed successful responses, and transport errors are returned instead of being hidden by fallback.
+
+## Route and outbound compatibility
+
+XrayRP normalizes the supported Xboard UniProxy route/outbound subset into `PanelRoutePolicy`:
 
 - Candidate outbound tags from `outbounds`.
 - Include filters from `include_outbound`.
 - Exclude filters from `exclude_outbound`.
-- Fallback tags from `fallback`.
+- Exact fallback tags from `fallback`.
+- Direct/bypass route detection and supported direct-domain extraction.
 
-Supported route behavior includes:
+Include and exclude filters currently use exact, prefix, or substring matching. They are not regular expressions. If filtering leaves no valid candidate and no configured fallback can be resolved, dispatch fails closed.
 
-- Direct/bypass detection.
-- Direct domain extraction for supported route entries.
-- Runtime outbound handler selection with fallback.
+Managed-node handoff also fails closed when the target handler is missing, has a mismatched tag, is not a managed data-path wrapper, or would recurse into the current wrapper. This prevents route selection from bypassing node limiter and rule enforcement.
 
-The runtime still protects same-node routing. XrayRP-managed inbound tags do not arbitrarily dispatch into another node's outbound handler.
+## VLESS, Trojan, REALITY, and XHTTP
 
-## VLESS + REALITY + xhttp
+The Xboard adapter supports VLESS TLS/REALITY, Trojan TLS, and the tested XHTTP/splithttp fields, including mode, raw `extra`, padding/placement options, uplink chunk size, and header toggles.
 
-For VLESS + REALITY + xhttp, start with the smallest panel-side xhttp object that matches the current tested path:
+Trojan REALITY is not currently materialized by the `newV2board` adapter. Advanced uTLS/xmux fields are also not guaranteed to map from every Xboard payload shape.
+
+Start with a minimal panel-side XHTTP object:
 
 ```json
 {
@@ -146,16 +140,13 @@ For VLESS + REALITY + xhttp, start with the smallest panel-side xhttp object tha
 }
 ```
 
-Recommendations:
+Keep `VlessFlow` empty for WS, gRPC, HTTPUpgrade, and XHTTP/splithttp. Use a flow such as `xtls-rprx-vision` only for compatible direct TCP TLS/REALITY deployments.
 
-- Keep `VlessFlow` empty for ws, grpc, httpupgrade, and splithttp/xhttp transports.
-- Use `VlessFlow` such as `xtls-rprx-vision` only for direct TLS/REALITY over TCP.
-- Do not add complex `extra`, `xmux`, or `downloadSettings` fields first unless your Xray-core version and Xboard payload are known to match.
-- Validate the minimal path before adding obfuscation or multiplexing options.
+Raw `extra`, `xmux`, and `downloadSettings` shapes can vary between panel and Xray-core versions. Validate the minimal transport first, then add only fields supported by the exact deployed panel, adapter, and Xray-core versions.
 
 ## AnyTLS `padding_scheme`
 
-For AnyTLS, prefer the Xboard-style default array format instead of hand-tuning values first:
+Xboard sends AnyTLS `padding_scheme` as an array. The commonly used default shape is:
 
 ```json
 [
@@ -171,20 +162,26 @@ For AnyTLS, prefer the Xboard-style default array format instead of hand-tuning 
 ]
 ```
 
-Keep this as an array/multi-line value in the panel configuration when possible. Avoid changing the distribution until the node is confirmed healthy with the default shape.
+Keep the panel value as an array and confirm the node is healthy before tuning the distribution.
 
 ## Integration tests
 
-Default tests do not require external panel or websocket services:
+Default tests remain local and deterministic:
 
 ```bash
 go test ./...
 ```
 
-WebSocket integration coverage is opt-in:
+Enable the opt-in WebSocket integration tests in Linux or WSL:
 
 ```bash
 XRAYRP_RUN_V2BOARD_WS_INTEGRATION=1 go test ./service/controller -run 'Integration|WS' -v
 ```
 
-Other panel integration tests are also gated by environment variables so the default test path stays local and deterministic.
+PowerShell:
+
+```powershell
+$env:XRAYRP_RUN_V2BOARD_WS_INTEGRATION = "1"
+go test ./service/controller -run 'Integration|WS' -v
+Remove-Item Env:XRAYRP_RUN_V2BOARD_WS_INTEGRATION
+```

@@ -13,33 +13,37 @@ ConnectionConfig: # Xray connection timeout and buffer tuning.
   UplinkOnly: 2 # Timeout in seconds after downstream closes while uplink is still open.
   DownlinkOnly: 4 # Timeout in seconds after uplink closes while downstream is still open.
   BufferSize: 4 # Per-connection internal buffer size in KB; lower values reduce memory usage.
+Observability: # Optional local health, readiness, and Prometheus metrics server.
+  Enable: false # Enable /livez, /readyz, and /metrics. Disabled by default.
+  Listen: "127.0.0.1:10085" # Loopback or private IP only; this endpoint has no authentication or TLS.
+  ReadinessStaleAfter: 180 # Seconds since the last successful sync before readiness fails; minimum 30.
 # MachineConfig enables Xboard server management mode.
 # Use MachineConfig instead of Nodes; machine mode cannot be enabled together with static Nodes.
 # XrayRP authenticates to Xboard with MachineID + Token, discovers servers bound to this machine,
 # dynamically starts/stops per-node services, handles sync.nodes via a shared machine WebSocket,
 # routes per-node events by node_id, reports node.status over WebSocket best-effort,
-# and reports machine load to Xboard's server management page by base_config.push_interval.
+# and reports machine load to Xboard's server management page by base_config.push_interval (minimum 10 seconds).
 # In Xboard, create/bind servers to this machine and copy the machine ID/token here.
 # MachineConfig: # Xboard/NewV2board machine/server management mode configuration.
 #   Enable: false # Set true to enable machine mode. When true, do not configure static Nodes below.
-#   PanelType: "NewV2board" # Machine mode panel adapter. Use NewV2board for Xboard/NewV2board.
+#   PanelType: "NewV2board" # Machine mode panel adapter. Use NewV2board or V2board for Xboard/NewV2board.
 #   ApiHost: "https://panel.example.com" # Base URL of the Xboard/NewV2board panel, without a trailing slash.
 #   MachineID: 1 # Machine ID from the Xboard server management page.
 #   Token: "machine-token" # Machine token from Xboard. Keep this secret.
 #   Timeout: 30 # HTTP API timeout in seconds for machine discovery and reports.
-#   DiscoveryInterval: 60 # Fallback node discovery interval in seconds; Xboard base_config.pull_interval can update it at runtime.
+#   DiscoveryInterval: 60 # Fallback node discovery interval in seconds; Xboard base_config.pull_interval can update it at runtime, with a 30-second minimum.
 #   ControllerConfig: # Shared controller defaults applied to every discovered server/node.
 #     ListenIP: 0.0.0.0 # Local listen IP for inbound services created from discovered nodes.
 #     SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
-#     UpdatePeriodic: 60 # Fallback per-node sync/report interval in seconds when panel base_config is unavailable.
+#     UpdatePeriodic: 60 # Fallback per-node interval; panel pull_interval has a 30s minimum and push_interval has a 5s minimum.
 #     WebSocketConfig: # Shared machine WebSocket control-plane settings.
 #       Enable: true # Enable shared machine WebSocket for sync.nodes, per-node mailbox routing, and node.status reports.
-#       Endpoint: # Optional override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws with machine_id + token.
+#       Endpoint: # Optional override; machine mode otherwise uses <ApiHost>/api/v1/server/UniProxy/ws with machine_id + token.
 #       HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
 #       ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
 #       ResyncOnReconnect: true # Submit a full node rediscovery/resync after WebSocket reconnects.
 Nodes: # Static node list. Use this when MachineConfig is disabled.
-  - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
+  - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board/V2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
     ApiConfig: # Panel API authentication and node identity settings.
       ApiHost: "http://127.0.0.1:667" # Base URL of the panel API, without a trailing slash.
       ApiKey: "123" # Panel API key/token for this node. Keep this secret.
@@ -55,7 +59,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
     ControllerConfig: # Runtime behavior for this node.
       ListenIP: 0.0.0.0 # Local IP address for inbound listeners.
       SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
-      UpdatePeriodic: 60 # Local fallback sync interval in seconds. For Xboard/NewV2board, base_config.pull_interval controls config sync and base_config.push_interval controls reports when provided.
+      UpdatePeriodic: 60 # Local fallback interval. Xboard pull_interval controls sync (minimum 30s) and push_interval controls reports (minimum 5s) when provided.
       EnableDNS: false # Enable custom DNS config from DnsConfigPath.
       DNSType: AsIs # DNS strategy: AsIs, UseIP, UseIPv4, or UseIPv6.
       DisableSniffing: false # Disable protocol sniffing for inbound traffic.
@@ -64,7 +68,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
       DisableIVCheck: false # Disable Shadowsocks IV check for legacy compatibility. Keep false unless required.
       WebSocketConfig: # Optional WebSocket dual-active control plane settings.
         Enable: false # Enable WebSocket control plane. false keeps polling-only mode.
-        Endpoint: # Optional endpoint override; default resolves to <ApiHost>/api/v1/server/UniProxy/ws.
+        Endpoint: # Optional override; static NewV2board nodes otherwise try Xboard handshake, then <ApiHost>/api/v1/server/UniProxy/ws.
         HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
         ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
         ResyncOnReconnect: true # Submit a full resync after WebSocket reconnects.
@@ -119,7 +123,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
       #     ALICLOUD_SECRET_KEY: bbb # Example DNS provider secret key. Keep this secret.
       #   RejectUnknownSni: false # Reject TLS clients whose SNI does not match the configured certificate domain.
 
-#  - PanelType: "SSpanel" # Panel type: SSpanel, NewV2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
+#  - PanelType: "SSpanel" # Panel type: SSPanel/SSpanel, NewV2board/V2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
 #    ApiConfig: # Panel API authentication and node identity settings.
 #      ApiHost: "http://127.0.0.1:668" # Base URL of the panel API, without a trailing slash.
 #      ApiKey: "123" # Panel API key/token for this node. Keep this secret.

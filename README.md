@@ -29,6 +29,8 @@ Xboard / NewV2board 相关的 WebSocket 双通道同步、机器/服务器管理
 
 使用教程：[详细使用教程](https://xrayr-project.github.io/XrayR-doc/)
 
+Xboard / NewV2board 的兼容范围、WebSocket、Machine 模式和配置说明：[兼容性文档](./docs/xboard-newv2board.md)
+
 
 ## 免责声明
 

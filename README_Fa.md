@@ -18,6 +18,8 @@
 
 آموزش：[اموزش با جزئیات](https://xrayr-project.github.io/XrayR-doc/)
 
+راهنمای سازگاری Xboard / NewV2board، وب‌سوکت، حالت ماشین و پیکربندی: [راهنمای سازگاری](./docs/xboard-newv2board.md).
+
 ## سلب مسئولیت
 
 این پروژه فقط مطالعه، توسعه و نگهداری شخصی من است. من هیچ گونه قابلیت استفاده را تضمین نمی کنم و مسئولیتی در قبال عواقب ناشی از استفاده از این نرم افزار ندارم.
@@ -59,6 +61,7 @@
 | [PMPanel](https://github.com/ByteInternetHK/PMPanel)   | √     | √      | √                       |
 | [ProxyPanel](https://github.com/ProxyPanel/ProxyPanel) | √     | √      | √                       |
 | [WHMCS (V2RaySocks)](https://v2raysocks.doxtex.com/)   | √     | √      | √                       |
+| [GoV2Panel](https://github.com/pingProMax/gov2panel)   | √     | √      | √                       |
 | [BunPanel](https://github.com/pennyMorant/bunpanel-release)   | √     | √      | √                       |
 
 ## نصب نرم افزار
