@@ -352,7 +352,7 @@ jobs:
           ARCHIVE: ${{ steps.package.outputs.archive }}
         run: cosign sign-blob --yes --bundle "$ARCHIVE.sigstore.json" "$ARCHIVE"
       - name: Attest archive provenance
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: ${{ steps.package.outputs.archive }}
       - name: Upload release artifact
@@ -423,7 +423,7 @@ jobs:
           cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
           cosign sign-blob --yes --bundle dist/release-manifest.sigstore.json dist/release-manifest.json
       - name: Attest release manifest provenance
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/release-manifest.json
       - name: Upload release bundle
