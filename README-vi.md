@@ -12,6 +12,14 @@
 
 A Xray backend framework that can easily support many panels.
 
+## Phiên bản hiện tại
+
+Phiên bản phát hành trước hiện tại: `0.9.1-alpha`
+
+Xem các thay đổi chính của phiên bản này trong [CHANGELOG.md](./CHANGELOG.md).
+
+Trong chế độ máy của Xboard / NewV2board, XrayRP tự động báo cáo CPU, bộ nhớ, Swap, ổ đĩa và tốc độ mạng của toàn máy lên trang quản lý máy chủ theo `base_config.push_interval` do bảng điều khiển cung cấp; không cần cấu hình cục bộ bổ sung.
+
 Khung trở lại dựa trên XRay hỗ trợ các giao thức V2Ray, Trojan, Shadowsocks, dễ dàng mở rộng và hỗ trợ kết nối nhiều người.
 
 Nếu bạn thích dự án này, bạn có thể nhấp vào Star+Watch ở góc trên bên phải để tiếp tục chú ý đến tiến trình của dự án này.
@@ -23,7 +31,16 @@ Tài liệu về khả năng tương thích Xboard / NewV2board, WebSocket, ch�
 
 ## Tuyên bố miễn trừ
 
-Dự án này chỉ là học tập và phát triển và bảo trì cá nhân của tôi. Tôi không đảm bảo bất kỳ sự sẵn có nào và không chịu trách nhiệm cho bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
 
 ## Đặt điểm nổi bật
 

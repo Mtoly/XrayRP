@@ -12,6 +12,14 @@
 
 A Xray backend framework that can easily support many panels.
 
+## Current Version
+
+Current prerelease version: `0.9.1-alpha`
+
+See [CHANGELOG.md](./CHANGELOG.md) for the main changes in this version.
+
+In Xboard / NewV2board machine mode, XrayRP automatically reports whole-machine CPU, memory, swap, disk, and network rates to the server management page according to the panel-provided `base_config.push_interval`; no additional local configuration is required.
+
 A back -end framework based on XRAY supports V2Ray, Trojan, Shadowsocks protocols, which are easy to expand and support multi -panel docker.
 
 
@@ -26,7 +34,16 @@ Xboard / NewV2board compatibility, WebSocket, machine mode, and configuration no
 
 ## Disclaimer
 
-This project is just my personal learning and development and maintenance. I do not guarantee any availability and is not responsible for any consequences caused by the use of this software.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
 
 ## Features
 
