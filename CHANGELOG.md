@@ -6,7 +6,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Security
 
-- Release archives carry SPDX SBOMs, keyless Sigstore signatures, GitHub provenance attestations, and machine-readable source commit mappings.
+- Releases publish platform archives with one signed SHA256 index; per-platform SPDX SBOMs, source mappings, keyless signatures, and GitHub provenance attestations remain generated as workflow evidence.
 - `govulncheck` blocks reachable findings except for a temporary, narrowly validated `GO-2026-5288` allowance: Hysteria core and extras must be at least v2.8.2 and the request-sniff hook must remain disabled.
 
 ### Added
