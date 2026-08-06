@@ -151,8 +151,7 @@ func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeI
 	}
 
 	if err != nil {
-		res, _ := json.Marshal(response.Data)
-		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s", string(res), err)
+		return nil, panelhttp.NodeInfoParseError(err)
 	}
 
 	return nodeInfo, nil
@@ -197,8 +196,7 @@ func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.Use
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
 	if err != nil {
-		res, _ := json.Marshal(response.Data)
-		return nil, fmt.Errorf("parse user list failed: %s", string(res))
+		return nil, panelhttp.UserListParseError(err)
 	}
 	return userList, nil
 }

@@ -24,7 +24,10 @@ func TestNodeRuntimeStateCloneAddressPreservesFamilyAndValue(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cloned := cloneAddress(&conf.Address{Address: test.address})
+			value := normalizeNodeInfo(&api.NodeInfo{NameServerConfig: []*conf.NameServerConfig{{
+				Address: &conf.Address{Address: test.address},
+			}}})
+			cloned := value.snapshot().NameServerConfig[0].Address
 			if cloned == nil || cloned.Address == nil {
 				t.Fatalf("expected cloned address, got %#v", cloned)
 			}

@@ -429,6 +429,41 @@ func TestFetchKeepsETagAfterInvalidPayload(t *testing.T) {
 	}
 }
 
+func TestGetNodeInfoParseErrorDoesNotExposeSensitivePayload(t *testing.T) {
+	const (
+		password   = "obfs-password-secret"
+		privateKey = "reality-private-key-secret"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeResponse(t, w, map[string]any{
+			"version": "2024.1",
+			"custom_config": map[string]any{
+				"offset_port_node": "invalid-port",
+				"obfs_password":    password,
+				"server_key":       privateKey,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{APIHost: server.URL, Key: testKey, NodeID: testNodeID, NodeType: "V2ray"})
+	_, err := client.GetNodeInfo()
+	if err == nil {
+		t.Fatal("GetNodeInfo() returned nil error")
+	}
+	if got := err.Error(); got != "parse panel node info failed" {
+		t.Fatalf("error = %q, want redacted parse error", got)
+	}
+	for _, secret := range []string{password, privateKey} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error exposed secret %q: %v", secret, err)
+		}
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("parse error did not preserve its cause")
+	}
+}
+
 func integrationClient() *APIClient {
 	return New(&api.Config{APIHost: "http://127.0.0.1:667", Key: "123", NodeID: 3, NodeType: "V2ray"})
 }

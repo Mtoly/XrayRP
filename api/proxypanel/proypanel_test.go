@@ -394,6 +394,31 @@ func TestContractAbsentCapabilities(t *testing.T) {
 	}
 }
 
+func TestGetUserListParseErrorDoesNotExposeUUID(t *testing.T) {
+	const uuid = "user-uuid-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeProxyResponse(w, "success", []map[string]any{
+			{"uid": 1, "vmess_uid": uuid, "speed_limit": 1},
+			{"uid": 2, "vmess_uid": "other", "speed_limit": "invalid"},
+		})
+	}))
+	defer server.Close()
+
+	_, err := newContractClient(server, "V2ray").GetUserList()
+	if err == nil {
+		t.Fatal("GetUserList() returned nil error")
+	}
+	if got := err.Error(); got != "parse panel user list failed" {
+		t.Fatalf("error = %q, want redacted parse error", got)
+	}
+	if strings.Contains(err.Error(), uuid) {
+		t.Fatalf("error exposed user UUID: %v", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("parse error did not preserve its cause")
+	}
+}
+
 func TestGetV2rayNodeinfo(t *testing.T) {
 	requireProxyPanelIntegration(t)
 	apiConfig := &api.Config{

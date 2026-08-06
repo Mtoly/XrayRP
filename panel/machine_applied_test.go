@@ -324,7 +324,10 @@ func TestCloneMachineAddressPreservesFamilyValueAndTypedNil(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cloned := cloneMachineAddress(&conf.Address{Address: test.address})
+			clonedNode := cloneMachineNodeInfo(&api.NodeInfo{NameServerConfig: []*conf.NameServerConfig{{
+				Address: &conf.Address{Address: test.address},
+			}}})
+			cloned := clonedNode.NameServerConfig[0].Address
 			if cloned == nil || cloned.Address == nil {
 				t.Fatalf("expected cloned address, got %#v", cloned)
 			}
@@ -335,8 +338,11 @@ func TestCloneMachineAddressPreservesFamilyValueAndTypedNil(t *testing.T) {
 	}
 
 	var typedNil xraynet.Address = xraynet.IPAddress(nil)
-	cloned := cloneMachineAddress(&conf.Address{Address: typedNil})
-	if cloned == nil || !isNilMachineXrayAddress(cloned.Address) {
+	clonedNode := cloneMachineNodeInfo(&api.NodeInfo{NameServerConfig: []*conf.NameServerConfig{{
+		Address: &conf.Address{Address: typedNil},
+	}}})
+	cloned := clonedNode.NameServerConfig[0].Address
+	if cloned == nil || !reflect.DeepEqual(cloned.Address, typedNil) {
 		t.Fatalf("typed-nil address clone = %#v", cloned)
 	}
 }

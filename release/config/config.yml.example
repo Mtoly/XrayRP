@@ -27,7 +27,7 @@ Observability: # Optional local health, readiness, and Prometheus metrics server
 # MachineConfig: # Xboard/NewV2board machine/server management mode configuration.
 #   Enable: false # Set true to enable machine mode. When true, do not configure static Nodes below.
 #   PanelType: "NewV2board" # Machine mode panel adapter. Use NewV2board or V2board for Xboard/NewV2board.
-#   ApiHost: "https://panel.example.com" # Base URL of the Xboard/NewV2board panel, without a trailing slash.
+#   ApiHost: "https://panel.example.com" # Base URL of the Xboard/NewV2board panel. Remote panels require HTTPS; HTTP is accepted only for loopback development.
 #   MachineID: 1 # Machine ID from the Xboard server management page.
 #   Token: "machine-token" # Machine token from Xboard. Keep this secret.
 #   Timeout: 30 # HTTP API timeout in seconds for machine discovery and reports.
@@ -45,7 +45,7 @@ Observability: # Optional local health, readiness, and Prometheus metrics server
 Nodes: # Static node list. Use this when MachineConfig is disabled.
   - PanelType: "SSPanel" # Panel type: SSPanel/SSpanel, NewV2board/V2board (also works with Xboard), PMpanel, Proxypanel, V2RaySocks, GoV2Panel, BunPanel.
     ApiConfig: # Panel API authentication and node identity settings.
-      ApiHost: "http://127.0.0.1:667" # Base URL of the panel API, without a trailing slash.
+      ApiHost: "http://127.0.0.1:667" # Base URL of the panel API. Remote panels require HTTPS; HTTP is accepted only for loopback development.
       ApiKey: "123" # Panel API key/token for this node. Keep this secret.
       NodeID: 41 # Single node ID. For multiple nodes, add more entries under Nodes.
       NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP.

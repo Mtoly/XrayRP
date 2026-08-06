@@ -34,7 +34,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -50,7 +50,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -66,7 +66,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -82,7 +82,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -100,7 +100,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -135,7 +135,7 @@ jobs:
           check_coverage service/machine 68.5
           check_coverage common/limiter 56.6
       - name: Upload coverage profile
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           path: coverage.out
@@ -151,7 +151,7 @@ jobs:
         with:
           ref: ${{ env.CHECKOUT_REF }}
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -190,7 +190,7 @@ jobs:
           fi
           go test -count=1 ./service/hysteria2 -run '^TestBuildServerConfigKeepsVulnerableSniffHookDisabled$'
 
-          echo "Allowing GO-2026-5288: upstream fixed the issue in v2.8.2; core=$core_version extras=$extras_version and Hysteria request sniffing remains disabled."
+          echo "Allowing GO-2026-5288: the vulnerability database has no fixed version; core=$core_version extras=$extras_version and Hysteria request sniffing remains disabled."
 
   codeql:
     name: CodeQL
@@ -209,7 +209,7 @@ jobs:
         with:
           languages: go
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true

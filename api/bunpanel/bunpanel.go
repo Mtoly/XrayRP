@@ -172,8 +172,7 @@ func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeI
 
 	nodeInfo, err = c.ParseNodeInfo(nodeInfoResponse)
 	if err != nil {
-		res, _ := json.Marshal(nodeInfoResponse)
-		return nil, fmt.Errorf("parse node info failed: %s, \nError: %s, \nPlease check the doc of custom_config for help: https://xrayr-project.github.io/XrayR-doc/dui-jie-sspanel/sspanel/sspanel_custom_config", string(res), err)
+		return nil, panelhttp.NodeInfoParseError(err)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -217,8 +216,7 @@ func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.Use
 	}
 	userList, err := c.ParseUserListResponse(userListResponse)
 	if err != nil {
-		res, _ := json.Marshal(userListResponse)
-		return nil, fmt.Errorf("parse user list failed: %s", string(res))
+		return nil, panelhttp.UserListParseError(err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

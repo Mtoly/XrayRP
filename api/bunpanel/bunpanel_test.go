@@ -376,6 +376,34 @@ func TestTransportErrorsDoNotPanic(t *testing.T) {
 	}
 }
 
+func TestGetNodeInfoParseErrorDoesNotExposeRealityPrivateKey(t *testing.T) {
+	const privateKey = "reality-private-key-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeResponse(w, http.StatusOK, map[string]any{
+			"serverPort":      8443,
+			"network":         "xhttp",
+			"security":        "reality",
+			"realitySettings": map[string]any{"privateKey": privateKey},
+			"xhttpSettings":   map[string]any{"xPaddingBytes": []int{1}},
+		})
+	}))
+	defer server.Close()
+
+	_, err := newContractClient(server).GetNodeInfo()
+	if err == nil {
+		t.Fatal("GetNodeInfo() returned nil error")
+	}
+	if got := err.Error(); got != "parse panel node info failed" {
+		t.Fatalf("error = %q, want redacted parse error", got)
+	}
+	if strings.Contains(err.Error(), privateKey) {
+		t.Fatalf("error exposed REALITY private key: %v", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("parse error did not preserve its cause")
+	}
+}
+
 func TestParseNodeInfoPreservesAdapterSpecificTransportFallbacks(t *testing.T) {
 	client := bunpanel.New(&api.Config{NodeID: contractNodeID, NodeType: "V2ray"})
 	t.Run("unknown transport falls back to websocket endpoint", func(t *testing.T) {

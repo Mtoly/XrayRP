@@ -153,8 +153,7 @@ func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeI
 	}
 
 	if err != nil {
-		res, _ := json.Marshal(nodeInfoResponse)
-		return nil, fmt.Errorf("Parse node info failed: %s, \nError: %s", string(res), err)
+		return nil, panelhttp.NodeInfoParseError(err)
 	}
 
 	return nodeInfo, nil
@@ -200,8 +199,7 @@ func (c *APIClient) GetUserListContext(ctx context.Context) (UserList *[]api.Use
 	}
 	userList, err := c.ParseUserListResponse(userListResponse)
 	if err != nil {
-		res, _ := json.Marshal(userListResponse)
-		return nil, fmt.Errorf("parse user list failed: %s", string(res))
+		return nil, panelhttp.UserListParseError(err)
 	}
 	return userList, nil
 }

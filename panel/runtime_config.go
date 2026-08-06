@@ -123,6 +123,9 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 			return nil, fmt.Errorf("static node API config at index %d must not be nil", index)
 		}
 		apiConfig := *node.ApiConfig
+		if err := validatePanelAPIHost(apiConfig.APIHost); err != nil {
+			return nil, fmt.Errorf("static node API config at index %d: %w", index, err)
+		}
 		controllerConfig, err := buildRuntimeControllerConfig(node.ControllerConfig, showErrorDetails)
 		if err != nil {
 			return nil, err
@@ -145,6 +148,9 @@ func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*Mach
 	}
 	if strings.TrimSpace(machineConfig.ApiHost) == "" {
 		return nil, nil, "", fmt.Errorf("machine mode ApiHost must not be empty")
+	}
+	if err := validatePanelAPIHost(machineConfig.ApiHost); err != nil {
+		return nil, nil, "", fmt.Errorf("machine mode ApiHost: %w", err)
 	}
 	if machineConfig.MachineID <= 0 {
 		return nil, nil, "", fmt.Errorf("machine mode MachineID must be greater than 0")

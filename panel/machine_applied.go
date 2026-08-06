@@ -2,17 +2,14 @@ package panel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/internal/appliednode"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
-	xraynet "github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/infra/conf"
 )
 
 type machineAppliedNodeValue struct {
@@ -481,162 +478,6 @@ func cloneMachineRuleList(rules *[]api.DetectRule) *[]api.DetectRule {
 	return &cloned
 }
 
-func cloneMachineSlice[T any](values []T) []T {
-	if values == nil {
-		return nil
-	}
-	return append([]T(nil), values...)
-}
-
-func cloneMachineMap[K comparable, V any](values map[K]V) map[K]V {
-	if values == nil {
-		return nil
-	}
-	cloned := make(map[K]V, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func cloneMachineValue[T any](value *T) *T {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
-func cloneMachineStringList(value *conf.StringList) *conf.StringList {
-	if value == nil {
-		return nil
-	}
-	cloned := conf.StringList(cloneMachineSlice([]string(*value)))
-	return &cloned
-}
-
-func cloneMachineHTTPHeaders(headers map[string]*conf.StringList) map[string]*conf.StringList {
-	if headers == nil {
-		return nil
-	}
-	cloned := make(map[string]*conf.StringList, len(headers))
-	for key, values := range headers {
-		cloned[key] = cloneMachineStringList(values)
-	}
-	return cloned
-}
-
-func isNilMachineXrayAddress(value xraynet.Address) bool {
-	if value == nil {
-		return true
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-		return reflected.IsNil()
-	default:
-		return false
-	}
-}
-
-func cloneMachineXrayAddress(value xraynet.Address) xraynet.Address {
-	if isNilMachineXrayAddress(value) {
-		return value
-	}
-	switch reflect.TypeOf(value) {
-	case machineIPv4AddressType, machineIPv6AddressType:
-		return xraynet.IPAddress(cloneMachineSlice([]byte(value.IP())))
-	case machineDomainAddressType:
-		return xraynet.DomainAddress(value.Domain())
-	default:
-		return value
-	}
-}
-
-var (
-	machineIPv4AddressType   = reflect.TypeOf(xraynet.IPAddress([]byte{0, 0, 0, 0}))
-	machineIPv6AddressType   = reflect.TypeOf(xraynet.IPAddress(make([]byte, 16)))
-	machineDomainAddressType = reflect.TypeOf(xraynet.DomainAddress(""))
-)
-
-func cloneMachineAddress(value *conf.Address) *conf.Address {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	cloned.Address = cloneMachineXrayAddress(value.Address)
-	return &cloned
-}
-
-func cloneMachineNameServerConfig(config *conf.NameServerConfig) *conf.NameServerConfig {
-	if config == nil {
-		return nil
-	}
-	cloned := *config
-	cloned.Address = cloneMachineAddress(config.Address)
-	cloned.ClientIP = cloneMachineAddress(config.ClientIP)
-	cloned.Domains = cloneMachineSlice(config.Domains)
-	cloned.ExpectedIPs = conf.StringList(cloneMachineSlice([]string(config.ExpectedIPs)))
-	cloned.ExpectIPs = conf.StringList(cloneMachineSlice([]string(config.ExpectIPs)))
-	cloned.DisableCache = cloneMachineValue(config.DisableCache)
-	cloned.ServeStale = cloneMachineValue(config.ServeStale)
-	cloned.ServeExpiredTTL = cloneMachineValue(config.ServeExpiredTTL)
-	cloned.UnexpectedIPs = conf.StringList(cloneMachineSlice([]string(config.UnexpectedIPs)))
-	return &cloned
-}
-
 func cloneMachineNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
-	if nodeInfo == nil {
-		return nil
-	}
-	cloned := *nodeInfo
-	cloned.Header = cloneMachineSlice(json.RawMessage(nodeInfo.Header))
-	cloned.HttpHeaders = cloneMachineHTTPHeaders(nodeInfo.HttpHeaders)
-	cloned.Headers = cloneMachineMap(nodeInfo.Headers)
-	if nodeInfo.NameServerConfig != nil {
-		cloned.NameServerConfig = make([]*conf.NameServerConfig, len(nodeInfo.NameServerConfig))
-		for index, config := range nodeInfo.NameServerConfig {
-			cloned.NameServerConfig[index] = cloneMachineNameServerConfig(config)
-		}
-	}
-	if nodeInfo.REALITYConfig != nil {
-		reality := *nodeInfo.REALITYConfig
-		reality.ServerNames = cloneMachineSlice(nodeInfo.REALITYConfig.ServerNames)
-		reality.ShortIds = cloneMachineSlice(nodeInfo.REALITYConfig.ShortIds)
-		cloned.REALITYConfig = &reality
-	}
-	cloned.ServerNames = cloneMachineSlice(nodeInfo.ServerNames)
-	cloned.ShortIds = cloneMachineSlice(nodeInfo.ShortIds)
-	cloned.Hysteria2Config = cloneMachineValue(nodeInfo.Hysteria2Config)
-	if nodeInfo.AnyTLSConfig != nil {
-		anyTLS := *nodeInfo.AnyTLSConfig
-		anyTLS.PaddingScheme = cloneMachineSlice(nodeInfo.AnyTLSConfig.PaddingScheme)
-		cloned.AnyTLSConfig = &anyTLS
-	}
-	if nodeInfo.TuicConfig != nil {
-		tuic := *nodeInfo.TuicConfig
-		tuic.ALPN = cloneMachineSlice(nodeInfo.TuicConfig.ALPN)
-		cloned.TuicConfig = &tuic
-	}
-	if nodeInfo.RoutePolicy != nil {
-		policy := *nodeInfo.RoutePolicy
-		policy.DirectDomains = cloneMachineSlice(nodeInfo.RoutePolicy.DirectDomains)
-		policy.Outbound.Candidates = cloneMachineSlice(nodeInfo.RoutePolicy.Outbound.Candidates)
-		policy.Outbound.Include = cloneMachineSlice(nodeInfo.RoutePolicy.Outbound.Include)
-		policy.Outbound.Exclude = cloneMachineSlice(nodeInfo.RoutePolicy.Outbound.Exclude)
-		policy.Outbound.Fallback = cloneMachineSlice(nodeInfo.RoutePolicy.Outbound.Fallback)
-		cloned.RoutePolicy = &policy
-	}
-	cloned.XHTTPExtra = cloneMachineSlice(json.RawMessage(nodeInfo.XHTTPExtra))
-	cloned.XPaddingBytes = cloneMachineValue(nodeInfo.XPaddingBytes)
-	cloned.ScMaxEachPostBytes = cloneMachineValue(nodeInfo.ScMaxEachPostBytes)
-	cloned.ScMinPostsIntervalMs = cloneMachineValue(nodeInfo.ScMinPostsIntervalMs)
-	cloned.ScStreamUpServerSecs = cloneMachineValue(nodeInfo.ScStreamUpServerSecs)
-	cloned.XmuxMaxConcurrency = cloneMachineValue(nodeInfo.XmuxMaxConcurrency)
-	cloned.XmuxMaxConnections = cloneMachineValue(nodeInfo.XmuxMaxConnections)
-	cloned.XmuxCMaxReuseTimes = cloneMachineValue(nodeInfo.XmuxCMaxReuseTimes)
-	cloned.XmuxHMaxRequestTimes = cloneMachineValue(nodeInfo.XmuxHMaxRequestTimes)
-	cloned.XmuxHMaxReusableSecs = cloneMachineValue(nodeInfo.XmuxHMaxReusableSecs)
-	cloned.XHTTPDownloadSettings = cloneMachineSlice(json.RawMessage(nodeInfo.XHTTPDownloadSettings))
-	return &cloned
+	return appliednode.Clone(nodeInfo)
 }
