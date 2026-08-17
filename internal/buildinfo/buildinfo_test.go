@@ -80,7 +80,7 @@ func TestInfoStringIncludesTraceabilityFields(t *testing.T) {
 		Commit:    "0123456789abcdef0123456789abcdef01234567",
 		BuildTime: "2026-07-30T00:00:00Z",
 		Dirty:     "false",
-		GoVersion: "go1.26.5",
+		GoVersion: "go1.26.6",
 	}).String()
 
 	for _, value := range []string{
@@ -89,7 +89,7 @@ func TestInfoStringIncludesTraceabilityFields(t *testing.T) {
 		"commit: 0123456789abcdef0123456789abcdef01234567",
 		"build_time: 2026-07-30T00:00:00Z",
 		"dirty: false",
-		"go: go1.26.5",
+		"go: go1.26.6",
 	} {
 		if !strings.Contains(text, value) {
 			t.Fatalf("version text missing %q:\n%s", value, text)
