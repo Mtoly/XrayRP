@@ -67,7 +67,7 @@ func defaultRuntimeServiceRegistry() runtimeServiceRegistry {
 
 func (registry runtimeServiceRegistry) build(construction runtimeServiceConstruction, fallbackNodeType string) (service.Service, error) {
 	registration := registry.controllerFallback
-	nodeType := construction.apiClient.Describe().NodeType
+	nodeType := runtimeNodeType(construction.apiClient)
 	if nodeType == "" {
 		nodeType = fallbackNodeType
 	}
@@ -82,6 +82,10 @@ func (registry runtimeServiceRegistry) build(construction runtimeServiceConstruc
 		}
 	}
 	return registration.newService(construction), nil
+}
+
+func runtimeNodeType(client runtimePanelIdentityReader) string {
+	return client.Describe().NodeType
 }
 
 func (registry runtimeServiceRegistry) supportsSharedWS(nodeType string) bool {

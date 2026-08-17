@@ -2,9 +2,15 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/internal/wslifecycle"
@@ -36,6 +42,244 @@ type WSRuntimeLifecycle interface {
 }
 
 type wsRuntimeLifecycle = WSRuntimeLifecycle
+
+func (c *Controller) buildWSRuntime(ctx context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	if c.wsRuntimeFactory == nil {
+		return nil, errors.New("controller: websocket runtime factory not configured")
+	}
+	return c.wsRuntimeFactory(ctx, submitter)
+}
+
+type WSEventRuntimeFactory func(WSEventSubmitter) (WSRuntimeLifecycle, error)
+
+func (c *Controller) SetWSEventRuntimeFactory(factory WSEventRuntimeFactory) {
+	if factory == nil {
+		c.wsRuntimeFactory = c.newConfiguredWSRuntimeContext
+		return
+	}
+
+	c.wsRuntimeFactory = func(_ context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+		return factory(wsEventSubmitter{submitter: submitter})
+	}
+}
+
+type wsEventSubmitter struct {
+	submitter syncActionSubmitter
+}
+
+func (s wsEventSubmitter) SubmitWSEvent(event *newV2board.WSEvent) {
+	if s.submitter == nil {
+		return
+	}
+	action, ok := syncActionFromWSEventPayload(event, time.Now())
+	if !ok {
+		return
+	}
+	s.submitter.Submit(action)
+}
+
+func (s wsEventSubmitter) SubmitWSParseError() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(syncActionFromWSParseError(time.Now()))
+}
+
+func (s wsEventSubmitter) SubmitWSDisconnect() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(syncActionFromWSDisconnect(time.Now()))
+}
+
+func (s wsEventSubmitter) SubmitWSReconnect() {
+	if s.submitter == nil {
+		return
+	}
+	s.submitter.Submit(newSyncAction(syncActionTypeResyncAll, syncActionSourceReconnect, syncActionMetadata{
+		Trigger:    wsRuntimeReconnectTrigger,
+		OccurredAt: time.Now(),
+		Reason:     "websocket runtime reconnected",
+	}))
+}
+
+func (c *Controller) shouldStartWSRuntime() bool {
+	if c.config == nil || c.config.WebSocketConfig == nil || !c.config.WebSocketConfig.Enable {
+		return false
+	}
+	_, ok := c.apiClient.(api.WSCapable)
+	return ok
+}
+
+func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	return c.newConfiguredWSRuntimeContext(context.Background(), submitter)
+}
+
+func (c *Controller) newConfiguredWSRuntimeContext(ctx context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
+	capable, ok := c.apiClient.(api.WSCapable)
+	if !ok {
+		return nil, api.ErrUnsupportedPanelFeature
+	}
+	wsConfig := capable.GetWSConfig()
+	if wsConfig == nil {
+		return nil, errors.New("controller: websocket config unavailable")
+	}
+	endpoint, err := resolveWSEndpointContext(ctx, c.apiClient, wsConfig, c.config.WebSocketConfig)
+	if err != nil {
+		return nil, err
+	}
+	options := wsRuntimeOptions{
+		ReconnectBackoff:  time.Duration(c.config.WebSocketConfig.ReconnectBackoff) * time.Second,
+		HeartbeatInterval: time.Duration(c.config.WebSocketConfig.HeartbeatInterval) * time.Second,
+		ResyncOnReconnect: c.config.WebSocketConfig.ResyncOnReconnect,
+	}
+	factory := func(ctx context.Context) (wsRuntimeClient, error) {
+		return newV2board.NewWSClientContext(ctx, endpoint)
+	}
+	return newWSRuntime(factory, submitter, options), nil
+}
+
+func resolveWSEndpoint(apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	return resolveWSEndpointContext(context.Background(), apiClient, wsConfig, runtimeConfig)
+}
+
+func resolveWSEndpointContext(ctx context.Context, apiClient any, wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	if wsConfig == nil {
+		return "", errors.New("controller: websocket config unavailable")
+	}
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.Endpoint) != "" {
+		return BuildWSEndpoint(wsConfig, runtimeConfig)
+	}
+
+	if discoverer, ok := apiClient.(api.WSEndpointDiscoverer); ok {
+		if endpoint, err := api.DiscoverWSEndpointContext(ctx, discoverer); err == nil && strings.TrimSpace(endpoint) != "" {
+			if err := validateDiscoveredWSEndpoint(wsConfig.APIHost, endpoint); err != nil {
+				return "", err
+			}
+			derived := WebSocketConfig{}
+			if runtimeConfig != nil {
+				derived = *runtimeConfig
+			}
+			derived.Endpoint = endpoint
+			return BuildWSEndpoint(wsConfig, &derived)
+		}
+	}
+
+	return BuildWSEndpoint(wsConfig, runtimeConfig)
+}
+
+func validateDiscoveredWSEndpoint(apiHost, endpoint string) error {
+	base, err := url.Parse(strings.TrimSpace(apiHost))
+	if err != nil {
+		return fmt.Errorf("controller: parse panel api host: %w", err)
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return errors.New("controller: panel api host must be absolute")
+	}
+
+	discovered, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return fmt.Errorf("controller: parse discovered websocket endpoint: %w", err)
+	}
+	discovered = base.ResolveReference(discovered)
+
+	baseScheme, basePort, err := websocketOrigin(base)
+	if err != nil {
+		return err
+	}
+	discoveredScheme, discoveredPort, err := websocketOrigin(discovered)
+	if err != nil {
+		return err
+	}
+	if baseScheme != discoveredScheme ||
+		!strings.EqualFold(base.Hostname(), discovered.Hostname()) ||
+		basePort != discoveredPort {
+		return errors.New("controller: discovered websocket endpoint must use the panel origin")
+	}
+	return nil
+}
+
+func websocketOrigin(endpoint *url.URL) (scheme, port string, err error) {
+	switch strings.ToLower(endpoint.Scheme) {
+	case "http", "ws":
+		scheme = "ws"
+		port = endpoint.Port()
+		if port == "" {
+			port = "80"
+		}
+	case "https", "wss":
+		scheme = "wss"
+		port = endpoint.Port()
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return "", "", fmt.Errorf("controller: unsupported websocket endpoint scheme %q", endpoint.Scheme)
+	}
+	return scheme, port, nil
+}
+
+func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	return BuildWSEndpoint(wsConfig, runtimeConfig)
+}
+
+func BuildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
+	if wsConfig == nil {
+		return "", errors.New("controller: websocket config unavailable")
+	}
+
+	rawEndpoint := ""
+	if runtimeConfig != nil {
+		rawEndpoint = strings.TrimSpace(runtimeConfig.Endpoint)
+	}
+	if rawEndpoint == "" {
+		rawEndpoint = strings.TrimRight(wsConfig.APIHost, "/") + "/api/v1/server/UniProxy/ws"
+	}
+
+	parsed, err := url.Parse(rawEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("controller: parse websocket endpoint: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		base, err := url.Parse(wsConfig.APIHost)
+		if err != nil {
+			return "", fmt.Errorf("controller: parse panel api host: %w", err)
+		}
+		parsed = base.ResolveReference(parsed)
+	}
+
+	switch parsed.Scheme {
+	case "http":
+		parsed.Scheme = "ws"
+	case "https":
+		parsed.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("controller: unsupported websocket endpoint scheme %q", parsed.Scheme)
+	}
+
+	query := parsed.Query()
+	if wsConfig.MachineID > 0 {
+		query.Del("node_id")
+		query.Del("node_type")
+		if query.Get("machine_id") == "" {
+			query.Set("machine_id", strconv.Itoa(wsConfig.MachineID))
+		}
+	} else {
+		if query.Get("node_id") == "" {
+			query.Set("node_id", strconv.Itoa(wsConfig.NodeID))
+		}
+		if query.Get("node_type") == "" {
+			query.Set("node_type", wsConfig.NodeType)
+		}
+	}
+	if query.Get("token") == "" {
+		query.Set("token", wsConfig.Key)
+	}
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String(), nil
+}
 
 type contextWSRuntimeLifecycle interface {
 	StartContext(context.Context) error

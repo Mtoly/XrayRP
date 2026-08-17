@@ -108,55 +108,11 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
-	path := fmt.Sprintf("/api/node")
-	var nodeType = ""
-	switch c.NodeType {
-	case "Shadowsocks":
-		nodeType = "ss"
-	case "V2ray":
-		nodeType = "v2ray"
-	case "Trojan":
-		nodeType = "trojan"
-	default:
-		return nil, fmt.Errorf("NodeType Error: %s", c.NodeType)
-	}
-	// body := fmt.Sprintf(`{"type":"%s", "nodeId":%d}`, nodeType, c.NodeID)
-	res, err := c.client.R().
-		SetContext(ctx).
-		SetQueryParams(map[string]string{
-			"type":   nodeType,
-			"nodeId": strconv.Itoa(c.NodeID),
-		}).
-		SetResult(&Response{}).
-		ForceContentType("application/json").
-		Get(path)
-
-	response, err := c.parseResponse(res, path, err)
+	snapshot, err := c.getNodeSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	nodeInfoResponse := new(NodeInfoResponse)
-
-	if err := json.Unmarshal(response.Data, nodeInfoResponse); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(nodeInfoResponse), err)
-	}
-	switch c.NodeType {
-	case "V2ray":
-		nodeInfo, err = c.ParseV2rayNodeResponse(nodeInfoResponse)
-	case "Trojan":
-		nodeInfo, err = c.ParseTrojanNodeResponse(nodeInfoResponse)
-	case "Shadowsocks":
-		nodeInfo, err = c.ParseSSNodeResponse(nodeInfoResponse)
-	default:
-		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-	}
-
-	if err != nil {
-		return nil, panelhttp.NodeInfoParseError(err)
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // GetUserList will pull user form sspanel
@@ -372,112 +328,29 @@ func (*APIClient) ReportIllegalContext(ctx context.Context, _ *[]api.DetectResul
 
 // ParseV2rayNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *NodeInfoResponse) (*api.NodeInfo, error) {
-	var enableTLS bool
-	var path, host, transportProtocol, serviceName string
-	var speedLimit uint64 = 0
-
-	port := nodeInfoResponse.Port
-	alterID := nodeInfoResponse.AlterId
-	transportProtocol = nodeInfoResponse.Network
-	switch transportProtocol {
-	case "ws":
-		host = nodeInfoResponse.Host
-		path = nodeInfoResponse.Path
-	case "grpc":
-		serviceName = nodeInfoResponse.Sni
-	case "tcp":
-		// TODO
-	case "splithttp", "xhttp":
-		host = nodeInfoResponse.Host
-		path = nodeInfoResponse.Path
-	case "httpupgrade":
-		host = nodeInfoResponse.Host
-		path = nodeInfoResponse.Path
+	snapshot, err := c.parseV2rayNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-	// Compatible with more node types config
-	switch nodeInfoResponse.Security {
-	case "tls":
-		enableTLS = true
-	default:
-		enableTLS = false
-	}
-	if c.SpeedLimit > 0 {
-		speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedLimit = uint64((nodeInfoResponse.SpeedLimit * 1000000) / 8)
-	}
-	// Create GeneralNodeInfo
-	nodeinfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              port,
-		SpeedLimit:        speedLimit,
-		AlterID:           alterID,
-		TransportProtocol: transportProtocol,
-		EnableTLS:         enableTLS,
-		Path:              path,
-		Host:              host,
-		EnableVless:       c.EnableVless,
-		VlessFlow:         c.VlessFlow,
-		ServiceName:       serviceName,
-	}
-
-	return nodeinfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseSSNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *NodeInfoResponse) (*api.NodeInfo, error) {
-	var speedLimit uint64 = 0
-
-	if c.SpeedLimit > 0 {
-		speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedLimit = uint64((nodeInfoResponse.SpeedLimit * 1000000) / 8)
+	snapshot, err := c.parseSSNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              nodeInfoResponse.Port,
-		SpeedLimit:        speedLimit,
-		TransportProtocol: "tcp",
-		CypherMethod:      nodeInfoResponse.Method,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseTrojanNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseTrojanNodeResponse(nodeInfoResponse *NodeInfoResponse) (*api.NodeInfo, error) {
-	// 域名或IP;port=连接端口#偏移端口|host=xx
-	// gz.aaa.com;port=443#12345|host=hk.aaa.com
-	var host string
-	var transportProtocol = "tcp"
-	var speedlimit uint64 = 0
-	host = nodeInfoResponse.Host
-	port := nodeInfoResponse.Port
-
-	if c.SpeedLimit > 0 {
-		speedlimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedlimit = uint64((nodeInfoResponse.SpeedLimit * 1000000) / 8)
+	snapshot, err := c.parseTrojanNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-	if nodeInfoResponse.Grpc {
-		transportProtocol = "grpc"
-	}
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              port,
-		SpeedLimit:        speedlimit,
-		TransportProtocol: transportProtocol,
-		EnableTLS:         true,
-		Host:              host,
-		ServiceName:       nodeInfoResponse.Sni,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseUserListResponse parse the response for the given nodeinfo format

@@ -5,7 +5,51 @@ import (
 
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service"
+	log "github.com/sirupsen/logrus"
 )
+
+func (c *Controller) recordSyncExecutionResult(action syncAction, err error) {
+	if c == nil {
+		return
+	}
+	if c.syncExecutionState != nil {
+		c.syncExecutionState.Record(action, err)
+	}
+	if err != nil {
+		c.health.RecordFailure(service.FailureStageSync, time.Now())
+	} else {
+		c.health.RecordSuccessfulSync(time.Now())
+		c.refreshCertificateExpiry()
+	}
+	c.logSyncExecutionResult(action, err)
+}
+
+func (c *Controller) logSyncExecutionResult(action syncAction, err error) {
+	if c == nil {
+		return
+	}
+	if err == nil || c.logger == nil {
+		return
+	}
+
+	entry := c.logger.WithFields(log.Fields{
+		"action_type":   action.Type,
+		"action_source": action.Source,
+		"trigger":       action.Metadata.Trigger,
+	})
+	if c.showErrorDetails() {
+		entry.WithError(err).Warn("sync action failed")
+		return
+	}
+	entry.Warn("sync action failed; error details omitted because they may contain credentials")
+}
+
+func (c *Controller) syncExecutionSnapshot() syncExecutionSnapshot {
+	if c == nil || c.syncExecutionState == nil {
+		return syncExecutionSnapshot{}
+	}
+	return c.syncExecutionState.Snapshot()
+}
 
 func (c *Controller) ObservabilitySnapshot() service.RuntimeSnapshot {
 	if c == nil {

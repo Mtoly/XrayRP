@@ -23,7 +23,7 @@ const (
 )
 
 type controllerRuntimeOwnership struct {
-	nodeInfo        *api.NodeInfo
+	nodeSnapshot    *api.NodeSnapshot
 	tag             string
 	runtime         bool
 	limiter         bool
@@ -35,6 +35,158 @@ type controllerRuntimeOwnership struct {
 
 func (o controllerRuntimeOwnership) hasResources() bool {
 	return o.runtime || o.limiter || o.rules || o.periodic || o.websocket || o.syncCoordinator
+}
+
+// Start implement the Start() function of the service interface.
+func (c *Controller) Start() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
+	defer cancel()
+	return c.StartContext(ctx)
+}
+
+func (c *Controller) StartContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultStartTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := c.beginLifecycleStart(); err != nil {
+		return err
+	}
+	clientInfo := c.apiClient.Describe()
+	hooks := c.resolveSyncApplyHooks(ctx)
+	ownership := controllerRuntimeOwnership{}
+	fail := func(primary error) error {
+		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
+		defer cleanupCancel()
+		return c.failLifecycleStartContext(cleanupCtx, primary, ownership, hooks)
+	}
+
+	newNodeSnapshot, err := api.GetNodeSnapshotContext(ctx, c.apiClient)
+	if err != nil {
+		return fail(err)
+	}
+	if newNodeSnapshot == nil {
+		return fail(errors.New("controller: panel returned nil node info"))
+	}
+	if newNodeSnapshot.Port == 0 || newNodeSnapshot.Port > 65535 {
+		return fail(fmt.Errorf("invalid server port: %d, must be 1-65535", newNodeSnapshot.Port))
+	}
+	tag := c.buildNodeTagFromSnapshot(newNodeSnapshot)
+	ownership.nodeSnapshot = newNodeSnapshot.Clone()
+	ownership.tag = tag
+
+	ownership.runtime = true
+	if err := hooks.runtime.addTagForSnapshot(newNodeSnapshot, tag, c.config); err != nil {
+		return fail(err)
+	}
+
+	userInfo, err := api.GetUserListContext(ctx, c.apiClient)
+	if err != nil {
+		return fail(err)
+	}
+	if userInfo == nil {
+		return fail(errors.New("controller: panel returned nil user list"))
+	}
+	appliedUsers := cloneSlice(*userInfo)
+	userInfo = &appliedUsers
+	if err := hooks.runtime.addUsersForSnapshot(userInfo, newNodeSnapshot, tag, c.config); err != nil {
+		return fail(err)
+	}
+
+	ownership.limiter = true
+	if err := hooks.limiter.addInbound(tag, newNodeSnapshot.SpeedLimit, cloneUserList(userInfo), cloneGlobalDeviceLimitConfig(c.config.GlobalDeviceLimitConfig)); err != nil {
+		return fail(err)
+	}
+
+	var appliedRules []api.DetectRule
+	if !c.config.DisableGetRule {
+		ruleList, err := api.GetNodeRuleContext(ctx, c.apiClient)
+		if err != nil {
+			return fail(err)
+		}
+		if ruleList != nil {
+			appliedRules = cloneDetectRules(*ruleList)
+			ownership.rules = true
+			if err := hooks.updateRuleForApply(tag, appliedRules); err != nil {
+				return fail(err)
+			}
+		}
+	}
+
+	if c.config.AutoSpeedLimitConfig == nil {
+		c.config.AutoSpeedLimitConfig = &AutoSpeedLimitConfig{0, 0, 0, 0}
+	}
+
+	c.syncCoordinator = c.buildSyncCoordinator()
+	if c.syncCoordinator == nil {
+		return fail(errors.New("controller: sync coordinator not configured"))
+	}
+	ownership.syncCoordinator = true
+
+	if c.shouldStartWSRuntime() {
+		wsRuntime, err := c.buildWSRuntime(ctx, c.syncCoordinator)
+		if err != nil {
+			return fail(err)
+		}
+		c.setWSRuntime(wsRuntime)
+		ownership.websocket = true
+		if err := startWSRuntimeContext(ctx, wsRuntime); err != nil {
+			return fail(err)
+		}
+	}
+
+	ownership.periodic = true
+	if err := c.startControllerPeriodicTasksSnapshotContext(ctx, newNodeSnapshot); err != nil {
+		return fail(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+
+	candidateState := nodeRuntimeState{
+		node:        normalizeNodeSnapshot(newNodeSnapshot),
+		tag:         tag,
+		userListSet: true,
+		userList:    cloneSlice(appliedUsers),
+	}
+	if ownership.rules {
+		candidateState.appliedRuleTag = tag
+		candidateState.appliedRuleList = cloneDetectRules(appliedRules)
+	}
+	overlay := limiterUserOverlayCandidate{}
+	if c.config.AutoSpeedLimitConfig.Limit > 0 {
+		overlay.limitedUsers = make(map[api.UserInfo]LimitInfo)
+		overlay.warnedUsers = make(map[api.UserInfo]int)
+	}
+	c.lifecycleMu.Lock()
+	c.clientInfo = clientInfo
+	c.lifecycleMu.Unlock()
+	c.commitRuntimeStateWithUserOverlay(candidateState, overlay)
+	c.publishLifecycleRunning(ownership)
+	c.health.RecordSuccessfulSync(time.Now())
+	c.refreshCertificateExpiry()
+	return nil
+}
+
+// Close implement the Close() function of the service interface.
+func (c *Controller) Close() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
+	defer cancel()
+	return c.CloseContext(ctx)
+}
+
+func (c *Controller) CloseContext(parent context.Context) error {
+	ctx, cancel := service.WithDefaultTimeout(parent, service.DefaultCloseTimeout)
+	defer cancel()
+	ownership, shouldCleanup, err := c.beginLifecycleClose()
+	if err != nil || !shouldCleanup {
+		return err
+	}
+	hooks := c.resolveSyncApplyHooks(ctx)
+	closeErr := c.cleanupControllerOwnershipContext(ctx, &ownership, hooks)
+	c.finishLifecycleClose(ownership, closeErr)
+	return closeErr
 }
 
 func (c *Controller) beginLifecycleStart() error {
@@ -176,7 +328,7 @@ func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, owne
 		}
 	}
 	if ownership.rules {
-		if err := hooks.updateRule(ownership.tag, nil); err != nil {
+		if err := hooks.updateRuleForApply(ownership.tag, nil); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete controller rules: %w", err))
 		} else {
 			ownership.rules = false
@@ -191,7 +343,7 @@ func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, owne
 	}
 	if ownership.runtime {
 		apply := nodeRuntimeStateApplyModule{controller: c, ctx: ctx, hooks: hooks}
-		if err := apply.cleanupRuntimeTag(ownership.nodeInfo, ownership.tag); err != nil {
+		if err := apply.cleanupRuntimeTagSnapshot(ownership.nodeSnapshot, ownership.tag); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete controller runtime: %w", err))
 		} else {
 			ownership.runtime = false

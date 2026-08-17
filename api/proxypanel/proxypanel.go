@@ -117,44 +117,11 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
-	var path string
-	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless":
-		path = fmt.Sprintf("/api/v2ray/v1/node/%d", c.NodeID)
-	case "Trojan":
-		path = fmt.Sprintf("/api/trojan/v1/node/%d", c.NodeID)
-	case "Shadowsocks":
-		path = fmt.Sprintf("/api/ss/v1/node/%d", c.NodeID)
-	default:
-		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-	}
-
-	res, err := c.createCommonRequestContext(ctx).
-		SetResult(&Response{}).
-		ForceContentType("application/json").
-		Get(path)
-
-	response, err := c.parseResponse(res, path, err)
+	snapshot, err := c.getNodeSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless":
-		nodeInfo, err = c.ParseV2rayNodeResponse(&response.Data)
-	case "Trojan":
-		nodeInfo, err = c.ParseTrojanNodeResponse(&response.Data)
-	case "Shadowsocks":
-		nodeInfo, err = c.ParseSSNodeResponse(&response.Data)
-	default:
-		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-	}
-
-	if err != nil {
-		return nil, panelhttp.NodeInfoParseError(err)
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // GetUserList will pull user form sspanel
@@ -426,100 +393,29 @@ func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *
 
 // ParseV2rayNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseV2rayNodeResponse(nodeInfoResponse *json.RawMessage) (*api.NodeInfo, error) {
-	var speedLimit uint64 = 0
-
-	v2rayNodeInfo := new(V2rayNodeInfo)
-	if err := json.Unmarshal(*nodeInfoResponse, v2rayNodeInfo); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(*nodeInfoResponse), err)
+	snapshot, err := c.parseV2rayNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-
-	if c.SpeedLimit > 0 {
-		speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedLimit = (v2rayNodeInfo.SpeedLimit * 1000000) / 8
-	}
-
-	if c.DeviceLimit == 0 && v2rayNodeInfo.ClientLimit > 0 {
-		c.DeviceLimit = v2rayNodeInfo.ClientLimit
-	}
-
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              v2rayNodeInfo.V2Port,
-		SpeedLimit:        speedLimit,
-		AlterID:           v2rayNodeInfo.V2AlterID,
-		TransportProtocol: v2rayNodeInfo.V2Net,
-		FakeType:          v2rayNodeInfo.V2Type,
-		EnableTLS:         v2rayNodeInfo.V2TLS,
-		Path:              v2rayNodeInfo.V2Path,
-		Host:              v2rayNodeInfo.V2Host,
-		EnableVless:       c.EnableVless,
-		VlessFlow:         c.VlessFlow,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseSSNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseSSNodeResponse(nodeInfoResponse *json.RawMessage) (*api.NodeInfo, error) {
-	var speedLimit uint64 = 0
-	shadowsocksNodeInfo := new(ShadowsocksNodeInfo)
-	if err := json.Unmarshal(*nodeInfoResponse, shadowsocksNodeInfo); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(*nodeInfoResponse), err)
+	snapshot, err := c.parseSSNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-	if c.SpeedLimit > 0 {
-		speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedLimit = uint64((shadowsocksNodeInfo.SpeedLimit * 1000000) / 8)
-	}
-
-	if c.DeviceLimit == 0 && shadowsocksNodeInfo.ClientLimit > 0 {
-		c.DeviceLimit = shadowsocksNodeInfo.ClientLimit
-	}
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              shadowsocksNodeInfo.Port,
-		SpeedLimit:        speedLimit,
-		TransportProtocol: "tcp",
-		CypherMethod:      shadowsocksNodeInfo.Method,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseTrojanNodeResponse parse the response for the given nodeinfor format
 func (c *APIClient) ParseTrojanNodeResponse(nodeInfoResponse *json.RawMessage) (*api.NodeInfo, error) {
-	var speedLimit uint64 = 0
-
-	trojanNodeInfo := new(TrojanNodeInfo)
-	if err := json.Unmarshal(*nodeInfoResponse, trojanNodeInfo); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(*nodeInfoResponse), err)
+	snapshot, err := c.parseTrojanNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-	if c.SpeedLimit > 0 {
-		speedLimit = uint64((c.SpeedLimit * 1000000) / 8)
-	} else {
-		speedLimit = (trojanNodeInfo.SpeedLimit * 1000000) / 8
-	}
-
-	if c.DeviceLimit == 0 && trojanNodeInfo.ClientLimit > 0 {
-		c.DeviceLimit = trojanNodeInfo.ClientLimit
-	}
-
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:          c.NodeType,
-		NodeID:            c.NodeID,
-		Port:              trojanNodeInfo.TrojanPort,
-		SpeedLimit:        speedLimit,
-		TransportProtocol: "tcp",
-		EnableTLS:         true,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // ParseV2rayUserListResponse parse the response for the given userinfo format

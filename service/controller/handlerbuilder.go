@@ -118,24 +118,3 @@ func (config handlerBuildConfig) snapshot() *Config {
 		REALITYConfigs:            cloneLocalREALITYConfig(config.realityConfigs),
 	}
 }
-
-func cloneFallBackConfigs(configs []*FallBackConfig) []*FallBackConfig {
-	if configs == nil {
-		return nil
-	}
-	cloned := make([]*FallBackConfig, len(configs))
-	for index, config := range configs {
-		cloned[index] = cloneValue(config)
-	}
-	return cloned
-}
-
-func cloneLocalREALITYConfig(config *REALITYConfig) *REALITYConfig {
-	if config == nil {
-		return nil
-	}
-	cloned := *config
-	cloned.ServerNames = cloneSlice(config.ServerNames)
-	cloned.ShortIds = cloneSlice(config.ShortIds)
-	return &cloned
-}

@@ -113,74 +113,11 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
-	path := fmt.Sprintf("/mod_mu/nodes/%d/info", c.NodeID)
-	res, err := c.client.R().
-		SetContext(ctx).
-		SetResult(&Response{}).
-		SetHeader("If-None-Match", c.eTags.Get("node")).
-		ForceContentType("application/json").
-		Get(path)
-	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
-		return nil, err
-	}
-	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
-	if res.StatusCode() == 304 {
-		return nil, api.ErrNodeNotModified
-	}
-	candidateETag := res.Header().Get("ETag")
-
-	response, err := c.parseResponse(res, path, err)
+	snapshot, err := c.GetNodeSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	nodeInfoResponse := new(NodeInfoResponse)
-
-	if err := json.Unmarshal(response.Data, nodeInfoResponse); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(nodeInfoResponse), err)
-	}
-
-	// determine ssPanel version, if disable custom config or version < 2021.11, then use old api
-	candidateVersion := nodeInfoResponse.Version
-	var isExpired bool
-	if compareVersion(candidateVersion, "2021.11") == -1 {
-		isExpired = true
-	}
-
-	if c.DisableCustomConfig || isExpired {
-		if isExpired {
-			log.Print("The panel version is expired, it is recommended to update immediately")
-		}
-
-		switch c.NodeType {
-		case "V2ray":
-			nodeInfo, err = c.ParseV2rayNodeResponse(nodeInfoResponse)
-		case "Trojan":
-			nodeInfo, err = c.ParseTrojanNodeResponse(nodeInfoResponse)
-		case "Shadowsocks":
-			nodeInfo, err = c.ParseSSNodeResponseContext(ctx, nodeInfoResponse)
-		case "Shadowsocks-Plugin":
-			nodeInfo, err = c.ParseSSPluginNodeResponse(nodeInfoResponse)
-		default:
-			return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-		}
-	} else {
-		nodeInfo, err = c.ParseSSPanelNodeInfo(nodeInfoResponse)
-		if err != nil {
-			return nil, panelhttp.NodeInfoParseError(err)
-		}
-	}
-
-	if err != nil {
-		return nil, panelhttp.NodeInfoParseError(err)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c.version = candidateVersion
-	c.eTags.Publish("node", candidateETag)
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // GetXrayRCertConfig fetches optional global certificate configuration

@@ -3,7 +3,6 @@ package panel
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -13,22 +12,24 @@ import (
 )
 
 type machineAppliedNodeValue struct {
-	nodeInfo    *api.NodeInfo
-	userList    *[]api.UserInfo
-	ruleList    *[]api.DetectRule
-	nodeSet     bool
-	userListSet bool
-	ruleListSet bool
+	nodeSnapshot *api.NodeSnapshot
+	nodeInfo     *api.NodeInfo
+	userList     *[]api.UserInfo
+	ruleList     *[]api.DetectRule
+	nodeSet      bool
+	userListSet  bool
+	ruleListSet  bool
 }
 
 func (value machineAppliedNodeValue) clone() machineAppliedNodeValue {
 	return machineAppliedNodeValue{
-		nodeInfo:    cloneMachineNodeInfo(value.nodeInfo),
-		userList:    cloneMachineUserList(value.userList),
-		ruleList:    cloneMachineRuleList(value.ruleList),
-		nodeSet:     value.nodeSet,
-		userListSet: value.userListSet,
-		ruleListSet: value.ruleListSet,
+		nodeSnapshot: cloneMachineNodeSnapshot(value.nodeSnapshot),
+		nodeInfo:     cloneMachineNodeInfo(value.nodeInfo),
+		userList:     cloneMachineUserList(value.userList),
+		ruleList:     cloneMachineRuleList(value.ruleList),
+		nodeSet:      value.nodeSet,
+		userListSet:  value.userListSet,
+		ruleListSet:  value.ruleListSet,
 	}
 }
 
@@ -68,29 +69,52 @@ func (c *machineAppliedPanelClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *machineAppliedPanelClient) GetNodeInfoContext(ctx context.Context) (*api.NodeInfo, error) {
+	snapshot, err := c.GetNodeSnapshotContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.ToNodeInfo(), nil
+}
+
+func (c *machineAppliedPanelClient) GetNodeSnapshot() (*api.NodeSnapshot, error) {
+	return c.GetNodeSnapshotContext(context.Background())
+}
+
+func (c *machineAppliedPanelClient) GetNodeSnapshotContext(ctx context.Context) (*api.NodeSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
 	if c.seedNodePending {
 		c.seedNodePending = false
-		nodeInfo := cloneMachineNodeInfo(c.seed.nodeInfo)
-		c.captured.nodeInfo = cloneMachineNodeInfo(nodeInfo)
-		c.captured.nodeSet = true
+		snapshot := cloneMachineNodeSnapshot(c.seed.nodeSnapshot)
+		if snapshot == nil {
+			snapshot = api.NormalizeNodeInfo(c.seed.nodeInfo)
+		}
+		c.captureNodeSnapshotLocked(snapshot)
 		c.mu.Unlock()
-		return nodeInfo, nil
+		return snapshot.Clone(), nil
 	}
 	c.mu.Unlock()
 
-	nodeInfo, err := api.GetNodeInfoContext(ctx, c.source)
+	snapshot, err := api.GetNodeSnapshotContext(ctx, c.source)
 	if err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
-	c.captured.nodeInfo = cloneMachineNodeInfo(nodeInfo)
-	c.captured.nodeSet = true
+	c.captureNodeSnapshotLocked(snapshot)
 	c.mu.Unlock()
-	return cloneMachineNodeInfo(nodeInfo), nil
+	return snapshot.Clone(), nil
+}
+
+func (c *machineAppliedPanelClient) captureNodeSnapshotLocked(snapshot *api.NodeSnapshot) {
+	owned := snapshot.Clone()
+	c.captured.nodeSnapshot = owned
+	c.captured.nodeInfo = owned.ToNodeInfo()
+	c.captured.nodeSet = owned != nil
 }
 
 func (c *machineAppliedPanelClient) GetUserList() (*[]api.UserInfo, error) {
@@ -183,6 +207,7 @@ func (c *machineAppliedPanelClient) RecordSnapshotSyncApplied(scope service.Snap
 		return
 	}
 	if scope.Includes(service.SnapshotSyncNode) && c.captured.nodeSet {
+		c.applied.nodeSnapshot = cloneMachineNodeSnapshot(c.captured.nodeSnapshot)
 		c.applied.nodeInfo = cloneMachineNodeInfo(c.captured.nodeInfo)
 		c.applied.nodeSet = true
 	}
@@ -346,9 +371,7 @@ func newMachineRuntimeNodeService(
 	if seed != nil {
 		value := seed.clone()
 		runtime.appliedValue = &value
-		if cloned, err := cloneControllerConfig(controllerConfig); err == nil {
-			runtime.appliedConfig = cloned
-		}
+		runtime.appliedConfig = controllerConfig.Clone()
 	}
 	return runtime
 }
@@ -383,13 +406,7 @@ func (s *machineRuntimeNodeService) StartContext(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(err, s.cleanupUnpublishedContext(ctx))
 	}
-	config, err := cloneControllerConfig(s.controllerConfig)
-	if err != nil {
-		return errors.Join(
-			fmt.Errorf("clone applied machine controller config: %w", err),
-			s.cleanupUnpublishedContext(ctx),
-		)
-	}
+	config := s.controllerConfig.Clone()
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, s.cleanupUnpublishedContext(ctx))
 	}
@@ -448,11 +465,8 @@ func (s *machineRuntimeNodeService) RestoreMachineRuntime() (service.Service, er
 		s.mu.Unlock()
 		return nil, errors.Join(errors.New("machine runtime applied node value is unavailable"), valueErr)
 	}
-	config, err := cloneControllerConfig(s.appliedConfig)
+	config := s.appliedConfig.Clone()
 	s.mu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("clone machine rollback controller config: %w", err)
-	}
 	return s.restore(value, config)
 }
 
@@ -480,4 +494,8 @@ func cloneMachineRuleList(rules *[]api.DetectRule) *[]api.DetectRule {
 
 func cloneMachineNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
 	return appliednode.Clone(nodeInfo)
+}
+
+func cloneMachineNodeSnapshot(snapshot *api.NodeSnapshot) *api.NodeSnapshot {
+	return snapshot.Clone()
 }

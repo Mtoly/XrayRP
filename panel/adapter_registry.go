@@ -2,6 +2,7 @@ package panel
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -14,18 +15,37 @@ import (
 	"github.com/Mtoly/XrayRP/api/v2raysocks"
 )
 
-type runtimePanelClient interface {
+type runtimePanelIdentityReader interface {
 	Describe() api.ClientInfo
+}
+
+type runtimePanelSnapshotReader interface {
 	GetNodeInfo() (*api.NodeInfo, error)
 	GetUserList() (*[]api.UserInfo, error)
 	GetNodeRule() (*[]api.DetectRule, error)
+}
+
+type runtimePanelReporter interface {
 	ReportNodeStatus(*api.NodeStatus) error
 	ReportNodeOnlineUsers(*[]api.OnlineUser) error
 	ReportUserTraffic(*[]api.UserTraffic) error
 	ReportIllegal(*[]api.DetectResult) error
 }
 
+type runtimePanelClient interface {
+	runtimePanelIdentityReader
+	runtimePanelSnapshotReader
+	runtimePanelReporter
+}
+
 type panelClientFactory func(*api.Config) runtimePanelClient
+
+type machineAdapter interface {
+	DiscoverMachineNodes() (*api.MachineNodesResponse, error)
+	ReportMachineStatus(api.MachineStatus) error
+}
+
+type machineAdapterFactory func(*api.Config) (machineAdapter, error)
 
 type panelAdapterRegistration struct {
 	aliases     []string
@@ -103,6 +123,41 @@ func (registry panelAdapterRegistry) machineFactory(panelType string) (panelClie
 		return registration.newClient, nil
 	}
 	return nil, fmt.Errorf("unsupported panel type for machine mode: %s", panelType)
+}
+
+func (registry panelAdapterRegistry) machineAdapterFactory(panelType string) (machineAdapterFactory, error) {
+	normalizedPanelType := strings.TrimSpace(panelType)
+	if normalizedPanelType == "" {
+		return nil, fmt.Errorf("machine mode PanelType must not be empty")
+	}
+	if registration, ok := registry.lookup(normalizedPanelType); ok && registration.machineMode {
+		newClient := registration.newClient
+		return func(config *api.Config) (machineAdapter, error) {
+			client := newClient(config)
+			adapter, ok := client.(machineAdapter)
+			if !ok {
+				return nil, fmt.Errorf("panel adapter %s does not implement machine capabilities", normalizedPanelType)
+			}
+			if isNilMachineAdapter(adapter) {
+				return nil, fmt.Errorf("panel adapter %s returned nil machine adapter", normalizedPanelType)
+			}
+			return adapter, nil
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported panel type for machine mode: %s", panelType)
+}
+
+func isNilMachineAdapter(adapter machineAdapter) bool {
+	if adapter == nil {
+		return true
+	}
+	value := reflect.ValueOf(adapter)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (registry panelAdapterRegistry) lookup(panelType string) (panelAdapterRegistration, bool) {

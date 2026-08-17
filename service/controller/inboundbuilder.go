@@ -25,7 +25,11 @@ import (
 // provide api.NodeInfo. Internal controller paths call buildInboundWithUsers
 // with the focused listener view.
 func InboundBuilderWithUsers(config *Config, nodeInfo *api.NodeInfo, tag string, userInfo *[]api.UserInfo) (*core.InboundHandlerConfig, error) {
-	return buildInboundWithUsers(config, normalizeNodeInfo(nodeInfo).inboundView().listener, tag, userInfo)
+	return buildInboundWithUsersFromSnapshot(config, api.NormalizeNodeInfo(nodeInfo), tag, userInfo)
+}
+
+func buildInboundWithUsersFromSnapshot(config *Config, snapshot *api.NodeSnapshot, tag string, userInfo *[]api.UserInfo) (*core.InboundHandlerConfig, error) {
+	return buildInboundWithUsers(config, inboundViewFromSnapshot(snapshot).listener, tag, userInfo)
 }
 
 func buildInboundWithUsers(config *Config, node inboundListenerView, tag string, userInfo *[]api.UserInfo) (*core.InboundHandlerConfig, error) {
@@ -127,7 +131,11 @@ func buildInboundWithUsers(config *Config, node inboundListenerView, tag string,
 // InboundBuilder is the compatibility adapter for callers that still provide
 // api.NodeInfo. Internal controller paths call buildInbound with a focused view.
 func InboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
-	return buildInbound(config, normalizeNodeInfo(nodeInfo).inboundView(), tag)
+	return buildInboundFromSnapshot(config, api.NormalizeNodeInfo(nodeInfo), tag)
+}
+
+func buildInboundFromSnapshot(config *Config, snapshot *api.NodeSnapshot, tag string) (*core.InboundHandlerConfig, error) {
+	return buildInbound(config, inboundViewFromSnapshot(snapshot), tag)
 }
 
 func buildInbound(config *Config, node inboundNodeView, tag string) (*core.InboundHandlerConfig, error) {

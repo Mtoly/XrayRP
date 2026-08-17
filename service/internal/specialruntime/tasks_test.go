@@ -86,15 +86,14 @@ func TestTasksStartFailureRollsBackInOwnershipOrder(t *testing.T) {
 	wantEvents := []string{
 		"start:first", "start:second",
 		"stop:second", "stop:first",
-		"runtime-stop", "runtime-join",
-		"wait:second", "wait:first",
+		"runtime-stop", "wait:second", "wait:first", "runtime-join",
 	}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
 }
 
-func TestTasksRollbackJoinsRuntimeBeforeTaskWaiters(t *testing.T) {
+func TestTasksRollbackWaitsForTaskWaitersBeforeJoiningRuntime(t *testing.T) {
 	events := []string{}
 	tasks := NewTasks()
 	tasks.Add(&recordingTask{name: "first", events: &events})
@@ -108,8 +107,8 @@ func TestTasksRollbackJoinsRuntimeBeforeTaskWaiters(t *testing.T) {
 		t.Fatalf("Rollback() error = %v", err)
 	}
 	want := []string{
-		"stop:second", "stop:first", "runtime-stop", "runtime-join",
-		"wait:second", "wait:first",
+		"stop:second", "stop:first", "runtime-stop",
+		"wait:second", "wait:first", "runtime-join",
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)

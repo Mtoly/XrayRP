@@ -38,8 +38,9 @@ func TestFetchSyncApplySnapshotUsesCurrentStateForWrappedNotModifiedErrors(t *te
 			},
 			action: newSyncAction(syncActionTypeSyncNodeConfig, syncActionSourcePolling, syncActionMetadata{}),
 			assert: func(t *testing.T, snapshot syncApplySnapshot) {
-				if snapshot.NodeInfo == currentNode || !reflect.DeepEqual(snapshot.NodeInfo, currentNode) {
-					t.Fatalf("expected an owned copy of current node state, got %#v", snapshot.NodeInfo)
+				want := api.NormalizeNodeInfo(currentNode)
+				if snapshot.NodeSnapshot == want || !reflect.DeepEqual(snapshot.NodeSnapshot, want) {
+					t.Fatalf("expected an owned normalized copy of current node state, got %#v", snapshot.NodeSnapshot)
 				}
 			},
 		},

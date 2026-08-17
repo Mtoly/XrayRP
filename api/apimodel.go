@@ -86,6 +86,27 @@ type PanelRoutePolicy struct {
 	Outbound        OutboundFilterPolicy
 }
 
+// NameServerSnapshot is the panel-owned, runtime-neutral representation of a
+// DNS server entry. Runtime builders convert it to the backend-specific DNS
+// configuration type at the point where a backend is selected.
+type NameServerSnapshot struct {
+	Address         string
+	ClientIP        string
+	Port            uint16
+	SkipFallback    bool
+	Domains         []string
+	ExpectedIPs     []string
+	ExpectIPs       []string
+	QueryStrategy   string
+	Tag             string
+	TimeoutMs       uint64
+	DisableCache    *bool
+	ServeStale      *bool
+	ServeExpiredTTL *uint32
+	FinalQuery      bool
+	UnexpectedIPs   []string
+}
+
 type NodeInfo struct {
 	AcceptProxyProtocol bool
 	Authority           string
@@ -112,27 +133,30 @@ type NodeInfo struct {
 	HttpHeaders         map[string]*conf.StringList
 	Headers             map[string]string
 	NameServerConfig    []*conf.NameServerConfig
-	EnableREALITY       bool
-	REALITYConfig       *REALITYConfig
-	Show                bool
-	EnableTFO           bool
-	Dest                string
-	ProxyProtocolVer    uint64
-	ServerNames         []string
-	PrivateKey          string
-	MinClientVer        string
-	MaxClientVer        string
-	MaxTimeDiff         uint64
-	ShortIds            []string
-	Xver                uint64
-	Flow                string
-	Security            string
-	Key                 string
-	RejectUnknownSni    bool
-	Hysteria2Config     *Hysteria2Config
-	AnyTLSConfig        *AnyTLSConfig
-	TuicConfig          *TuicConfig
-	RoutePolicy         *PanelRoutePolicy
+	// NameServers is the normalized DNS representation. NameServerConfig is
+	// retained for compatibility with callers that consume Xray config values.
+	NameServers      []*NameServerSnapshot
+	EnableREALITY    bool
+	REALITYConfig    *REALITYConfig
+	Show             bool
+	EnableTFO        bool
+	Dest             string
+	ProxyProtocolVer uint64
+	ServerNames      []string
+	PrivateKey       string
+	MinClientVer     string
+	MaxClientVer     string
+	MaxTimeDiff      uint64
+	ShortIds         []string
+	Xver             uint64
+	Flow             string
+	Security         string
+	Key              string
+	RejectUnknownSni bool
+	Hysteria2Config  *Hysteria2Config
+	AnyTLSConfig     *AnyTLSConfig
+	TuicConfig       *TuicConfig
+	RoutePolicy      *PanelRoutePolicy
 
 	// XHTTP (SplitHTTP) bypass CDN fields — new in Xray-core v26.2+
 	XHTTPMode             string          // auto, packet-up, stream-up, stream-one

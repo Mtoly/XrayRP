@@ -185,8 +185,23 @@ func TestRuntimeServiceRegistryHasUniqueAliasesAndFactories(t *testing.T) {
 	}
 }
 
+func TestRuntimeNodeTypeUsesIdentityOnlySeam(t *testing.T) {
+	client := runtimeIdentityOnly{nodeType: "Tuic"}
+	if got := runtimeNodeType(client); got != "Tuic" {
+		t.Fatalf("runtimeNodeType() = %q, want %q", got, "Tuic")
+	}
+}
+
 type runtimeRegistryTestAPI struct {
 	clientInfo api.ClientInfo
+}
+
+type runtimeIdentityOnly struct {
+	nodeType string
+}
+
+func (c runtimeIdentityOnly) Describe() api.ClientInfo {
+	return api.ClientInfo{NodeType: c.nodeType}
 }
 
 func (a *runtimeRegistryTestAPI) Describe() api.ClientInfo { return a.clientInfo }

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/xtls/xray-core/common/protocol"
@@ -9,6 +10,43 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 )
+
+func TestRuntimeBuildersPreserveCompatibilityAndSnapshotInputs(t *testing.T) {
+	nodeInfo := &api.NodeInfo{
+		NodeType:          "Vless",
+		Port:              443,
+		TransportProtocol: "ws",
+		EnableTLS:         true,
+		EnableVless:       true,
+		Host:              "edge.example.test",
+		Path:              "/socket",
+	}
+	config := &Config{SendIP: "0.0.0.0"}
+
+	legacyInbound, err := InboundBuilder(config, nodeInfo, "inbound-tag")
+	if err != nil {
+		t.Fatalf("InboundBuilder() error = %v", err)
+	}
+	snapshotInbound, err := buildInboundFromSnapshot(config, api.NormalizeNodeInfo(nodeInfo), "inbound-tag")
+	if err != nil {
+		t.Fatalf("buildInboundFromSnapshot() error = %v", err)
+	}
+	if !reflect.DeepEqual(legacyInbound, snapshotInbound) {
+		t.Fatalf("legacy and normalized inbound builds differ:\nlegacy=%#v\nnormalized=%#v", legacyInbound, snapshotInbound)
+	}
+
+	legacyOutbound, err := OutboundBuilder(config, nodeInfo, "outbound-tag")
+	if err != nil {
+		t.Fatalf("OutboundBuilder() error = %v", err)
+	}
+	snapshotOutbound, err := buildOutboundFromSnapshot(config, api.NormalizeNodeInfo(nodeInfo), "outbound-tag")
+	if err != nil {
+		t.Fatalf("buildOutboundFromSnapshot() error = %v", err)
+	}
+	if !reflect.DeepEqual(legacyOutbound, snapshotOutbound) {
+		t.Fatalf("legacy and normalized outbound builds differ:\nlegacy=%#v\nnormalized=%#v", legacyOutbound, snapshotOutbound)
+	}
+}
 
 type focusedInboundBuilderContract func(*Config, inboundNodeView, string) (*core.InboundHandlerConfig, error)
 type focusedEmbeddedUsersInboundBuilderContract func(*Config, inboundListenerView, string, *[]api.UserInfo) (*core.InboundHandlerConfig, error)

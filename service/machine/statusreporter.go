@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/api/newV2board"
 )
 
 type NodeStatusReporter interface {
@@ -36,15 +35,27 @@ type DeviceReporterReadiness interface {
 	DeviceReporterReady() bool
 }
 
-type PanelClient interface {
+type panelIdentityReader interface {
 	Describe() api.ClientInfo
+}
+
+type panelSnapshotReader interface {
 	GetNodeInfo() (*api.NodeInfo, error)
 	GetUserList() (*[]api.UserInfo, error)
 	GetNodeRule() (*[]api.DetectRule, error)
+}
+
+type panelReporter interface {
 	ReportNodeStatus(*api.NodeStatus) error
 	ReportNodeOnlineUsers(*[]api.OnlineUser) error
 	ReportUserTraffic(*[]api.UserTraffic) error
 	ReportIllegal(*[]api.DetectResult) error
+}
+
+type PanelClient interface {
+	panelIdentityReader
+	panelSnapshotReader
+	panelReporter
 }
 
 type machinePanelClient interface {
@@ -55,8 +66,6 @@ type machinePanelClient interface {
 	api.CertConfigProvider
 	api.AliveListProvider
 }
-
-var _ machinePanelClient = (*newV2board.APIClient)(nil)
 
 func requireMachinePanelClient(client PanelClient) (machinePanelClient, error) {
 	if client == nil || isNilPanelClient(client) {

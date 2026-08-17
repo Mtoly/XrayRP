@@ -66,6 +66,57 @@ func TestDiscoverMachineNodesPostsMachineCredentials(t *testing.T) {
 	}
 }
 
+func TestAPIClientExposesMachineAdapterCapabilities(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case machineNodesPath:
+			_, _ = w.Write([]byte(`{"nodes":[{"id":11,"type":"vless","name":"primary"}]}`))
+		case machineStatusPath:
+			_, _ = w.Write([]byte(`{"data":true}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{
+		APIHost:   server.URL,
+		MachineID: 7,
+		Key:       "machine-token",
+		Timeout:   3,
+	})
+	if got := client.machineDiscoveryConfig().Timeout; got != 3*time.Second {
+		t.Fatalf("machine adapter timeout = %v, want %v", got, 3*time.Second)
+	}
+
+	var adapter interface {
+		DiscoverMachineNodes() (*api.MachineNodesResponse, error)
+		ReportMachineStatus(api.MachineStatus) error
+	} = client
+	response, err := adapter.DiscoverMachineNodes()
+	if err != nil {
+		t.Fatalf("DiscoverMachineNodes returned error: %v", err)
+	}
+	if len(response.Nodes) != 1 || response.Nodes[0].Type != "Vless" {
+		t.Fatalf("unexpected machine discovery response: %#v", response)
+	}
+	if err := adapter.ReportMachineStatus(api.MachineStatus{CPU: 12.5}); err != nil {
+		t.Fatalf("ReportMachineStatus returned error: %v", err)
+	}
+
+	if got := <-requests; got != machineNodesPath {
+		t.Fatalf("first request path = %q, want %q", got, machineNodesPath)
+	}
+	if got := <-requests; got != machineStatusPath {
+		t.Fatalf("second request path = %q, want %q", got, machineStatusPath)
+	}
+}
+
 func TestDiscoverMachineNodesNormalizesMachineNodeTypes(t *testing.T) {
 	t.Parallel()
 

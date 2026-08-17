@@ -21,6 +21,13 @@ type contextSyncCoordinatorLifecycle interface {
 	StopContext(context.Context) error
 }
 
+func (c *Controller) buildSyncCoordinator() syncCoordinatorLifecycle {
+	if c.syncCoordinatorFactory == nil {
+		return nil
+	}
+	return c.syncCoordinatorFactory(c)
+}
+
 func stopSyncCoordinatorContext(ctx context.Context, coordinator syncCoordinatorLifecycle) error {
 	if coordinator == nil {
 		return nil

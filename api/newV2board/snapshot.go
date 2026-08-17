@@ -140,12 +140,21 @@ func (s *normalizedUniProxySnapshot) rules(localRules []api.DetectRule) (*[]api.
 	return &ruleList, nil
 }
 
-func (s *normalizedUniProxySnapshot) enrichNodeInfo(nodeInfo *api.NodeInfo) {
-	if s == nil || s.raw == nil || nodeInfo == nil {
+func (s *normalizedUniProxySnapshot) enrichNodeSnapshot(snapshot *api.NodeSnapshot) {
+	if s == nil || s.raw == nil || snapshot == nil {
 		return
 	}
-	nodeInfo.NameServerConfig = s.raw.parseDNSConfig()
-	attachRoutePolicy(s.raw, nodeInfo)
+	snapshot.NameServers = s.raw.parseNormalizedDNSConfig()
+	attachRoutePolicy(s.raw, snapshot)
+}
+
+func (s *normalizedUniProxySnapshot) enrichNodeInfo(nodeInfo *api.NodeInfo) {
+	if nodeInfo == nil {
+		return
+	}
+	snapshot := api.NormalizeNodeInfo(nodeInfo)
+	s.enrichNodeSnapshot(snapshot)
+	*nodeInfo = *snapshot.ToNodeInfo()
 }
 
 func certConfigFromUniProxySnapshot(snapshot *serverConfig) *api.XrayRCertConfig {
@@ -208,7 +217,7 @@ func canonicalNodeType(nodeType string) string {
 	}
 }
 
-func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) nodeSnapshotFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeSnapshot, error) {
 	normalized := normalizeUniProxySnapshot(snapshot, c.NodeType)
 	if normalized == nil {
 		return nil, fmt.Errorf("UniProxy snapshot unavailable before deriving node info")
@@ -216,37 +225,45 @@ func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.N
 
 	nodeType := normalized.nodeType
 	var (
-		nodeInfo *api.NodeInfo
-		err      error
+		nodeSnapshot *api.NodeSnapshot
+		err          error
 	)
 
 	snapshot = normalized.raw
 	switch nodeType {
 	case "V2ray", "Vmess", "Vless":
-		nodeInfo, err = c.parseV2rayNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseV2rayNodeSnapshotResponse(snapshot)
 	case "Trojan":
-		nodeInfo, err = c.parseTrojanNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseTrojanNodeSnapshotResponse(snapshot)
 	case "Shadowsocks":
-		nodeInfo, err = c.parseSSNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseSSNodeSnapshotResponse(snapshot)
 	case "Hysteria2":
-		nodeInfo, err = c.parseHysteria2NodeResponse(snapshot)
+		nodeSnapshot, err = c.parseHysteria2NodeSnapshotResponse(snapshot)
 	case "Tuic":
-		nodeInfo, err = c.parseTuicNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseTuicNodeSnapshotResponse(snapshot)
 	case "AnyTLS":
-		nodeInfo, err = c.parseAnyTLSNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseAnyTLSNodeSnapshotResponse(snapshot)
 	case "Socks":
-		nodeInfo, err = c.parseSocksNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseSocksNodeSnapshotResponse(snapshot)
 	case "HTTP":
-		nodeInfo, err = c.parseHTTPNodeResponse(snapshot)
+		nodeSnapshot, err = c.parseHTTPNodeSnapshotResponse(snapshot)
 	default:
 		return nil, nodeInfoUnsupportedTypeError(c.NodeType)
 	}
 	if err != nil {
 		return nil, err
 	}
-	nodeInfo.NodeType = nodeType
-	normalized.enrichNodeInfo(nodeInfo)
-	return nodeInfo, nil
+	nodeSnapshot.NodeType = nodeType
+	normalized.enrichNodeSnapshot(nodeSnapshot)
+	return nodeSnapshot, nil
+}
+
+func (c *APIClient) nodeInfoFromUniProxySnapshot(snapshot *serverConfig) (*api.NodeInfo, error) {
+	nodeSnapshot, err := c.nodeSnapshotFromUniProxySnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return nodeSnapshot.ToNodeInfo(), nil
 }
 
 func (c *APIClient) fetchUniProxySnapshot(useETag bool) (*serverConfig, error) {
@@ -292,4 +309,25 @@ func (c *APIClient) fetchUniProxySnapshotContext(ctx context.Context, useETag bo
 		c.eTags.Publish("node", candidateETag)
 	}
 	return snapshot, nil
+}
+
+// GetNodeSnapshot exposes the normalized node contract without removing the
+// legacy GetNodeInfo method used by existing runtime integrations.
+func (c *APIClient) GetNodeSnapshot() (*api.NodeSnapshot, error) {
+	return c.GetNodeSnapshotContext(context.Background())
+}
+
+func (c *APIClient) GetNodeSnapshotContext(ctx context.Context) (*api.NodeSnapshot, error) {
+	server, err := c.fetchUniProxySnapshotContext(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if server.ServerPort == 0 {
+		return nil, fmt.Errorf("server port must > 0")
+	}
+	nodeSnapshot, err := c.nodeSnapshotFromUniProxySnapshot(server)
+	if err != nil {
+		return nil, fmt.Errorf("parse node snapshot failed: %w", err)
+	}
+	return nodeSnapshot, nil
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
+	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
@@ -252,6 +253,9 @@ func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	if plan.machineNewAPIClient == nil {
 		t.Fatal("expected machine plan to retain its validated adapter factory")
 	}
+	if plan.machineAdapterFactory == nil {
+		t.Fatal("expected machine plan to retain its machine capability factory")
+	}
 	if plan.machineConfig.ApiHost != config.MachineConfig.ApiHost ||
 		plan.machineConfig.MachineID != config.MachineConfig.MachineID ||
 		plan.machineConfig.Token != config.MachineConfig.Token {
@@ -262,6 +266,43 @@ func TestBuildRuntimeConfigPlanSelectsMachineMode(t *testing.T) {
 	}
 	if !plan.showErrorDetails {
 		t.Fatal("expected ShowErrorDetails to be carried into runtime plan")
+	}
+}
+
+func TestBuildRuntimeConfigPlanMachineAdapterFactoryUsesControlConfig(t *testing.T) {
+	config := validMachineModeConfig()
+	plan, err := buildRuntimeConfigPlan(config)
+	if err != nil {
+		t.Fatalf("build runtime config plan: %v", err)
+	}
+
+	controlConfig := plan.machineControlAPIConfig()
+	if controlConfig.APIHost != config.MachineConfig.ApiHost ||
+		controlConfig.MachineID != config.MachineConfig.MachineID ||
+		controlConfig.Key != config.MachineConfig.Token ||
+		controlConfig.Timeout != config.MachineConfig.Timeout {
+		t.Fatalf("unexpected machine control API config: %#v", controlConfig)
+	}
+	if controlConfig.NodeID != 0 || controlConfig.NodeType != "" {
+		t.Fatalf("machine control API config should not carry node identity: %#v", controlConfig)
+	}
+
+	adapter, err := plan.machineAdapterFactory(controlConfig)
+	if err != nil {
+		t.Fatalf("create machine adapter from plan: %v", err)
+	}
+	if _, ok := adapter.(machineAdapter); !ok {
+		t.Fatalf("machine adapter does not satisfy neutral capability: %T", adapter)
+	}
+}
+
+func TestBuildRuntimeConfigPlanPreservesUnsupportedMachinePanelError(t *testing.T) {
+	config := validMachineModeConfig()
+	config.MachineConfig.PanelType = "SSPanel"
+
+	_, err := buildRuntimeConfigPlan(config)
+	if err == nil || err.Error() != "unsupported panel type for machine mode: SSPanel" {
+		t.Fatalf("error = %v, want unsupported machine panel sentinel", err)
 	}
 }
 
@@ -359,14 +400,8 @@ func TestRuntimeConfigPlanMaterializesIndependentControllerConfigs(t *testing.T)
 		t.Fatal(err)
 	}
 
-	first, err := plan.staticNodes[0].materializeControllerConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := plan.staticNodes[0].materializeControllerConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := plan.staticNodes[0].materializeControllerConfig()
+	second := plan.staticNodes[0].materializeControllerConfig()
 	if first == second || first.WebSocketConfig == second.WebSocketConfig ||
 		first.GlobalDeviceLimitConfig == second.GlobalDeviceLimitConfig {
 		t.Fatalf("materialized configs share ownership: first=%#v second=%#v", first, second)
@@ -471,5 +506,43 @@ func TestBuildRuntimeControllerConfigIsIndependent(t *testing.T) {
 	}
 	if cfg2.GlobalDeviceLimitConfig.RedisAddr != "127.0.0.1:6379" {
 		t.Fatalf("mutating cfg1 GlobalDeviceLimitConfig changed cfg2: got %q", cfg2.GlobalDeviceLimitConfig.RedisAddr)
+	}
+}
+
+func TestBuildRuntimeControllerConfigClonesCertificateAndNestedCollections(t *testing.T) {
+	template := &controller.Config{
+		CertConfig: &mylego.CertConfig{
+			CertMode:   "dns",
+			CertDomain: "node.example.com",
+			DNSEnv:     map[string]string{"DNS_TOKEN": "source-token"},
+		},
+		AutoSpeedLimitConfig: &controller.AutoSpeedLimitConfig{Limit: 100},
+		FallBackConfigs:      []*controller.FallBackConfig{{SNI: "fallback.example.com"}},
+		REALITYConfigs: &controller.REALITYConfig{
+			ServerNames: []string{"node.example.com"},
+			ShortIds:    []string{"short-id"},
+		},
+	}
+
+	cloned, err := buildRuntimeControllerConfig(template, false)
+	if err != nil {
+		t.Fatalf("materialize controller config: %v", err)
+	}
+	if cloned.CertConfig == template.CertConfig || cloned.CertConfig.DNSEnv == nil {
+		t.Fatal("expected certificate config to be detached from template")
+	}
+	if cloned.AutoSpeedLimitConfig == template.AutoSpeedLimitConfig || cloned.FallBackConfigs[0] == template.FallBackConfigs[0] {
+		t.Fatal("expected nested pointer values to be detached from template")
+	}
+	if cloned.REALITYConfigs == template.REALITYConfigs {
+		t.Fatal("expected REALITY config to be detached from template")
+	}
+
+	cloned.CertConfig.DNSEnv["DNS_TOKEN"] = "clone-token"
+	cloned.FallBackConfigs[0].SNI = "clone.example.com"
+	cloned.REALITYConfigs.ServerNames[0] = "clone.example.com"
+
+	if template.CertConfig.DNSEnv["DNS_TOKEN"] != "source-token" || template.FallBackConfigs[0].SNI != "fallback.example.com" || template.REALITYConfigs.ServerNames[0] != "node.example.com" {
+		t.Fatalf("materialized config changed its source template: %#v", template)
 	}
 }

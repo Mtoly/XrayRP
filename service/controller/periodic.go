@@ -68,6 +68,26 @@ type controllerManagedPeriodic struct {
 	startDone       chan struct{}
 }
 
+func (c *Controller) nodeInfoMonitor() error {
+	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
+	defer cancel()
+	return c.nodeInfoMonitorContext(ctx)
+}
+
+func (c *Controller) nodeInfoMonitorContext(ctx context.Context) error {
+	// delay to start
+	if time.Since(c.startAt) < time.Duration(c.config.UpdatePeriodic)*time.Second {
+		return nil
+	}
+
+	action := syncActionFromPollingTick(time.Now())
+	if err := c.submitSyncActionContext(ctx, action); err != nil {
+		c.logger.Print(err)
+		return nil
+	}
+	return nil
+}
+
 func newControllerPeriodicTask(interval time.Duration, execute func() error) periodicRunner {
 	return newControllerPeriodicTaskContext(interval, func(context.Context) error {
 		return execute()
@@ -716,6 +736,10 @@ func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error 
 }
 
 func (c *Controller) startControllerPeriodicTasksContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
+	return c.startControllerPeriodicTasksSnapshotContext(ctx, api.NormalizeNodeInfo(nodeInfo))
+}
+
+func (c *Controller) startControllerPeriodicTasksSnapshotContext(ctx context.Context, snapshot *api.NodeSnapshot) error {
 	schedule := materializeControllerRuntimeSchedule(c.config.UpdatePeriodic, c.currentBaseConfig())
 
 	if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskNodeMonitor, schedule.pullInterval, c.nodeInfoMonitorContext, true); err != nil {
@@ -724,7 +748,7 @@ func (c *Controller) startControllerPeriodicTasksContext(ctx context.Context, no
 	if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskUserMonitor, schedule.pushInterval, c.userInfoMonitorContext, true); err != nil {
 		return err
 	}
-	if nodeInfo != nil && nodeInfo.EnableTLS && c.config.EnableREALITY == false {
+	if snapshot != nil && snapshot.EnableTLS && c.config.EnableREALITY == false {
 		if err := c.startOrReplacePeriodicTaskContext(ctx, periodicTaskCertMonitor, time.Duration(c.config.UpdatePeriodic)*time.Second*60, c.certMonitorPeriodicContext, true); err != nil {
 			return err
 		}
@@ -761,7 +785,7 @@ func (c *Controller) currentBaseConfig() *api.BaseConfig {
 	if !ok {
 		return nil
 	}
-	return provider.GetBaseConfig()
+	return cloneBaseConfig(provider.GetBaseConfig())
 }
 
 func normalizeBaseConfigInterval(seconds, min int) int {

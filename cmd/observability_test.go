@@ -166,10 +166,46 @@ func TestMetricsUseOnlyBoundedLabelsAndNeverExposeIdentifiers(t *testing.T) {
 	allowed := map[string]bool{
 		"kind": true, "mode": true, "lifecycle": true,
 		"node_slot": true, "websocket": true, "failure_stage": true,
+		"phase": true,
 	}
 	for _, match := range labelPattern.FindAllStringSubmatch(payload, -1) {
 		if !allowed[match[1]] {
 			t.Fatalf("metrics contain unbounded label %q:\n%s", match[1], payload)
+		}
+	}
+}
+
+func TestMetricsExposeBoundedReloadPhasesAndDurations(t *testing.T) {
+	payload := string(renderMetrics(service.RuntimeSnapshot{
+		Kind: service.RuntimeKindPanel,
+		Reload: service.ReloadSnapshot{
+			Phase:                    service.ReloadPhaseRollback,
+			Attempts:                 4,
+			Successes:                3,
+			Failures:                 1,
+			LastCandidateDuration:    125 * time.Millisecond,
+			LastStopDuration:         250 * time.Millisecond,
+			LastStartDuration:        500 * time.Millisecond,
+			LastCommitDuration:       75 * time.Millisecond,
+			LastRollbackDuration:     2 * time.Second,
+			LastInterruptionDuration: 3 * time.Second,
+		},
+	}, service.Readiness{Ready: true}, true))
+
+	for _, want := range []string{
+		`xrayrp_reload_phase{kind="panel",phase="rollback"} 1`,
+		`xrayrp_reload_attempts_total{kind="panel"} 4`,
+		`xrayrp_reload_successes_total{kind="panel"} 3`,
+		`xrayrp_reload_failures_total{kind="panel"} 1`,
+		`xrayrp_reload_candidate_duration_seconds{kind="panel"} 0.125`,
+		`xrayrp_reload_stop_duration_seconds{kind="panel"} 0.25`,
+		`xrayrp_reload_start_duration_seconds{kind="panel"} 0.5`,
+		`xrayrp_reload_commit_duration_seconds{kind="panel"} 0.075`,
+		`xrayrp_reload_rollback_duration_seconds{kind="panel"} 2`,
+		`xrayrp_reload_interruption_duration_seconds{kind="panel"} 3`,
+	} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, payload)
 		}
 	}
 }

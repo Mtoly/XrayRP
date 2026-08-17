@@ -119,63 +119,11 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
-	var nodeType string
-	switch strings.ToLower(c.NodeType) {
-	case "v2ray", "vmess", "vless":
-		nodeType = "v2ray"
-	case "trojan", "shadowsocks":
-		nodeType = strings.ToLower(c.NodeType)
-	default:
-		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-	}
-	configETag := c.eTags.Get("config")
-	res, err := c.client.R().
-		SetContext(ctx).
-		SetHeader("If-None-Match", configETag).
-		SetQueryParams(map[string]string{
-			"act":       "config",
-			"node_type": nodeType,
-		}).
-		ForceContentType("application/json").
-		Get(c.APIHost)
-	if err := c.httpPolicy.CheckResponse(res, "", err); err != nil {
-		return nil, err
-	}
-
-	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
-	if res.StatusCode() == 304 {
-		return nil, api.ErrNodeNotModified
-	}
-	candidateETag := res.Header().Get("Etag")
-
-	response, err := c.parseResponse(res, "", err)
+	snapshot, err := c.GetNodeSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless":
-		nodeInfo, err = c.ParseV2rayNodeResponse(response)
-	case "Trojan":
-		nodeInfo, err = c.ParseTrojanNodeResponse(response)
-	case "Shadowsocks":
-		nodeInfo, err = c.ParseSSNodeResponse(response)
-	default:
-		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("parse node info failed: %v", err)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c.access.Lock()
-	c.ConfigResp = response
-	c.eTags.Publish("config", candidateETag)
-	c.access.Unlock()
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 // GetUserList will pull user form panel

@@ -3,7 +3,6 @@ package panel
 import (
 	"strings"
 	"testing"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -143,18 +142,18 @@ func TestBuildMachineDiscoveryConfigPreservesMachineConfigFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	discoveryConfig := plan.machineDiscoveryConfig()
-	if discoveryConfig.APIHost != machineConfig.ApiHost {
-		t.Fatalf("expected APIHost %q, got %q", machineConfig.ApiHost, discoveryConfig.APIHost)
+	controlConfig := plan.machineControlAPIConfig()
+	if controlConfig.APIHost != machineConfig.ApiHost {
+		t.Fatalf("expected APIHost %q, got %q", machineConfig.ApiHost, controlConfig.APIHost)
 	}
-	if discoveryConfig.MachineID != machineConfig.MachineID {
-		t.Fatalf("expected MachineID %d, got %d", machineConfig.MachineID, discoveryConfig.MachineID)
+	if controlConfig.MachineID != machineConfig.MachineID {
+		t.Fatalf("expected MachineID %d, got %d", machineConfig.MachineID, controlConfig.MachineID)
 	}
-	if discoveryConfig.Token != machineConfig.Token {
-		t.Fatalf("expected Token %q, got %q", machineConfig.Token, discoveryConfig.Token)
+	if controlConfig.Key != machineConfig.Token {
+		t.Fatalf("expected Key %q, got %q", machineConfig.Token, controlConfig.Key)
 	}
-	if discoveryConfig.Timeout != 31*time.Second {
-		t.Fatalf("expected Timeout 31s, got %s", discoveryConfig.Timeout)
+	if controlConfig.Timeout != 31 {
+		t.Fatalf("expected Timeout 31, got %d", controlConfig.Timeout)
 	}
 }
 
@@ -225,14 +224,8 @@ func TestBuildMachineControllerConfigReturnsFreshConfigPerNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg1, err := plan.machineNodeControllerConfig()
-	if err != nil {
-		t.Fatalf("build first controller config: %v", err)
-	}
-	cfg2, err := plan.machineNodeControllerConfig()
-	if err != nil {
-		t.Fatalf("build second controller config: %v", err)
-	}
+	cfg1 := plan.machineNodeControllerConfig()
+	cfg2 := plan.machineNodeControllerConfig()
 
 	if cfg1 == cfg2 {
 		t.Fatal("expected fresh top-level controller configs")

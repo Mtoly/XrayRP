@@ -18,22 +18,55 @@ const (
 	machineStatusPath = "/api/v2/server/machine/status"
 )
 
-type MachineNode struct {
-	ID   int    `json:"id"`
-	Type string `json:"type"`
-	Name string `json:"name"`
-}
-
-type MachineNodesResponse struct {
-	Nodes      []MachineNode  `json:"nodes"`
-	BaseConfig api.BaseConfig `json:"base_config"`
-}
+// MachineNode and MachineNodesResponse remain aliases for source compatibility
+// while the shared machine seam uses the neutral api package types.
+type MachineNode = api.MachineNode
+type MachineNodesResponse = api.MachineNodesResponse
 
 type MachineDiscoveryConfig struct {
 	APIHost   string
 	MachineID int
 	Token     string
 	Timeout   time.Duration
+}
+
+var _ interface {
+	DiscoverMachineNodes() (*api.MachineNodesResponse, error)
+	ReportMachineStatus(api.MachineStatus) error
+} = (*APIClient)(nil)
+
+func (c *APIClient) machineDiscoveryConfig() MachineDiscoveryConfig {
+	if c == nil {
+		return MachineDiscoveryConfig{}
+	}
+	return MachineDiscoveryConfig{
+		APIHost:   c.APIHost,
+		MachineID: c.MachineID,
+		Token:     c.Key,
+		Timeout:   c.timeout,
+	}
+}
+
+// DiscoverMachineNodes exposes NewV2board's machine discovery through the
+// machine adapter capability used by the machine supervisor.
+func (c *APIClient) DiscoverMachineNodes() (*api.MachineNodesResponse, error) {
+	return DiscoverMachineNodes(c.machineDiscoveryConfig())
+}
+
+// DiscoverMachineNodesContext is the context-aware machine discovery seam.
+func (c *APIClient) DiscoverMachineNodesContext(ctx context.Context) (*api.MachineNodesResponse, error) {
+	return DiscoverMachineNodesContext(ctx, c.machineDiscoveryConfig())
+}
+
+// ReportMachineStatus exposes NewV2board's machine status endpoint through the
+// machine adapter capability used by the machine supervisor.
+func (c *APIClient) ReportMachineStatus(status api.MachineStatus) error {
+	return ReportMachineStatus(c.machineDiscoveryConfig(), status)
+}
+
+// ReportMachineStatusContext is the context-aware machine status seam.
+func (c *APIClient) ReportMachineStatusContext(ctx context.Context, status api.MachineStatus) error {
+	return ReportMachineStatusContext(ctx, c.machineDiscoveryConfig(), status)
 }
 
 type machineAuthRequest struct {

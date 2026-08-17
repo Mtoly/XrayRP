@@ -22,6 +22,13 @@ type WSCapable interface {
 	GetWSConfig() *WSConfig
 }
 
+// NodeSnapshotProvider is an optional capability for adapters that can expose
+// a normalized panel snapshot directly. GetNodeInfo remains the compatibility
+// contract for existing callers.
+type NodeSnapshotProvider interface {
+	GetNodeSnapshot() (*NodeSnapshot, error)
+}
+
 // WSEndpointDiscoverer is an optional capability for adapters that can discover
 // the panel-provided websocket endpoint dynamically.
 type WSEndpointDiscoverer interface {

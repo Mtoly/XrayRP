@@ -24,6 +24,7 @@ import (
 type APIClient struct {
 	client                  *resty.Client
 	httpPolicy              panelhttp.Policy
+	timeout                 time.Duration
 	APIHost                 string
 	NodeID                  int
 	MachineID               int
@@ -41,6 +42,7 @@ type APIClient struct {
 
 // New create an api instance
 func New(apiConfig *api.Config) *APIClient {
+	timeout := time.Duration(apiConfig.Timeout) * time.Second
 	client, httpPolicy := panelhttp.NewClient(panelhttp.ClientConfig{
 		BaseURL:        apiConfig.APIHost,
 		TimeoutSeconds: apiConfig.Timeout,
@@ -67,6 +69,7 @@ func New(apiConfig *api.Config) *APIClient {
 	apiClient := &APIClient{
 		client:        client,
 		httpPolicy:    httpPolicy,
+		timeout:       timeout,
 		NodeID:        apiConfig.NodeID,
 		MachineID:     apiConfig.MachineID,
 		Key:           apiConfig.Key,
@@ -356,7 +359,7 @@ func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *
 }
 
 // parseTrojanNodeResponse parse the response for the given nodeInfo format
-func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseTrojanNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	var (
 		host        string
 		header      json.RawMessage
@@ -409,7 +412,7 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 	}
 
 	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:          c.NodeType,
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
@@ -447,7 +450,7 @@ func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, err
 }
 
 // parseSSNodeResponse parse the response for the given nodeInfo format
-func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseSSNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	var header json.RawMessage
 	var (
 		nodeType          = c.NodeType
@@ -511,7 +514,7 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 		}
 	}
 	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:          nodeType,
 		NodeID:            c.NodeID,
 		Port:              port,
@@ -528,7 +531,7 @@ func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) 
 }
 
 // parseV2rayNodeResponse parse the response for the given nodeInfo format
-func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseV2rayNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	var (
 		host          string
 		header        json.RawMessage
@@ -615,7 +618,7 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 	}
 
 	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:          c.NodeType,
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
@@ -654,7 +657,7 @@ func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 }
 
 // parseHysteria2NodeResponse parse the response for Hysteria2 nodes.
-func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseHysteria2NodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
 	}
@@ -680,7 +683,7 @@ func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, 
 		sni = s.Host
 	}
 
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:        "Hysteria2",
 		NodeID:          c.NodeID,
 		Port:            uint32(s.ServerPort),
@@ -693,7 +696,7 @@ func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, 
 }
 
 // parseTuicNodeResponse parse the response for TUIC nodes.
-func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseTuicNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
 	}
@@ -703,7 +706,7 @@ func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error
 		sni = s.Host
 	}
 
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:  "Tuic",
 		NodeID:    c.NodeID,
 		Port:      uint32(s.ServerPort),
@@ -721,7 +724,7 @@ func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error
 }
 
 // parseAnyTLSNodeResponse parse the response for AnyTLS nodes.
-func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseAnyTLSNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
 	}
@@ -731,7 +734,7 @@ func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, err
 		sni = s.Host
 	}
 
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:     "AnyTLS",
 		NodeID:       c.NodeID,
 		Port:         uint32(s.ServerPort),
@@ -744,12 +747,12 @@ func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, err
 }
 
 // parseSocksNodeResponse parse the response for Socks proxy nodes.
-func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseSocksNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
 	}
 
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:          "Socks",
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
@@ -759,14 +762,14 @@ func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, erro
 }
 
 // parseHTTPNodeResponse parse the response for HTTP proxy nodes.
-func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+func (c *APIClient) parseHTTPNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
 	}
 
 	enableTLS := s.Tls == 1
 
-	nodeInfo := &api.NodeInfo{
+	nodeInfo := &api.NodeSnapshot{
 		NodeType:          "HTTP",
 		NodeID:            c.NodeID,
 		Port:              uint32(s.ServerPort),
@@ -774,6 +777,45 @@ func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error
 		EnableTLS:         enableTLS,
 	}
 	return nodeInfo, nil
+}
+
+func materializeNodeInfo(snapshot *api.NodeSnapshot, err error) (*api.NodeInfo, error) {
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.ToNodeInfo(), nil
+}
+
+func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseTrojanNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseSSNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseV2rayNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseHysteria2NodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseTuicNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseAnyTLSNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseSocksNodeSnapshotResponse(s))
+}
+
+func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
+	return materializeNodeInfo(c.parseHTTPNodeSnapshotResponse(s))
 }
 
 func parseHeartbeatSeconds(value string) int {
@@ -872,8 +914,20 @@ func (s *serverConfig) parseDNSConfig() (nameServerList []*conf.NameServerConfig
 	return
 }
 
-func attachRoutePolicy(s *serverConfig, nodeInfo *api.NodeInfo) {
-	if s == nil || nodeInfo == nil {
+func (s *serverConfig) parseNormalizedDNSConfig() (nameServerList []*api.NameServerSnapshot) {
+	for i := range s.Routes {
+		if s.Routes[i].Action == "dns" {
+			nameServerList = append(nameServerList, &api.NameServerSnapshot{
+				Address: s.Routes[i].ActionValue,
+				Domains: append([]string{}, s.Routes[i].Match...),
+			})
+		}
+	}
+	return
+}
+
+func attachRoutePolicy(s *serverConfig, snapshot *api.NodeSnapshot) {
+	if s == nil || snapshot == nil {
 		return
 	}
 	policy, err := s.BuildRoutePolicy()
@@ -881,5 +935,5 @@ func attachRoutePolicy(s *serverConfig, nodeInfo *api.NodeInfo) {
 		log.Printf("BuildRoutePolicy failed: %v", err)
 		return
 	}
-	nodeInfo.RoutePolicy = policy
+	snapshot.RoutePolicy = policy
 }

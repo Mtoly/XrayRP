@@ -178,7 +178,7 @@ func TestNodeValueEqualityPreservesCustomAddressConcreteTypes(t *testing.T) {
 	}
 }
 
-func TestNodeValuePassesThroughAddressWithoutCloneContract(t *testing.T) {
+func TestNodeValueDetachesAddressWithoutCloneContract(t *testing.T) {
 	custom := &customUnknownAddress{text: "custom-address"}
 	value := normalizeNodeInfo(&api.NodeInfo{
 		NameServerConfig: []*conf.NameServerConfig{{
@@ -186,9 +186,24 @@ func TestNodeValuePassesThroughAddressWithoutCloneContract(t *testing.T) {
 		}},
 	})
 
+	custom.text = "mutated-address"
 	got := value.snapshot().NameServerConfig[0].Address.Address
-	if got != custom {
-		t.Fatalf("custom address without a clone contract was rewritten: got %#v want %#v", got, custom)
+	if got == custom || got.String() != "custom-address" || got.Family() != custom.Family() {
+		t.Fatalf("custom address compatibility value was not detached: got %#v", got)
+	}
+}
+
+func TestNodeValuePreservesTypedNilAddress(t *testing.T) {
+	var typedNil *customUnknownAddress
+	value := normalizeNodeInfo(&api.NodeInfo{
+		NameServerConfig: []*conf.NameServerConfig{{
+			Address: &conf.Address{Address: typedNil},
+		}},
+	})
+
+	got := value.snapshot().NameServerConfig[0].Address.Address
+	if got == nil || reflect.ValueOf(got).Kind() != reflect.Ptr || !reflect.ValueOf(got).IsNil() {
+		t.Fatalf("typed nil address was not preserved: %#v", got)
 	}
 }
 

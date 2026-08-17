@@ -2,6 +2,7 @@ package controller
 
 import (
 	"github.com/Mtoly/XrayRP/api"
+	"github.com/Mtoly/XrayRP/internal/managednode"
 )
 
 type nodeRuntimeState struct {
@@ -11,6 +12,24 @@ type nodeRuntimeState struct {
 	userList        []api.UserInfo
 	appliedRuleTag  string
 	appliedRuleList []api.DetectRule
+}
+
+func (c *Controller) buildNodeTagFrom(nodeInfo *api.NodeInfo) string {
+	return c.buildNodeTagFromSnapshot(api.NormalizeNodeInfo(nodeInfo))
+}
+
+func (c *Controller) buildNodeTagFromSnapshot(snapshot *api.NodeSnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	// Include NodeID to avoid cross-node mixing when multiple logical nodes share
+	// the same NodeType/ListenIP/Port (e.g., CDN or multi-node deployments).
+	return managednode.BuildTag(snapshot.NodeType, c.config.ListenIP, snapshot.Port, snapshot.NodeID)
+}
+
+func (c *Controller) buildNodeTag() string {
+	state := c.runtimeStateSnapshot()
+	return c.buildNodeTagFromSnapshot(state.node.normalizedSnapshot())
 }
 
 func cloneDetectRules(rules []api.DetectRule) []api.DetectRule {
@@ -35,6 +54,10 @@ func cloneNodeRuntimeState(state nodeRuntimeState) nodeRuntimeState {
 
 func (state nodeRuntimeState) nodeInfoSnapshot() *api.NodeInfo {
 	return state.node.snapshot()
+}
+
+func (state nodeRuntimeState) nodeSnapshot() *api.NodeSnapshot {
+	return state.node.normalizedSnapshot()
 }
 
 func (state nodeRuntimeState) userListSnapshot() *[]api.UserInfo {
@@ -84,10 +107,20 @@ func (c *Controller) getStateSnapshot() (nodeInfo *api.NodeInfo, tag string, use
 	return c.runtimeState.nodeInfoSnapshot(), c.runtimeState.tag, c.runtimeState.userListSnapshot()
 }
 
+func (c *Controller) getSnapshotState() (snapshot *api.NodeSnapshot, tag string, userList *[]api.UserInfo) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.runtimeState.nodeSnapshot(), c.runtimeState.tag, c.runtimeState.userListSnapshot()
+}
+
 func (c *Controller) setNodeState(nodeInfo *api.NodeInfo, tag string) {
+	c.setNodeSnapshot(api.NormalizeNodeInfo(nodeInfo), tag)
+}
+
+func (c *Controller) setNodeSnapshot(snapshot *api.NodeSnapshot, tag string) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	c.runtimeState.node = normalizeNodeInfo(nodeInfo)
+	c.runtimeState.node = normalizeNodeSnapshot(snapshot)
 	c.runtimeState.tag = tag
 }
 

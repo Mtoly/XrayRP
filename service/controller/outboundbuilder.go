@@ -13,7 +13,11 @@ import (
 // OutboundBuilder is the compatibility adapter for callers that still provide
 // api.NodeInfo. Internal controller paths call buildOutbound with a focused view.
 func OutboundBuilder(config *Config, nodeInfo *api.NodeInfo, tag string) (*core.OutboundHandlerConfig, error) {
-	return buildOutbound(config, normalizeNodeInfo(nodeInfo).outboundView(), tag)
+	return buildOutboundFromSnapshot(config, api.NormalizeNodeInfo(nodeInfo), tag)
+}
+
+func buildOutboundFromSnapshot(config *Config, snapshot *api.NodeSnapshot, tag string) (*core.OutboundHandlerConfig, error) {
+	return buildOutbound(config, outboundViewFromSnapshot(snapshot), tag)
 }
 
 func buildOutbound(config *Config, node outboundNodeView, tag string) (*core.OutboundHandlerConfig, error) {

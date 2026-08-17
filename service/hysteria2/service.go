@@ -13,20 +13,33 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
+	"github.com/Mtoly/XrayRP/internal/appliednode"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
-type PanelClient interface {
+type panelIdentityReader interface {
 	Describe() api.ClientInfo
+}
+
+type panelSnapshotReader interface {
 	GetNodeInfo() (*api.NodeInfo, error)
 	GetUserList() (*[]api.UserInfo, error)
 	GetNodeRule() (*[]api.DetectRule, error)
+}
+
+type panelReporter interface {
 	ReportNodeStatus(*api.NodeStatus) error
 	ReportNodeOnlineUsers(*[]api.OnlineUser) error
 	ReportUserTraffic(*[]api.UserTraffic) error
 	ReportIllegal(*[]api.DetectResult) error
+}
+
+type PanelClient interface {
+	panelIdentityReader
+	panelSnapshotReader
+	panelReporter
 }
 
 var _ service.Service = (*Hysteria2Service)(nil)
@@ -301,18 +314,11 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 		}
 		return clearStartupRules()
 	}
-	startupShutdown := specialruntime.RuntimeShutdown{
-		Stop:        stopStartup,
-		StopContext: func(context.Context) error { return stopStartup() },
-		Join: func() error {
-			h.waitRuntime(serve.done, nil)
-			return nil
-		},
-		JoinContext: func(ctx context.Context) error {
-			return h.waitRuntimeContext(ctx, serve.done, nil)
-		},
-	}
-	if err := tasks.StartContext(ctx, startupShutdown); err != nil {
+	host := specialruntime.NewRuntimeHost(tasks, specialruntime.RuntimeHostCallbacks{
+		Stop: func(context.Context) error { return stopStartup() },
+		Join: func(ctx context.Context) error { return h.waitRuntimeContext(ctx, serve.done, nil) },
+	})
+	if err := host.StartContext(ctx); err != nil {
 		if specialruntime.StartCleanupFailed(err) {
 			return h.failWithRuntimeOwnership(err, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
 		}
@@ -320,7 +326,7 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	}
 
 	if err := h.reloadMu.Lock(ctx); err != nil {
-		rollbackErr := tasks.RollbackContext(ctx, startupShutdown)
+		rollbackErr := host.RollbackContext(ctx)
 		joined := errors.Join(err, rollbackErr)
 		if rollbackErr != nil {
 			return h.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
@@ -330,7 +336,7 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	rulesRestored, ruleErr := h.replacePortHopRulesLocked(ctx, buildPortHopRulesFromNode(nodeInfo))
 	h.reloadMu.Unlock()
 	if ruleErr != nil {
-		rollbackErr := tasks.RollbackContext(ctx, startupShutdown)
+		rollbackErr := host.RollbackContext(ctx)
 		joined := errors.Join(ruleErr, rollbackErr)
 		if rollbackErr != nil || !rulesRestored {
 			return h.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, candidate, tag, startAt, tasks)
@@ -396,7 +402,7 @@ func (h *Hysteria2Service) CloseContext(parent context.Context) error {
 	// certificate replacement to release the operation gate.
 	var producerStopErr error
 	if tasks != nil {
-		producerStopErr = tasks.StopContext(ctx)
+		producerStopErr = specialruntime.NewRuntimeHost(tasks, specialruntime.RuntimeHostCallbacks{}).StopProducersContext(ctx)
 	}
 	var syncWaitErr error
 	if h.syncCoordinator != nil {
@@ -444,55 +450,44 @@ func (h *Hysteria2Service) CloseContext(parent context.Context) error {
 		runtimeCloseErr = closeRuntime(srv)
 		return runtimeCloseErr
 	}
-	shutdown := specialruntime.RuntimeShutdown{
-		Stop:        stopRuntime,
-		StopContext: func(context.Context) error { return stopRuntime() },
-		Join: func() error {
-			h.waitRuntime(serveDone, watcherDone)
-			return nil
-		},
-		JoinContext: func(ctx context.Context) error {
-			return h.waitRuntimeContext(ctx, serveDone, watcherDone)
-		},
-	}
-	var shutdownErr error
+	callbacks := specialruntime.RuntimeHostCallbacks{}
 	if srv != nil {
-		if tasks != nil {
-			shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, shutdown))
-		} else {
-			shutdownErr = errors.Join(producerStopErr, syncWaitErr, shutdown.StopContext(ctx), shutdown.JoinContext(ctx))
-		}
-	} else if tasks != nil {
-		shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, specialruntime.RuntimeShutdown{}))
+		callbacks.Stop = func(context.Context) error { return stopRuntime() }
+		callbacks.Join = func(ctx context.Context) error { return h.waitRuntimeContext(ctx, serveDone, watcherDone) }
+	}
+	host := specialruntime.NewRuntimeHost(tasks, callbacks)
+	var shutdownErr error
+	if srv != nil || tasks != nil {
+		shutdownErr = errors.Join(producerStopErr, syncWaitErr, host.CloseStoppedContext(ctx))
 	} else {
 		shutdownErr = errors.Join(producerStopErr, syncWaitErr)
 	}
 
-	remainingRuntimes := make([]reloadRuntime, 0, len(cleanupRuntimes))
-	var cleanupErr error
 	for _, owned := range cleanupRuntimes {
-		owned.authGate.resolve(false)
+		if owned.authGate != nil {
+			owned.authGate.resolve(false)
+		}
 		if owned.cancel != nil {
 			owned.cancel()
 		}
-		if owned.runtime == nil {
-			continue
+	}
+	ownedRuntimes := make([]reloadRuntime, 0, len(cleanupRuntimes))
+	for _, owned := range cleanupRuntimes {
+		if owned.runtime != nil {
+			ownedRuntimes = append(ownedRuntimes, owned)
 		}
-		if err := ctx.Err(); err != nil {
-			remainingRuntimes = append(remainingRuntimes, owned)
-			cleanupErr = errors.Join(cleanupErr, err)
-			continue
+	}
+	remainingRuntimes, cleanupErr := specialruntime.CleanupOwnedContext(ctx, ownedRuntimes, func(ctx context.Context, owned reloadRuntime) error {
+		if owned.runtime == nil {
+			return nil
 		}
 		closeOwnedErr := closeRuntime(owned.runtime)
 		var joinOwnedErr error
 		if owned.serve != nil {
 			joinOwnedErr = h.waitRuntimeContext(ctx, owned.serve.done, nil)
 		}
-		if closeOwnedErr != nil || joinOwnedErr != nil {
-			remainingRuntimes = append(remainingRuntimes, owned)
-			cleanupErr = errors.Join(cleanupErr, closeOwnedErr, joinOwnedErr)
-		}
-	}
+		return errors.Join(closeOwnedErr, joinOwnedErr)
+	})
 
 	closeErr := errors.Join(shutdownErr, cleanupErr)
 	if closeErr == nil {
@@ -997,15 +992,7 @@ func (h *Hysteria2Service) finishReloadWithOwnership(runtime runtimeServer, clea
 }
 
 func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
-	if nodeInfo == nil {
-		return nil
-	}
-	cloned := *nodeInfo
-	if nodeInfo.Hysteria2Config != nil {
-		hysteria2Config := *nodeInfo.Hysteria2Config
-		cloned.Hysteria2Config = &hysteria2Config
-	}
-	return &cloned
+	return appliednode.Clone(nodeInfo)
 }
 
 func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {

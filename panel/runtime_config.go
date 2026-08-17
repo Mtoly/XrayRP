@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -30,6 +29,7 @@ type runtimeConfigPlan struct {
 	staticNodes             []staticRuntimeNodePlan
 	machineConfig           *MachineConfig
 	machineNewAPIClient     panelClientFactory
+	machineAdapterFactory   machineAdapterFactory
 	machineSharedWSEndpoint string
 	showErrorDetails        bool
 }
@@ -42,12 +42,8 @@ type staticRuntimeNodePlan struct {
 	fallbackNodeType         string
 }
 
-func (plan staticRuntimeNodePlan) materializeControllerConfig() (*controller.Config, error) {
-	controllerConfig, err := cloneControllerConfig(plan.controllerConfigTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to clone controller config: %w", err)
-	}
-	return controllerConfig, nil
+func (plan staticRuntimeNodePlan) materializeControllerConfig() *controller.Config {
+	return plan.controllerConfigTemplate.Clone()
 }
 
 func ValidateRuntimeConfig(config *Config) error {
@@ -89,13 +85,14 @@ func buildRuntimeConfigPlan(config *Config) (runtimeConfigPlan, error) {
 
 	plan.showErrorDetails = config.ShowErrorDetails()
 	if config.MachineConfig != nil && config.MachineConfig.Enable {
-		machineConfig, newAPIClient, sharedWSEndpoint, err := buildMachineRuntimeConfigPlan(config, plan.showErrorDetails)
+		machineConfig, newAPIClient, newMachineAdapter, sharedWSEndpoint, err := buildMachineRuntimeConfigPlan(config, plan.showErrorDetails)
 		if err != nil {
 			return plan, err
 		}
 		plan.mode = runtimeConfigModeMachine
 		plan.machineConfig = machineConfig
 		plan.machineNewAPIClient = newAPIClient
+		plan.machineAdapterFactory = newMachineAdapter
 		plan.machineSharedWSEndpoint = sharedWSEndpoint
 		return plan, nil
 	}
@@ -141,31 +138,36 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 	return plans, nil
 }
 
-func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*MachineConfig, panelClientFactory, string, error) {
+func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*MachineConfig, panelClientFactory, machineAdapterFactory, string, error) {
 	machineConfig := config.MachineConfig
 	if len(config.NodesConfig) > 0 {
-		return nil, nil, "", fmt.Errorf("%w: machine mode cannot be enabled with static Nodes config", ErrRuntimeConfigModeConflict)
+		return nil, nil, nil, "", fmt.Errorf("%w: machine mode cannot be enabled with static Nodes config", ErrRuntimeConfigModeConflict)
 	}
 	if strings.TrimSpace(machineConfig.ApiHost) == "" {
-		return nil, nil, "", fmt.Errorf("machine mode ApiHost must not be empty")
+		return nil, nil, nil, "", fmt.Errorf("machine mode ApiHost must not be empty")
 	}
 	if err := validatePanelAPIHost(machineConfig.ApiHost); err != nil {
-		return nil, nil, "", fmt.Errorf("machine mode ApiHost: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("machine mode ApiHost: %w", err)
 	}
 	if machineConfig.MachineID <= 0 {
-		return nil, nil, "", fmt.Errorf("machine mode MachineID must be greater than 0")
+		return nil, nil, nil, "", fmt.Errorf("machine mode MachineID must be greater than 0")
 	}
 	if strings.TrimSpace(machineConfig.Token) == "" {
-		return nil, nil, "", fmt.Errorf("machine mode Token must not be empty")
+		return nil, nil, nil, "", fmt.Errorf("machine mode Token must not be empty")
 	}
-	newAPIClient, err := defaultPanelAdapterRegistry().machineFactory(machineConfig.PanelType)
+	registry := defaultPanelAdapterRegistry()
+	newAPIClient, err := registry.machineFactory(machineConfig.PanelType)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
+	}
+	newMachineAdapter, err := registry.machineAdapterFactory(machineConfig.PanelType)
+	if err != nil {
+		return nil, nil, nil, "", err
 	}
 
 	controllerConfig, err := buildRuntimeControllerConfig(machineConfig.ControllerConfig, showErrorDetails)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	sharedWSEndpoint := ""
 	if wsConfig := controllerConfig.WebSocketConfig; wsConfig != nil && wsConfig.Enable {
@@ -175,14 +177,14 @@ func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*Mach
 			Key:       machineConfig.Token,
 		}, wsConfig)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, nil, "", err
 		}
 		sharedWSEndpoint = endpoint
 	}
 
 	snapshot := *machineConfig
 	snapshot.ControllerConfig = controllerConfig
-	return &snapshot, newAPIClient, sharedWSEndpoint, nil
+	return &snapshot, newAPIClient, newMachineAdapter, sharedWSEndpoint, nil
 }
 
 func buildRuntimeControllerConfig(template *controller.Config, showErrorDetails bool) (*controller.Config, error) {
@@ -194,26 +196,5 @@ func buildRuntimeControllerConfig(template *controller.Config, showErrorDetails 
 	}
 	controllerConfig.ShowErrorDetails = showErrorDetails
 
-	cloned, err := cloneControllerConfig(controllerConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to clone controller config: %w", err)
-	}
-	return cloned, nil
-}
-
-func cloneControllerConfig(config *controller.Config) (*controller.Config, error) {
-	if config == nil {
-		return nil, nil
-	}
-
-	data, err := json.Marshal(config)
-	if err != nil {
-		return nil, err
-	}
-
-	var cloned controller.Config
-	if err := json.Unmarshal(data, &cloned); err != nil {
-		return nil, err
-	}
-	return &cloned, nil
+	return controllerConfig.Clone(), nil
 }

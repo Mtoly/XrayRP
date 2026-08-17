@@ -13,20 +13,33 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	"github.com/Mtoly/XrayRP/common/rule"
+	"github.com/Mtoly/XrayRP/internal/appliednode"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/internal/specialruntime"
 )
 
-type PanelClient interface {
+type panelIdentityReader interface {
 	Describe() api.ClientInfo
+}
+
+type panelSnapshotReader interface {
 	GetNodeInfo() (*api.NodeInfo, error)
 	GetUserList() (*[]api.UserInfo, error)
 	GetNodeRule() (*[]api.DetectRule, error)
+}
+
+type panelReporter interface {
 	ReportNodeStatus(*api.NodeStatus) error
 	ReportNodeOnlineUsers(*[]api.OnlineUser) error
 	ReportUserTraffic(*[]api.UserTraffic) error
 	ReportIllegal(*[]api.DetectResult) error
+}
+
+type PanelClient interface {
+	panelIdentityReader
+	panelSnapshotReader
+	panelReporter
 }
 
 var _ service.Service = (*AnyTLSService)(nil)
@@ -234,19 +247,6 @@ func (s *AnyTLSService) StartContext(parent context.Context) (err error) {
 		return nil
 	}
 
-	startRuntime := s.startRuntime
-	if startRuntime == nil {
-		startRuntime = defaultStartRuntime
-	}
-	if err := startRuntime(boxInstance); err != nil {
-		cleanupErr := shutdownRuntime()
-		joined := errors.Join(err, cleanupErr)
-		if cleanupErr != nil {
-			return s.failWithRuntimeOwnership(joined, clientInfo, nodeInfo, boxInstance, inboundTag, tag, startAt, nil)
-		}
-		return fail(joined)
-	}
-
 	interval := time.Duration(s.config.UpdatePeriodic) * time.Second
 	s.initializeSnapshotSyncCoordinator()
 	tasks := specialruntime.NewTasks()
@@ -257,13 +257,21 @@ func (s *AnyTLSService) StartContext(parent context.Context) (err error) {
 		tasks.Add(s.newTask("cert monitor", interval*60, s.certMonitorPeriodicContext))
 	}
 
-	startupShutdown := specialruntime.RuntimeShutdown{
-		Stop:        shutdownRuntime,
-		StopContext: func(context.Context) error { return shutdownRuntime() },
+	startRuntime := s.startRuntime
+	if startRuntime == nil {
+		startRuntime = defaultStartRuntime
 	}
-	if err := tasks.StartContext(ctx, startupShutdown); err != nil {
+	host := specialruntime.NewRuntimeHost(tasks, specialruntime.RuntimeHostCallbacks{
+		Start: func(context.Context) error { return startRuntime(boxInstance) },
+		Stop:  func(context.Context) error { return shutdownRuntime() },
+	})
+	if err := host.StartContext(ctx); err != nil {
 		if specialruntime.StartCleanupFailed(err) {
-			return s.failWithRuntimeOwnership(err, clientInfo, nodeInfo, boxInstance, inboundTag, tag, startAt, tasks)
+			ownedTasks := tasks
+			if specialruntime.RuntimeStartFailed(err) {
+				ownedTasks = nil
+			}
+			return s.failWithRuntimeOwnership(err, clientInfo, nodeInfo, boxInstance, inboundTag, tag, startAt, ownedTasks)
 		}
 		return fail(err)
 	}
@@ -315,7 +323,7 @@ func (s *AnyTLSService) CloseContext(parent context.Context) error {
 	// certificate replacement to release the operation gate.
 	var producerStopErr error
 	if tasks != nil {
-		producerStopErr = tasks.StopContext(ctx)
+		producerStopErr = specialruntime.NewRuntimeHost(tasks, specialruntime.RuntimeHostCallbacks{}).StopProducersContext(ctx)
 	}
 	var syncWaitErr error
 	if s.syncCoordinator != nil {
@@ -358,37 +366,28 @@ func (s *AnyTLSService) CloseContext(parent context.Context) error {
 		runtimeCloseErr = closeRuntime(boxInstance)
 		return runtimeCloseErr
 	}
-	shutdown := specialruntime.RuntimeShutdown{
-		Stop:        shutdownRuntime,
-		StopContext: func(context.Context) error { return shutdownRuntime() },
-	}
-	var shutdownErr error
+	callbacks := specialruntime.RuntimeHostCallbacks{}
 	if boxInstance != nil {
-		if tasks != nil {
-			shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, shutdown))
-		} else {
-			shutdownErr = shutdownRuntime()
-		}
-	} else if tasks != nil {
-		shutdownErr = errors.Join(producerStopErr, syncWaitErr, tasks.CloseStoppedContext(ctx, specialruntime.RuntimeShutdown{}))
+		callbacks.Stop = func(context.Context) error { return shutdownRuntime() }
+	}
+	host := specialruntime.NewRuntimeHost(tasks, callbacks)
+	var shutdownErr error
+	if boxInstance != nil || tasks != nil {
+		shutdownErr = errors.Join(producerStopErr, syncWaitErr, host.CloseStoppedContext(ctx))
 	}
 
-	remainingRuntimes := make([]runtimeInstance, 0, len(cleanupRuntimes))
-	var cleanupErr error
+	ownedRuntimes := make([]runtimeInstance, 0, len(cleanupRuntimes))
 	for _, runtime := range cleanupRuntimes {
-		if runtime == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			remainingRuntimes = append(remainingRuntimes, runtime)
-			cleanupErr = errors.Join(cleanupErr, err)
-			continue
-		}
-		if err := closeRuntime(runtime); err != nil {
-			remainingRuntimes = append(remainingRuntimes, runtime)
-			cleanupErr = errors.Join(cleanupErr, err)
+		if runtime != nil {
+			ownedRuntimes = append(ownedRuntimes, runtime)
 		}
 	}
+	remainingRuntimes, cleanupErr := specialruntime.CleanupOwnedContext(ctx, ownedRuntimes, func(_ context.Context, runtime runtimeInstance) error {
+		if runtime == nil {
+			return nil
+		}
+		return closeRuntime(runtime)
+	})
 	closeErr := errors.Join(shutdownErr, cleanupErr)
 	if closeErr == nil && s.rules != nil && tag != "" {
 		closeErr = s.rules.UpdateRule(tag, nil)
@@ -692,16 +691,7 @@ func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
 }
 
 func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
-	if nodeInfo == nil {
-		return nil
-	}
-	cloned := *nodeInfo
-	if nodeInfo.AnyTLSConfig != nil {
-		anyTLSConfig := *nodeInfo.AnyTLSConfig
-		anyTLSConfig.PaddingScheme = append([]string(nil), nodeInfo.AnyTLSConfig.PaddingScheme...)
-		cloned.AnyTLSConfig = &anyTLSConfig
-	}
-	return &cloned
+	return appliednode.Clone(nodeInfo)
 }
 
 func cloneRuntimeBuildSpec(spec runtimeBuildSpec) runtimeBuildSpec {

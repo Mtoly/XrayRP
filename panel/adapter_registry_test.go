@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -73,6 +74,105 @@ func TestPanelAdapterRegistryPreservesMachineAliasesAndRawValidation(t *testing.
 	_, err = registry.machineFactory("   ")
 	if want := "machine mode PanelType must not be empty"; err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestPanelAdapterRegistryMachineAdapterFactoryExposesNeutralCapabilities(t *testing.T) {
+	registry := defaultPanelAdapterRegistry()
+	factory, err := registry.machineAdapterFactory(" V2board ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	adapter, err := factory(&api.Config{
+		APIHost:   "https://panel.example.com",
+		MachineID: 7,
+		Key:       "machine-token",
+		Timeout:   3,
+	})
+	if err != nil {
+		t.Fatalf("machine adapter factory returned error: %v", err)
+	}
+	if adapter == nil {
+		t.Fatal("machine adapter factory returned nil adapter")
+	}
+	if got := fmt.Sprintf("%T", adapter); got != "*newV2board.APIClient" {
+		t.Fatalf("machine adapter type = %q, want *newV2board.APIClient", got)
+	}
+	if _, ok := adapter.(machineAdapter); !ok {
+		t.Fatal("machine adapter does not expose the panel machine capability seam")
+	}
+}
+
+func TestPanelAdapterRegistryMachineAdapterFactoryRejectsMissingCapabilities(t *testing.T) {
+	registry := panelAdapterRegistry{
+		registrations: []panelAdapterRegistration{{
+			aliases:     []string{"MachineFixture"},
+			machineMode: true,
+			newClient: func(*api.Config) runtimePanelClient {
+				return &runtimeRegistryTestAPI{}
+			},
+		}},
+	}
+
+	factory, err := registry.machineAdapterFactory("MachineFixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory(&api.Config{})
+	if err == nil || err.Error() != "panel adapter MachineFixture does not implement machine capabilities" {
+		t.Fatalf("error = %v, want missing capability error", err)
+	}
+}
+
+type typedNilMachineAdapterClient struct {
+	runtimeRegistryTestAPI
+}
+
+func (*typedNilMachineAdapterClient) DiscoverMachineNodes() (*api.MachineNodesResponse, error) {
+	return nil, nil
+}
+
+func (*typedNilMachineAdapterClient) ReportMachineStatus(api.MachineStatus) error {
+	return nil
+}
+
+func TestPanelAdapterRegistryMachineAdapterFactoryRejectsTypedNil(t *testing.T) {
+	registry := panelAdapterRegistry{
+		registrations: []panelAdapterRegistration{{
+			aliases:     []string{"TypedNilFixture"},
+			machineMode: true,
+			newClient: func(*api.Config) runtimePanelClient {
+				return (*typedNilMachineAdapterClient)(nil)
+			},
+		}},
+	}
+
+	factory, err := registry.machineAdapterFactory("TypedNilFixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory(&api.Config{})
+	if err == nil || err.Error() != "panel adapter TypedNilFixture returned nil machine adapter" {
+		t.Fatalf("error = %v, want typed-nil error", err)
+	}
+}
+
+func TestPanelAdapterRegistryMachineAdapterFactoryPreservesUnsupportedErrors(t *testing.T) {
+	registry := defaultPanelAdapterRegistry()
+	for _, panelType := range []string{"SSPanel", "UnsupportedPanel", "   "} {
+		t.Run(panelType, func(t *testing.T) {
+			_, err := registry.machineAdapterFactory(panelType)
+			var want string
+			if strings.TrimSpace(panelType) == "" {
+				want = "machine mode PanelType must not be empty"
+			} else {
+				want = "unsupported panel type for machine mode: " + panelType
+			}
+			if err == nil || err.Error() != want {
+				t.Fatalf("error = %v, want %q", err, want)
+			}
+		})
 	}
 }
 

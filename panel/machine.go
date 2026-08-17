@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -10,50 +9,30 @@ import (
 	"github.com/xtls/xray-core/core"
 
 	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/api/newV2board"
 	"github.com/Mtoly/XrayRP/service"
 	"github.com/Mtoly/XrayRP/service/controller"
 	"github.com/Mtoly/XrayRP/service/machine"
 )
 
-type newV2boardMachineStatusReporter struct {
-	config newV2board.MachineDiscoveryConfig
-}
-
-func (r *newV2boardMachineStatusReporter) ReportMachineStatus(status api.MachineStatus) error {
-	return newV2board.ReportMachineStatus(r.config, status)
-}
-
-func (r *newV2boardMachineStatusReporter) ReportMachineStatusContext(ctx context.Context, status api.MachineStatus) error {
-	return newV2board.ReportMachineStatusContext(ctx, r.config, status)
-}
-
-func (plan runtimeConfigPlan) machineDiscoveryConfig() newV2board.MachineDiscoveryConfig {
-	if plan.machineConfig == nil {
-		return newV2board.MachineDiscoveryConfig{}
-	}
-	return newV2board.MachineDiscoveryConfig{
-		APIHost:   plan.machineConfig.ApiHost,
-		MachineID: plan.machineConfig.MachineID,
-		Token:     plan.machineConfig.Token,
-		Timeout:   time.Duration(plan.machineConfig.Timeout) * time.Second,
-	}
-}
-
 func (p *Panel) buildMachineSupervisor(server *core.Instance, plan runtimeConfigPlan) (service.Service, error) {
 	mc := plan.machineConfig
-	baseControllerConfig, err := plan.machineNodeControllerConfig()
-	if err != nil {
-		return nil, err
-	}
+	baseControllerConfig := plan.machineNodeControllerConfig()
 	sharedWS := buildMachineSharedWSRuntime(
 		baseControllerConfig.WebSocketConfig,
 		plan.machineSharedWSEndpoint,
 		p.logger.WithField("service", "machine-websocket"),
 	)
 
-	discoveryConfig := plan.machineDiscoveryConfig()
-	discoverer := &machine.NewV2boardDiscoverer{Config: discoveryConfig}
+	if plan.machineAdapterFactory == nil {
+		return nil, fmt.Errorf("machine adapter factory must not be nil")
+	}
+	machineAdapter, err := plan.machineAdapterFactory(plan.machineControlAPIConfig())
+	if err != nil {
+		return nil, fmt.Errorf("create machine adapter: %w", err)
+	}
+	if isNilMachineAdapter(machineAdapter) {
+		return nil, fmt.Errorf("create machine adapter: nil adapter")
+	}
 	factory := func(binding machine.NodeBinding) (service.Service, error) {
 		return p.buildMachineRuntimeNodeService(server, machineRuntimeNodePlan{
 			binding:  binding,
@@ -64,11 +43,11 @@ func (p *Panel) buildMachineSupervisor(server *core.Instance, plan runtimeConfig
 	supervisor, err := machine.NewSupervisor(machine.SupervisorConfig{
 		DiscoveryInterval: time.Duration(mc.DiscoveryInterval) * time.Second,
 		MachineStatus: machine.MachineStatusReporterConfig{
-			Reporter: &newV2boardMachineStatusReporter{config: discoveryConfig},
+			Reporter: machineAdapter,
 		},
 		Logger:           p.logger.WithField("service", "machine-supervisor"),
 		ShowErrorDetails: plan.showErrorDetails,
-	}, discoverer, factory)
+	}, machineAdapter, factory)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +169,7 @@ func (plan runtimeConfigPlan) materializeMachineRuntimeNode(nodePlan machineRunt
 		apiClient = wrappedAPIClient
 	}
 
-	controllerConfig, err := plan.machineNodeControllerConfig()
-	if err != nil {
-		return nil, err
-	}
+	controllerConfig := plan.machineNodeControllerConfig()
 	materializeCertConfig := nodePlan.materializeCertConfig
 	if materializeCertConfig == nil {
 		materializeCertConfig = materializeRuntimeCertConfig
@@ -222,12 +198,20 @@ func (plan runtimeConfigPlan) machineNodeAPIConfig(binding machine.NodeBinding) 
 	return apiConfig
 }
 
-func (plan runtimeConfigPlan) machineNodeControllerConfig() (*controller.Config, error) {
-	controllerConfig, err := cloneControllerConfig(plan.machineConfig.ControllerConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to clone controller config: %w", err)
+func (plan runtimeConfigPlan) machineControlAPIConfig() *api.Config {
+	if plan.machineConfig == nil {
+		return &api.Config{}
 	}
-	return controllerConfig, nil
+	return &api.Config{
+		APIHost:   plan.machineConfig.ApiHost,
+		MachineID: plan.machineConfig.MachineID,
+		Key:       plan.machineConfig.Token,
+		Timeout:   plan.machineConfig.Timeout,
+	}
+}
+
+func (plan runtimeConfigPlan) machineNodeControllerConfig() *controller.Config {
+	return plan.machineConfig.ControllerConfig.Clone()
 }
 
 func buildMachineSharedWSRuntime(wsConfig *controller.WebSocketConfig, endpoint string, logger *log.Entry) *machine.SharedWSRuntime {

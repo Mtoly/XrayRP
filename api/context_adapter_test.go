@@ -19,13 +19,27 @@ import (
 )
 
 var (
-	_ api.ContextPanelClient = (*bunpanel.APIClient)(nil)
-	_ api.ContextPanelClient = (*gov2panel.APIClient)(nil)
-	_ api.ContextPanelClient = (*newV2board.APIClient)(nil)
-	_ api.ContextPanelClient = (*pmpanel.APIClient)(nil)
-	_ api.ContextPanelClient = (*proxypanel.APIClient)(nil)
-	_ api.ContextPanelClient = (*sspanel.APIClient)(nil)
-	_ api.ContextPanelClient = (*v2raysocks.APIClient)(nil)
+	_ api.ContextPanelClient          = (*bunpanel.APIClient)(nil)
+	_ api.ContextPanelClient          = (*gov2panel.APIClient)(nil)
+	_ api.ContextPanelClient          = (*newV2board.APIClient)(nil)
+	_ api.ContextPanelClient          = (*pmpanel.APIClient)(nil)
+	_ api.ContextPanelClient          = (*proxypanel.APIClient)(nil)
+	_ api.ContextPanelClient          = (*sspanel.APIClient)(nil)
+	_ api.ContextPanelClient          = (*v2raysocks.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*bunpanel.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*gov2panel.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*newV2board.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*pmpanel.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*proxypanel.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*sspanel.APIClient)(nil)
+	_ api.NodeSnapshotProvider        = (*v2raysocks.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*bunpanel.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*gov2panel.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*newV2board.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*pmpanel.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*proxypanel.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*sspanel.APIClient)(nil)
+	_ api.ContextNodeSnapshotProvider = (*v2raysocks.APIClient)(nil)
 )
 
 type nodeInfoClient interface {
@@ -103,5 +117,107 @@ func TestPanelAdaptersCancelInFlightRESTRequests(t *testing.T) {
 				t.Fatal("in-flight REST request ignored cancellation")
 			}
 		})
+	}
+}
+
+type snapshotContextClient struct {
+	snapshot *api.NodeSnapshot
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (client *snapshotContextClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return client.snapshot.ToNodeInfo(), nil
+}
+
+func (client *snapshotContextClient) GetNodeSnapshotContext(context.Context) (*api.NodeSnapshot, error) {
+	if client.entered != nil {
+		close(client.entered)
+	}
+	if client.release != nil {
+		<-client.release
+	}
+	return client.snapshot, nil
+}
+
+func TestGetNodeSnapshotContextClonesContextualProviderResult(t *testing.T) {
+	source := &api.NodeSnapshot{
+		Port:   443,
+		Header: []byte(`{"type":"http"}`),
+		NameServers: []*api.NameServerSnapshot{{
+			Address: "1.1.1.1",
+		}},
+	}
+	client := &snapshotContextClient{snapshot: source}
+
+	got, err := api.GetNodeSnapshotContext(context.Background(), client)
+	if err != nil {
+		t.Fatalf("GetNodeSnapshotContext() error = %v", err)
+	}
+	if got == source {
+		t.Fatal("contextual provider result was returned without cloning")
+	}
+	got.Header[0] = '['
+	got.NameServers[0].Address = "8.8.8.8"
+	if string(source.Header) != `{"type":"http"}` || source.NameServers[0].Address != "1.1.1.1" {
+		t.Fatalf("provider-owned snapshot changed through returned value: %#v", source)
+	}
+}
+
+func TestGetNodeSnapshotContextChecksCancellationAfterContextualProviderReturns(t *testing.T) {
+	client := &snapshotContextClient{
+		snapshot: &api.NodeSnapshot{Port: 443},
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := api.GetNodeSnapshotContext(ctx, client)
+		result <- err
+	}()
+	<-client.entered
+	cancel()
+	close(client.release)
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetNodeSnapshotContext() error = %v, want context cancellation", err)
+	}
+}
+
+type lateLegacyNodeClient struct {
+	node    *api.NodeInfo
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (client *lateLegacyNodeClient) GetNodeInfo() (*api.NodeInfo, error) {
+	return client.node, nil
+}
+
+func (client *lateLegacyNodeClient) GetNodeInfoContext(context.Context) (*api.NodeInfo, error) {
+	close(client.entered)
+	<-client.release
+	return client.node, nil
+}
+
+func TestGetNodeSnapshotContextChecksCancellationAfterLegacyProviderReturns(t *testing.T) {
+	client := &lateLegacyNodeClient{
+		node:    &api.NodeInfo{Port: 443},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := api.GetNodeSnapshotContext(ctx, client)
+		result <- err
+	}()
+	<-client.entered
+	cancel()
+	close(client.release)
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetNodeSnapshotContext() legacy error = %v, want context cancellation", err)
 	}
 }

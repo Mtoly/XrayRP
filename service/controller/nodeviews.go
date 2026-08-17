@@ -120,112 +120,124 @@ type shadowsocksPluginNodeViews struct {
 }
 
 func (value nodeValue) inboundView() inboundNodeView {
-	nodeInfo := value.snapshot()
-	if nodeInfo == nil {
+	return inboundViewFromSnapshot(value.normalizedSnapshot())
+}
+
+func inboundViewFromSnapshot(snapshot *api.NodeSnapshot) inboundNodeView {
+	if snapshot == nil {
 		return inboundNodeView{}
 	}
 
 	view := inboundNodeView{
 		listener: inboundListenerView{
-			nodeType:  nodeInfo.NodeType,
-			port:      nodeInfo.Port,
-			enableTLS: nodeInfo.EnableTLS,
+			nodeType:  snapshot.NodeType,
+			port:      snapshot.Port,
+			enableTLS: snapshot.EnableTLS,
 		},
-		enableVless:   nodeInfo.EnableVless,
-		cypherMethod:  nodeInfo.CypherMethod,
-		serverKey:     nodeInfo.ServerKey,
-		enableReality: nodeInfo.EnableREALITY,
+		enableVless:   snapshot.EnableVless,
+		cypherMethod:  snapshot.CypherMethod,
+		serverKey:     snapshot.ServerKey,
+		enableReality: snapshot.EnableREALITY,
 		transport: inboundTransportView{
-			protocol:             nodeInfo.TransportProtocol,
-			acceptProxyProtocol:  nodeInfo.AcceptProxyProtocol,
-			authority:            nodeInfo.Authority,
-			host:                 nodeInfo.Host,
-			path:                 nodeInfo.Path,
-			serviceName:          nodeInfo.ServiceName,
-			header:               cloneRawMessage(nodeInfo.Header),
-			headers:              cloneMap(nodeInfo.Headers),
-			xhttpMode:            nodeInfo.XHTTPMode,
-			xhttpExtra:           cloneRawMessage(nodeInfo.XHTTPExtra),
-			xPaddingBytes:        newOptionalInt32Range(nodeInfo.XPaddingBytes),
-			xPaddingObfsMode:     nodeInfo.XPaddingObfsMode,
-			xPaddingKey:          nodeInfo.XPaddingKey,
-			xPaddingHeader:       nodeInfo.XPaddingHeader,
-			xPaddingPlacement:    nodeInfo.XPaddingPlacement,
-			xPaddingMethod:       nodeInfo.XPaddingMethod,
-			uplinkHTTPMethod:     nodeInfo.UplinkHTTPMethod,
-			sessionPlacement:     nodeInfo.SessionPlacement,
-			sessionKey:           nodeInfo.SessionKey,
-			seqPlacement:         nodeInfo.SeqPlacement,
-			seqKey:               nodeInfo.SeqKey,
-			uplinkDataPlacement:  nodeInfo.UplinkDataPlacement,
-			uplinkDataKey:        nodeInfo.UplinkDataKey,
-			uplinkChunkSize:      nodeInfo.UplinkChunkSize,
-			noGRPCHeader:         nodeInfo.NoGRPCHeader,
-			noSSEHeader:          nodeInfo.NoSSEHeader,
-			scMaxEachPostBytes:   newOptionalInt32Range(nodeInfo.ScMaxEachPostBytes),
-			scMinPostsIntervalMS: newOptionalInt32Range(nodeInfo.ScMinPostsIntervalMs),
-			scMaxBufferedPosts:   nodeInfo.ScMaxBufferedPosts,
-			scStreamUpServerSecs: newOptionalInt32Range(nodeInfo.ScStreamUpServerSecs),
-			xmuxMaxConcurrency:   newOptionalInt32Range(nodeInfo.XmuxMaxConcurrency),
-			xmuxMaxConnections:   newOptionalInt32Range(nodeInfo.XmuxMaxConnections),
-			xmuxCMaxReuseTimes:   newOptionalInt32Range(nodeInfo.XmuxCMaxReuseTimes),
-			xmuxHMaxRequestTimes: newOptionalInt32Range(nodeInfo.XmuxHMaxRequestTimes),
-			xmuxHMaxReusableSecs: newOptionalInt32Range(nodeInfo.XmuxHMaxReusableSecs),
-			xmuxHKeepAlivePeriod: nodeInfo.XmuxHKeepAlivePeriod,
+			protocol:             snapshot.TransportProtocol,
+			acceptProxyProtocol:  snapshot.AcceptProxyProtocol,
+			authority:            snapshot.Authority,
+			host:                 snapshot.Host,
+			path:                 snapshot.Path,
+			serviceName:          snapshot.ServiceName,
+			header:               cloneRawMessage(snapshot.Header),
+			headers:              cloneMap(snapshot.Headers),
+			xhttpMode:            snapshot.XHTTPMode,
+			xhttpExtra:           cloneRawMessage(snapshot.XHTTPExtra),
+			xPaddingBytes:        newOptionalInt32Range(snapshot.XPaddingBytes),
+			xPaddingObfsMode:     snapshot.XPaddingObfsMode,
+			xPaddingKey:          snapshot.XPaddingKey,
+			xPaddingHeader:       snapshot.XPaddingHeader,
+			xPaddingPlacement:    snapshot.XPaddingPlacement,
+			xPaddingMethod:       snapshot.XPaddingMethod,
+			uplinkHTTPMethod:     snapshot.UplinkHTTPMethod,
+			sessionPlacement:     snapshot.SessionPlacement,
+			sessionKey:           snapshot.SessionKey,
+			seqPlacement:         snapshot.SeqPlacement,
+			seqKey:               snapshot.SeqKey,
+			uplinkDataPlacement:  snapshot.UplinkDataPlacement,
+			uplinkDataKey:        snapshot.UplinkDataKey,
+			uplinkChunkSize:      snapshot.UplinkChunkSize,
+			noGRPCHeader:         snapshot.NoGRPCHeader,
+			noSSEHeader:          snapshot.NoSSEHeader,
+			scMaxEachPostBytes:   newOptionalInt32Range(snapshot.ScMaxEachPostBytes),
+			scMinPostsIntervalMS: newOptionalInt32Range(snapshot.ScMinPostsIntervalMs),
+			scMaxBufferedPosts:   snapshot.ScMaxBufferedPosts,
+			scStreamUpServerSecs: newOptionalInt32Range(snapshot.ScStreamUpServerSecs),
+			xmuxMaxConcurrency:   newOptionalInt32Range(snapshot.XmuxMaxConcurrency),
+			xmuxMaxConnections:   newOptionalInt32Range(snapshot.XmuxMaxConnections),
+			xmuxCMaxReuseTimes:   newOptionalInt32Range(snapshot.XmuxCMaxReuseTimes),
+			xmuxHMaxRequestTimes: newOptionalInt32Range(snapshot.XmuxHMaxRequestTimes),
+			xmuxHMaxReusableSecs: newOptionalInt32Range(snapshot.XmuxHMaxReusableSecs),
+			xmuxHKeepAlivePeriod: snapshot.XmuxHKeepAlivePeriod,
 		},
 	}
-	if nodeInfo.REALITYConfig != nil {
+	if snapshot.REALITYConfig != nil {
 		view.reality = inboundRealityView{
 			set:              true,
-			dest:             nodeInfo.REALITYConfig.Dest,
-			proxyProtocolVer: nodeInfo.REALITYConfig.ProxyProtocolVer,
-			serverNames:      cloneSlice(nodeInfo.REALITYConfig.ServerNames),
-			privateKey:       nodeInfo.REALITYConfig.PrivateKey,
-			minClientVer:     nodeInfo.REALITYConfig.MinClientVer,
-			maxClientVer:     nodeInfo.REALITYConfig.MaxClientVer,
-			maxTimeDiff:      nodeInfo.REALITYConfig.MaxTimeDiff,
-			shortIDs:         cloneSlice(nodeInfo.REALITYConfig.ShortIds),
+			dest:             snapshot.REALITYConfig.Dest,
+			proxyProtocolVer: snapshot.REALITYConfig.ProxyProtocolVer,
+			serverNames:      cloneSlice(snapshot.REALITYConfig.ServerNames),
+			privateKey:       snapshot.REALITYConfig.PrivateKey,
+			minClientVer:     snapshot.REALITYConfig.MinClientVer,
+			maxClientVer:     snapshot.REALITYConfig.MaxClientVer,
+			maxTimeDiff:      snapshot.REALITYConfig.MaxTimeDiff,
+			shortIDs:         cloneSlice(snapshot.REALITYConfig.ShortIds),
 		}
 	}
 	return view
 }
 
 func (value nodeValue) outboundView() outboundNodeView {
-	nodeInfo := value.snapshot()
-	if nodeInfo == nil {
+	return outboundViewFromSnapshot(value.normalizedSnapshot())
+}
+
+func outboundViewFromSnapshot(snapshot *api.NodeSnapshot) outboundNodeView {
+	if snapshot == nil {
 		return outboundNodeView{}
 	}
 	return outboundNodeView{
-		nodeType: nodeInfo.NodeType,
-		port:     nodeInfo.Port,
+		nodeType: snapshot.NodeType,
+		port:     snapshot.Port,
 	}
 }
 
 func (value nodeValue) routingPolicy() routingPolicyValue {
-	nodeInfo := value.snapshot()
-	if nodeInfo == nil {
+	return routingPolicyFromSnapshot(value.normalizedSnapshot())
+}
+
+func routingPolicyFromSnapshot(snapshot *api.NodeSnapshot) routingPolicyValue {
+	if snapshot == nil {
 		return routingPolicyValue{}
 	}
-	return newRoutingPolicyValue(nodeInfo.RoutePolicy)
+	return newRoutingPolicyValue(snapshot.RoutePolicy)
 }
 
 func (value nodeValue) userView() userNodeView {
-	nodeInfo := value.snapshot()
-	if nodeInfo == nil {
+	return userViewFromSnapshot(value.normalizedSnapshot())
+}
+
+func userViewFromSnapshot(snapshot *api.NodeSnapshot) userNodeView {
+	if snapshot == nil {
 		return userNodeView{}
 	}
 
-	flow := strings.TrimSpace(nodeInfo.VlessFlow)
+	flow := strings.TrimSpace(snapshot.VlessFlow)
 	if flow != "" {
-		transport := strings.ToLower(strings.TrimSpace(nodeInfo.TransportProtocol))
-		if transport != "tcp" || (!nodeInfo.EnableTLS && !nodeInfo.EnableREALITY) || nodeInfo.Header != nil {
+		transport := strings.ToLower(strings.TrimSpace(snapshot.TransportProtocol))
+		if transport != "tcp" || (!snapshot.EnableTLS && !snapshot.EnableREALITY) || snapshot.Header != nil {
 			flow = ""
 		}
 	}
 	return userNodeView{
-		nodeType:     nodeInfo.NodeType,
-		enableVless:  nodeInfo.EnableVless,
-		cypherMethod: nodeInfo.CypherMethod,
+		nodeType:     snapshot.NodeType,
+		enableVless:  snapshot.EnableVless,
+		cypherMethod: snapshot.CypherMethod,
 		vless:        vlessUserNodeView{effectiveFlow: flow},
 	}
 }

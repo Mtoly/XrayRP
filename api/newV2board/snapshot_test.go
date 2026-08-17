@@ -389,6 +389,30 @@ func TestNodeInfoFromUniProxySnapshotDispatchesV2ray(t *testing.T) {
 	}
 }
 
+func TestNodeSnapshotFromUniProxySnapshotKeepsNeutralDNS(t *testing.T) {
+	client := &APIClient{NodeID: 1, NodeType: "V2ray"}
+	snapshot := &serverConfig{
+		ServerPort: 443,
+		Routes: []route{{
+			Action:      "dns",
+			ActionValue: "1.1.1.1",
+			Match:       []string{"domain:example.test"},
+		}},
+	}
+	snapshot.Network = "tcp"
+
+	nodeSnapshot, err := client.nodeSnapshotFromUniProxySnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("nodeSnapshotFromUniProxySnapshot returned error: %v", err)
+	}
+	if len(nodeSnapshot.NameServers) != 1 || nodeSnapshot.NameServers[0].Address != "1.1.1.1" {
+		t.Fatalf("unexpected normalized DNS snapshot: %#v", nodeSnapshot.NameServers)
+	}
+	if len(nodeSnapshot.NameServers[0].Domains) != 1 || nodeSnapshot.NameServers[0].Domains[0] != "domain:example.test" {
+		t.Fatalf("unexpected normalized DNS domains: %#v", nodeSnapshot.NameServers[0].Domains)
+	}
+}
+
 func TestNodeInfoFromUniProxySnapshotDispatchesLowercaseMachineVless(t *testing.T) {
 	client := &APIClient{NodeID: 1, NodeType: "vless"}
 	snapshot := &serverConfig{ServerPort: 443}

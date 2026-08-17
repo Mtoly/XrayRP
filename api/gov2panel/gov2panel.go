@@ -61,6 +61,14 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
+	snapshot, err := c.getNodeSnapshotContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.ToNodeInfo(), nil
+}
+
+func (c *APIClient) getNodeSnapshotContext(ctx context.Context) (snapshot *api.NodeSnapshot, err error) {
 
 	apiPath := "/api/server/config"
 	response, err := c.sendRequestContext(ctx,
@@ -80,8 +88,8 @@ func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeI
 		return nil, errors.New("server port must > 0")
 	}
 
-	nodeInfo = new(api.NodeInfo)
-	err = response.scanAt("data", nodeInfo)
+	snapshot = new(api.NodeSnapshot)
+	err = response.scanAt("data", snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("parse node info failed: \nError: %v", err)
 	}
@@ -92,16 +100,16 @@ func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeI
 		return nil, fmt.Errorf("parse node routes failed: \nError: %v", err)
 	}
 
-	nodeInfo.NodeType = c.NodeType
-	nodeInfo.NodeID = c.NodeID
-	nodeInfo.EnableVless = c.EnableVless
-	nodeInfo.VlessFlow = c.VlessFlow
+	snapshot.NodeType = c.NodeType
+	snapshot.NodeID = c.NodeID
+	snapshot.EnableVless = c.EnableVless
+	snapshot.VlessFlow = c.VlessFlow
 
-	nodeInfo.AlterID = 0
+	snapshot.AlterID = 0
 
-	nodeInfo.NameServerConfig = parseDNSConfig(routes)
+	snapshot.NameServers = parseNormalizedDNSConfig(routes)
 
-	return nodeInfo, nil
+	return snapshot, nil
 
 }
 
@@ -117,6 +125,19 @@ func parseDNSConfig(routes []route) (nameServerList []*conf.NameServerConfig) {
 		}
 	}
 
+	return
+}
+
+func parseNormalizedDNSConfig(routes []route) (nameServerList []*api.NameServerSnapshot) {
+	nameServerList = make([]*api.NameServerSnapshot, 0)
+	for i := range routes {
+		if routes[i].Action == "dns" {
+			nameServerList = append(nameServerList, &api.NameServerSnapshot{
+				Address: routes[i].ActionValue,
+				Domains: append([]string{}, routes[i].Match...),
+			})
+		}
+	}
 	return
 }
 

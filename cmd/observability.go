@@ -312,8 +312,37 @@ func renderMetrics(snapshot service.RuntimeSnapshot, readiness service.Readiness
 	writeMetricHeader(&buffer, "xrayrp_cleanup_pending", "Whether owned runtime cleanup remains pending.", "gauge")
 	writeMetricHeader(&buffer, "xrayrp_traffic_report_backlog", "Count of traffic records pending successful reporting.", "gauge")
 	writeMetricHeader(&buffer, "xrayrp_certificate_expiry_timestamp_seconds", "Earliest observed certificate expiry time.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_phase", "Current hot-reload phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_attempts_total", "Hot-reload attempts observed by the panel runtime.", "counter")
+	writeMetricHeader(&buffer, "xrayrp_reload_successes_total", "Hot-reload attempts that committed a candidate.", "counter")
+	writeMetricHeader(&buffer, "xrayrp_reload_failures_total", "Hot-reload attempts that did not commit a candidate.", "counter")
+	writeMetricHeader(&buffer, "xrayrp_reload_candidate_duration_seconds", "Duration of the latest candidate load and validation phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_stop_duration_seconds", "Duration of the latest old-runtime stop phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_start_duration_seconds", "Duration of the latest candidate start phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_commit_duration_seconds", "Duration of the latest candidate commit phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_rollback_duration_seconds", "Duration of the latest rollback phase.", "gauge")
+	writeMetricHeader(&buffer, "xrayrp_reload_interruption_duration_seconds", "Duration from old-runtime stop through commit or rollback completion.", "gauge")
+	renderReloadMetrics(&buffer, snapshot)
 	visit(snapshot, "")
 	return buffer.Bytes()
+}
+
+func renderReloadMetrics(buffer *bytes.Buffer, snapshot service.RuntimeSnapshot) {
+	labels := map[string]string{
+		"kind":  boundedRuntimeKind(snapshot.Kind),
+		"phase": boundedReloadPhase(snapshot.Reload.Phase),
+	}
+	writeGaugeWithKeys(buffer, "xrayrp_reload_phase", labels, 1, []string{"kind", "phase"})
+	baseLabels := map[string]string{"kind": boundedRuntimeKind(snapshot.Kind)}
+	writeGaugeWithKeys(buffer, "xrayrp_reload_attempts_total", baseLabels, float64(snapshot.Reload.Attempts), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_successes_total", baseLabels, float64(snapshot.Reload.Successes), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_failures_total", baseLabels, float64(snapshot.Reload.Failures), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_candidate_duration_seconds", baseLabels, snapshot.Reload.LastCandidateDuration.Seconds(), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_stop_duration_seconds", baseLabels, snapshot.Reload.LastStopDuration.Seconds(), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_start_duration_seconds", baseLabels, snapshot.Reload.LastStartDuration.Seconds(), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_commit_duration_seconds", baseLabels, snapshot.Reload.LastCommitDuration.Seconds(), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_rollback_duration_seconds", baseLabels, snapshot.Reload.LastRollbackDuration.Seconds(), []string{"kind"})
+	writeGaugeWithKeys(buffer, "xrayrp_reload_interruption_duration_seconds", baseLabels, snapshot.Reload.LastInterruptionDuration.Seconds(), []string{"kind"})
 }
 
 func isNodeRuntime(kind service.RuntimeKind) bool {
@@ -330,9 +359,12 @@ func writeMetricHeader(buffer *bytes.Buffer, name, help, metricType string) {
 }
 
 func writeGauge(buffer *bytes.Buffer, name string, labels map[string]string, value float64) {
+	writeGaugeWithKeys(buffer, name, labels, value, []string{"kind", "mode", "lifecycle", "node_slot", "websocket", "failure_stage"})
+}
+
+func writeGaugeWithKeys(buffer *bytes.Buffer, name string, labels map[string]string, value float64, keys []string) {
 	buffer.WriteString(name)
 	if len(labels) != 0 {
-		keys := []string{"kind", "mode", "lifecycle", "node_slot", "websocket", "failure_stage"}
 		buffer.WriteByte('{')
 		for index, key := range keys {
 			if index > 0 {
@@ -388,6 +420,18 @@ func boundedFailureStage(value service.FailureStage) string {
 	case service.FailureStageNone, service.FailureStageStart, service.FailureStageSync, service.FailureStageWebSocket,
 		service.FailureStageReconcile, service.FailureStageReport, service.FailureStageCertificate,
 		service.FailureStageRuntime, service.FailureStageClose, service.FailureStageCleanup:
+		return string(value)
+	default:
+		return "unknown"
+	}
+}
+
+func boundedReloadPhase(value service.ReloadPhase) string {
+	switch value {
+	case "", service.ReloadPhaseNone:
+		return string(service.ReloadPhaseNone)
+	case service.ReloadPhaseCandidate, service.ReloadPhaseStop,
+		service.ReloadPhaseStart, service.ReloadPhaseCommit, service.ReloadPhaseRollback:
 		return string(value)
 	default:
 		return "unknown"

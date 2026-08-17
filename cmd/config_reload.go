@@ -97,12 +97,20 @@ type panelReloadOptions struct {
 	applyProcessConfig func(*panel.Config)
 	collectGarbage     func()
 	now                func() time.Time
+	reloadClock        func() time.Time
 	observeOperation   func(panelReloadOperation, panelReloadOperationPhase)
+}
+
+type panelReloadObservation struct {
+	snapshot              service.ReloadSnapshot
+	phaseStartedAt        time.Time
+	interruptionStartedAt time.Time
 }
 
 type panelReloadModule struct {
 	operationMu   operation.Gate
 	stateMu       sync.RWMutex
+	reloadMu      sync.RWMutex
 	applied       panelReloadState
 	configFile    string
 	lastAppliedAt time.Time
@@ -113,7 +121,9 @@ type panelReloadModule struct {
 	applyProcess  func(*panel.Config)
 	collect       func()
 	now           func() time.Time
+	reloadClock   func() time.Time
 	observeOp     func(panelReloadOperation, panelReloadOperationPhase)
+	reload        panelReloadObservation
 }
 
 func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRuntime, options panelReloadOptions) *panelReloadModule {
@@ -140,6 +150,9 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 	if options.now == nil {
 		options.now = time.Now
 	}
+	if options.reloadClock == nil {
+		options.reloadClock = time.Now
+	}
 	if options.lastAppliedAt.IsZero() {
 		options.lastAppliedAt = options.now()
 	}
@@ -150,6 +163,9 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 			runtime: initialRuntime,
 			status:  panelReloadStatusReady,
 		},
+		reload: panelReloadObservation{
+			snapshot: service.ReloadSnapshot{Phase: service.ReloadPhaseNone},
+		},
 		configFile:    options.configFile,
 		lastAppliedAt: options.lastAppliedAt,
 		debounce:      options.debounce,
@@ -159,6 +175,7 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		applyProcess:  options.applyProcessConfig,
 		collect:       options.collectGarbage,
 		now:           options.now,
+		reloadClock:   options.reloadClock,
 		observeOp:     options.observeOperation,
 	}
 }
@@ -189,6 +206,12 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 	}
 
 	fmt.Println("Config file changed:", eventName)
+	m.beginReloadObservation()
+	reloadSucceeded := false
+	defer func() {
+		m.finishReloadObservation(reloadSucceeded)
+	}()
+
 	candidateConfig, err := m.loadCandidate(eventName, m.configFile)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
@@ -211,6 +234,7 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 		runtime: current.runtime,
 		status:  panelReloadStatusReloading,
 	})
+	m.transitionReloadPhase(service.ReloadPhaseStop)
 
 	if current.runtime != nil {
 		if closeErr := closePanelRuntimeContext(ctx, current.runtime); closeErr != nil {
@@ -222,6 +246,7 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 				status:  panelReloadStatusFailedOwned,
 				failure: joined,
 			})
+			m.transitionReloadPhase(service.ReloadPhaseRollback)
 			return joined
 		}
 	}
@@ -230,17 +255,20 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 		status: panelReloadStatusReloading,
 	})
 	m.collect()
+	m.transitionReloadPhase(service.ReloadPhaseStart)
 
 	candidateRuntime := m.buildRuntime(candidateConfig)
 	if candidateRuntime == nil {
 		err := errors.New("build new panel: nil runtime")
 		log.Error("Hot reload: failed to build new panel")
+		m.transitionReloadPhase(service.ReloadPhaseRollback)
 		return m.restoreLastKnownGoodContext(ctx, current, []error{err})
 	}
 
 	if err := startPanelRuntimeContext(ctx, candidateRuntime); err != nil {
 		log.Error("Hot reload: failed to start new panel")
 		errs := []error{fmt.Errorf("start new panel: %w", err)}
+		m.transitionReloadPhase(service.ReloadPhaseRollback)
 		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
 		cleanupErr := closePanelRuntimeContext(cleanupCtx, candidateRuntime)
 		cleanupCancel()
@@ -260,6 +288,7 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 	}
 
 	if err := ctx.Err(); err != nil {
+		m.transitionReloadPhase(service.ReloadPhaseRollback)
 		cleanupCtx, cleanupCancel := service.CleanupContext(ctx)
 		cleanupErr := closePanelRuntimeContext(cleanupCtx, candidateRuntime)
 		cleanupCancel()
@@ -270,6 +299,7 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 		}
 		return m.restoreLastKnownGoodContext(ctx, current, []error{err})
 	}
+	m.transitionReloadPhase(service.ReloadPhaseCommit)
 	m.applyProcess(candidateConfig)
 	m.publishState(panelReloadState{
 		config:  candidateConfig,
@@ -277,6 +307,7 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 		status:  panelReloadStatusReady,
 	})
 	m.lastAppliedAt = m.now()
+	reloadSucceeded = true
 	return nil
 }
 func (m *panelReloadModule) Close() error {
@@ -412,6 +443,7 @@ func (m *panelReloadModule) ObservabilitySnapshot() service.RuntimeSnapshot {
 		return service.RuntimeSnapshot{Kind: service.RuntimeKindPanel, Lifecycle: service.RuntimeLifecycleClosed, WebSocket: service.WebSocketDisabled}
 	}
 	state := m.stateSnapshot()
+	reload := m.reloadSnapshot()
 	snapshot := service.RuntimeSnapshot{
 		Kind:      service.RuntimeKindPanel,
 		Lifecycle: service.RuntimeLifecycleStopped,
@@ -420,6 +452,7 @@ func (m *panelReloadModule) ObservabilitySnapshot() service.RuntimeSnapshot {
 	if provider, ok := state.runtime.(service.RuntimeSnapshotProvider); ok {
 		snapshot = provider.ObservabilitySnapshot()
 	}
+	snapshot.Reload = reload
 	switch state.status {
 	case panelReloadStatusReady:
 	case panelReloadStatusReloading:
@@ -440,6 +473,99 @@ func (m *panelReloadModule) ObservabilitySnapshot() service.RuntimeSnapshot {
 		snapshot.Children = nil
 	}
 	return snapshot
+}
+
+func (m *panelReloadModule) beginReloadObservation() {
+	now := m.reloadNow()
+	m.reloadMu.Lock()
+	m.reload.snapshot.Attempts++
+	m.reload.snapshot.Phase = service.ReloadPhaseCandidate
+	m.reload.snapshot.LastCandidateDuration = 0
+	m.reload.snapshot.LastStopDuration = 0
+	m.reload.snapshot.LastStartDuration = 0
+	m.reload.snapshot.LastCommitDuration = 0
+	m.reload.snapshot.LastRollbackDuration = 0
+	m.reload.snapshot.LastInterruptionDuration = 0
+	m.reload.phaseStartedAt = now
+	m.reload.interruptionStartedAt = time.Time{}
+	m.reloadMu.Unlock()
+}
+
+func (m *panelReloadModule) transitionReloadPhase(next service.ReloadPhase) {
+	now := m.reloadNow()
+	m.reloadMu.Lock()
+	m.finishReloadPhaseLocked(now)
+	if next == service.ReloadPhaseNone {
+		m.reload.snapshot.Phase = service.ReloadPhaseNone
+		m.reload.phaseStartedAt = time.Time{}
+		m.reloadMu.Unlock()
+		return
+	}
+	m.reload.snapshot.Phase = next
+	m.reload.phaseStartedAt = now
+	if next == service.ReloadPhaseStop {
+		m.reload.interruptionStartedAt = now
+	}
+	m.reloadMu.Unlock()
+}
+
+func (m *panelReloadModule) finishReloadPhaseLocked(now time.Time) {
+	phase := m.reload.snapshot.Phase
+	if phase == service.ReloadPhaseNone || m.reload.phaseStartedAt.IsZero() {
+		return
+	}
+	duration := nonNegativeDuration(now.Sub(m.reload.phaseStartedAt))
+	switch phase {
+	case service.ReloadPhaseCandidate:
+		m.reload.snapshot.LastCandidateDuration = duration
+	case service.ReloadPhaseStop:
+		m.reload.snapshot.LastStopDuration = duration
+	case service.ReloadPhaseStart:
+		m.reload.snapshot.LastStartDuration = duration
+	case service.ReloadPhaseCommit:
+		m.reload.snapshot.LastCommitDuration = duration
+	case service.ReloadPhaseRollback:
+		m.reload.snapshot.LastRollbackDuration = duration
+	}
+}
+
+func (m *panelReloadModule) finishReloadObservation(success bool) {
+	now := m.reloadNow()
+	m.reloadMu.Lock()
+	m.finishReloadPhaseLocked(now)
+	if !m.reload.interruptionStartedAt.IsZero() {
+		m.reload.snapshot.LastInterruptionDuration = nonNegativeDuration(now.Sub(m.reload.interruptionStartedAt))
+	}
+	if success {
+		m.reload.snapshot.Successes++
+	} else {
+		m.reload.snapshot.Failures++
+	}
+	m.reload.snapshot.Phase = service.ReloadPhaseNone
+	m.reload.phaseStartedAt = time.Time{}
+	m.reload.interruptionStartedAt = time.Time{}
+	m.reloadMu.Unlock()
+}
+
+func (m *panelReloadModule) reloadSnapshot() service.ReloadSnapshot {
+	m.reloadMu.RLock()
+	defer m.reloadMu.RUnlock()
+	return m.reload.snapshot
+}
+
+func (m *panelReloadModule) reloadNow() time.Time {
+	now := m.reloadClock()
+	if now.IsZero() {
+		return time.Now()
+	}
+	return now
+}
+
+func nonNegativeDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func (m *panelReloadModule) publishState(state panelReloadState) {

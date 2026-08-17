@@ -12,6 +12,26 @@ type taskStartFailure struct {
 	cleanupErr error
 }
 
+type runtimeStartFailure struct {
+	startErr   error
+	cleanupErr error
+}
+
+func (e *runtimeStartFailure) Error() string {
+	return errors.Join(e.startErr, e.cleanupErr).Error()
+}
+
+func (e *runtimeStartFailure) Unwrap() []error {
+	result := make([]error, 0, 2)
+	if e.startErr != nil {
+		result = append(result, e.startErr)
+	}
+	if e.cleanupErr != nil {
+		result = append(result, e.cleanupErr)
+	}
+	return result
+}
+
 func (e *taskStartFailure) Error() string {
 	return errors.Join(e.startErr, e.cleanupErr).Error()
 }
@@ -31,7 +51,18 @@ func (e *taskStartFailure) Unwrap() []error {
 // resources it attempted to roll back.
 func StartCleanupFailed(err error) bool {
 	var failure *taskStartFailure
-	return errors.As(err, &failure) && failure.cleanupErr != nil
+	if errors.As(err, &failure) && failure.cleanupErr != nil {
+		return true
+	}
+	var runtimeFailure *runtimeStartFailure
+	return errors.As(err, &runtimeFailure) && runtimeFailure.cleanupErr != nil
+}
+
+// RuntimeStartFailed reports whether a RuntimeHost failed before periodic
+// tasks were started.
+func RuntimeStartFailed(err error) bool {
+	var failure *runtimeStartFailure
+	return errors.As(err, &failure)
 }
 
 // Task is the lifecycle surface shared by controller periodic tasks.
@@ -147,8 +178,9 @@ func (t *Tasks) CloseStoppedContext(ctx context.Context, runtime RuntimeShutdown
 func (t *Tasks) rollbackThroughContext(ctx context.Context, last int, runtime RuntimeShutdown) error {
 	var errs []error
 	errs = append(errs, t.stopThroughContext(ctx, last)...)
-	errs = append(errs, callRuntimeStopContext(ctx, runtime), callRuntimeJoinContext(ctx, runtime))
+	errs = append(errs, callRuntimeStopContext(ctx, runtime))
 	errs = append(errs, t.waitThroughContext(ctx, last)...)
+	errs = append(errs, callRuntimeJoinContext(ctx, runtime))
 	return errors.Join(errs...)
 }
 

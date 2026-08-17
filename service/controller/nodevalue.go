@@ -10,19 +10,23 @@ import (
 
 // nodeValue is the package-private representation owned by Node runtime state.
 // Values produced by repository adapters are immutable because their mutable
-// fields are cloned. Custom xraynet.Address implementations are retained as a
-// compatibility exception because the open interface has no clone contract.
+// fields are cloned. Unknown xraynet.Address implementations are represented
+// by immutable value adapters because the open interface has no clone contract.
 // The raw compatibility value is never returned directly.
 type nodeValue struct {
 	set bool
-	raw api.NodeInfo
+	raw api.NodeSnapshot
 }
 
 func normalizeNodeInfo(nodeInfo *api.NodeInfo) nodeValue {
-	if nodeInfo == nil {
+	return normalizeNodeSnapshot(api.NormalizeNodeInfo(nodeInfo))
+}
+
+func normalizeNodeSnapshot(snapshot *api.NodeSnapshot) nodeValue {
+	if snapshot == nil {
 		return nodeValue{}
 	}
-	cloned := appliednode.Clone(nodeInfo)
+	cloned := appliednode.CloneSnapshot(snapshot)
 	return nodeValue{
 		set: true,
 		raw: *cloned,
@@ -37,10 +41,20 @@ func (value nodeValue) snapshot() *api.NodeInfo {
 	if !value.set {
 		return nil
 	}
-	return appliednode.Clone(&value.raw)
+	return value.raw.Clone().ToNodeInfo()
+}
+
+func (value nodeValue) normalizedSnapshot() *api.NodeSnapshot {
+	if !value.set {
+		return nil
+	}
+	return value.raw.Clone()
 }
 
 func (value nodeValue) equal(other nodeValue) bool {
+	// This compatibility-value comparison retains legacy representation
+	// identity for callers that still inspect NodeInfo materialization. Runtime
+	// change detection uses api.NodeSnapshot.Equal instead.
 	if value.set != other.set {
 		return false
 	}

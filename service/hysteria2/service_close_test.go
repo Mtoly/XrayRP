@@ -493,7 +493,7 @@ func TestStartHandshakeFailureWaitsForServeExit(t *testing.T) {
 	}
 }
 
-func TestStartTaskFailureStopsTasksClosesRuntimeWaitsForServeThenTasks(t *testing.T) {
+func TestStartTaskFailureStopsTasksClosesRuntimeWaitsForTasksThenServe(t *testing.T) {
 	taskStartErr := errors.New("task start failed")
 	taskStopErr := errors.New("task stop failed")
 	taskWaitErr := errors.New("task wait failed")
@@ -599,9 +599,9 @@ func TestStartTaskFailureStopsTasksClosesRuntimeWaitsForServeThenTasks(t *testin
 		"task-stop:node monitor",
 		"task-stop:Hysteria2_127.0.0.1_9443_9",
 		"runtime-close",
-		"serve-exit",
 		"task-wait:node monitor",
 		"task-wait:Hysteria2_127.0.0.1_9443_9",
+		"serve-exit",
 	}
 	for i := 1; i < len(ordered); i++ {
 		if index(ordered[i-1]) < 0 || index(ordered[i-1]) >= index(ordered[i]) {

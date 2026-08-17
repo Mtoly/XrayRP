@@ -73,6 +73,30 @@ const (
 	FailureStageCleanup     FailureStage = "cleanup"
 )
 
+type ReloadPhase string
+
+const (
+	ReloadPhaseNone      ReloadPhase = "none"
+	ReloadPhaseCandidate ReloadPhase = "candidate"
+	ReloadPhaseStop      ReloadPhase = "stop"
+	ReloadPhaseStart     ReloadPhase = "start"
+	ReloadPhaseCommit    ReloadPhase = "commit"
+	ReloadPhaseRollback  ReloadPhase = "rollback"
+)
+
+type ReloadSnapshot struct {
+	Phase                    ReloadPhase
+	Attempts                 uint64
+	Successes                uint64
+	Failures                 uint64
+	LastCandidateDuration    time.Duration
+	LastStopDuration         time.Duration
+	LastStartDuration        time.Duration
+	LastCommitDuration       time.Duration
+	LastRollbackDuration     time.Duration
+	LastInterruptionDuration time.Duration
+}
+
 type RuntimeSnapshot struct {
 	Kind                 RuntimeKind
 	Mode                 RuntimeMode
@@ -86,6 +110,7 @@ type RuntimeSnapshot struct {
 	CleanupPending       bool
 	TrafficReportBacklog int
 	CertificateExpiresAt time.Time
+	Reload               ReloadSnapshot
 	Children             []RuntimeSnapshot
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -143,43 +142,11 @@ func (c *APIClient) GetNodeInfo() (*api.NodeInfo, error) {
 }
 
 func (c *APIClient) GetNodeInfoContext(ctx context.Context) (nodeInfo *api.NodeInfo, err error) {
-	path := fmt.Sprintf("/v2/server/%d/get", c.NodeID)
-	res, err := c.client.R().
-		SetContext(ctx).
-		SetResult(&Response{}).
-		SetHeader("If-None-Match", c.eTags.Get("node")).
-		ForceContentType("application/json").
-		Get(path)
-	if err := c.httpPolicy.CheckResponse(res, path, err); err != nil {
-		return nil, err
-	}
-	// Etag identifier for a specific version of a resource. StatusCode = 304 means no changed
-	if res.StatusCode() == 304 {
-		return nil, api.ErrNodeNotModified
-	}
-	candidateETag := res.Header().Get("ETag")
-
-	response, err := c.parseResponse(res, path, err)
+	snapshot, err := c.getNodeSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	nodeInfoResponse := new(Server)
-
-	if err := json.Unmarshal(response.Datas, nodeInfoResponse); err != nil {
-		return nil, fmt.Errorf("unmarshal %s failed: %s", reflect.TypeOf(nodeInfoResponse), err)
-	}
-
-	nodeInfo, err = c.ParseNodeInfo(nodeInfoResponse)
-	if err != nil {
-		return nil, panelhttp.NodeInfoParseError(err)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c.eTags.Publish("node", candidateETag)
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 func (c *APIClient) GetUserList() (*[]api.UserInfo, error) {
@@ -359,168 +326,11 @@ func (c *APIClient) ParseUserListResponse(userInfoResponse *[]User) (*[]api.User
 }
 
 func (c *APIClient) ParseNodeInfo(nodeInfoResponse *Server) (*api.NodeInfo, error) {
-	var (
-		speedLimit                            uint64 = 0
-		enableTLS, enableVless, enableREALITY bool
-		alterID                               uint16 = 0
-		tlsType, transportProtocol            string
-	)
-
-	nodeConfig := nodeInfoResponse
-	port := uint32(nodeConfig.Port)
-
-	switch c.NodeType {
-	case "Shadowsocks":
-		transportProtocol = "tcp"
-	case "V2ray":
-		transportProtocol = nodeConfig.Network
-		tlsType = nodeConfig.Security
-
-		if tlsType == "tls" || tlsType == "xtls" {
-			enableTLS = true
-		}
-		if tlsType == "reality" {
-			enableREALITY = true
-			enableVless = true
-		}
-	case "Trojan":
-		enableTLS = true
-		tlsType = "tls"
-		transportProtocol = "tcp"
+	snapshot, err := c.parseNodeSnapshotResponse(nodeInfoResponse)
+	if err != nil {
+		return nil, err
 	}
-
-	// parse reality config
-	realityConfig := new(api.REALITYConfig)
-	if nodeConfig.RealitySettings != nil {
-		r := new(RealitySettings)
-		if err := json.Unmarshal(nodeConfig.RealitySettings, r); err != nil {
-			return nil, fmt.Errorf("unmarshal RealitySettings failed: %w", err)
-		}
-		realityConfig = &api.REALITYConfig{
-			Dest:             r.Dest,
-			ProxyProtocolVer: r.ProxyProtocolVer,
-			ServerNames:      r.ServerNames,
-			PrivateKey:       r.PrivateKey,
-			MinClientVer:     r.MinClientVer,
-			MaxClientVer:     r.MaxClientVer,
-			MaxTimeDiff:      r.MaxTimeDiff,
-			ShortIds:         r.ShortIds,
-		}
-	}
-	wsConfig := new(WsSettings)
-	if nodeConfig.WsSettings != nil {
-		if err := json.Unmarshal(nodeConfig.WsSettings, wsConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal WsSettings failed: %w", err)
-		}
-	}
-
-	grpcConfig := new(GrpcSettigns)
-	if nodeConfig.GrpcSettings != nil {
-		if err := json.Unmarshal(nodeConfig.GrpcSettings, grpcConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal GrpcSettings failed: %w", err)
-		}
-	}
-
-	tcpConfig := new(TcpSettings)
-	if nodeConfig.TcpSettings != nil {
-		if err := json.Unmarshal(nodeConfig.TcpSettings, tcpConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal TcpSettings failed: %w", err)
-		}
-	}
-
-	// Parse SplitHTTP/XHTTP settings
-	splithttpConfig := new(SplitHTTPSettings)
-	if nodeConfig.XHTTPSettings != nil {
-		if err := validateOptionalXPaddingBytes(nodeConfig.XHTTPSettings); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(nodeConfig.XHTTPSettings, splithttpConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal XHTTPSettings failed: %w", err)
-		}
-	} else if nodeConfig.SplitHTTPSettings != nil {
-		if err := validateOptionalXPaddingBytes(nodeConfig.SplitHTTPSettings); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(nodeConfig.SplitHTTPSettings, splithttpConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal SplitHTTPSettings failed: %w", err)
-		}
-	}
-	if splithttpConfig.UplinkChunkSize > math.MaxInt32 {
-		return nil, fmt.Errorf("decode uplinkChunkSize: value %d exceeds runtime maximum %d", splithttpConfig.UplinkChunkSize, math.MaxInt32)
-	}
-
-	// Parse HttpUpgrade settings
-	httpupgradeConfig := new(HttpUpgradeSettings)
-	if nodeConfig.HttpUpgradeSettings != nil {
-		if err := json.Unmarshal(nodeConfig.HttpUpgradeSettings, httpupgradeConfig); err != nil {
-			return nil, fmt.Errorf("unmarshal HttpUpgradeSettings failed: %w", err)
-		}
-	}
-
-	var host, path, serviceName string
-	var header json.RawMessage
-	var headers map[string]string
-	switch transportProtocol {
-	case "ws":
-		host = wsConfig.Headers.Host
-		path = wsConfig.Path
-	case "grpc":
-		serviceName = grpcConfig.ServiceName
-	case "tcp":
-		header = tcpConfig.Header
-	case "splithttp", "xhttp":
-		host = splithttpConfig.Host
-		path = splithttpConfig.Path
-		headers = splithttpConfig.Headers
-	case "httpupgrade":
-		host = httpupgradeConfig.Host
-		path = httpupgradeConfig.Path
-		headers = httpupgradeConfig.Headers
-	default:
-		host = wsConfig.Headers.Host
-		path = wsConfig.Path
-	}
-
-	// Create GeneralNodeInfo
-	nodeInfo := &api.NodeInfo{
-		NodeType:            c.NodeType,
-		NodeID:              c.NodeID,
-		Port:                port,
-		SpeedLimit:          speedLimit,
-		AlterID:             alterID,
-		TransportProtocol:   transportProtocol,
-		Host:                host,
-		Path:                path,
-		EnableTLS:           enableTLS,
-		EnableVless:         enableVless,
-		VlessFlow:           nodeConfig.Flow,
-		CypherMethod:        nodeConfig.Method,
-		ServiceName:         serviceName,
-		Header:              header,
-		Headers:             headers,
-		EnableREALITY:       enableREALITY,
-		REALITYConfig:       realityConfig,
-		XHTTPMode:           splithttpConfig.Mode,
-		XHTTPExtra:          splithttpConfig.Extra,
-		XPaddingBytes:       splithttpConfig.XPaddingBytes,
-		XPaddingObfsMode:    splithttpConfig.XPaddingObfsMode,
-		XPaddingKey:         splithttpConfig.XPaddingKey,
-		XPaddingHeader:      splithttpConfig.XPaddingHeader,
-		XPaddingPlacement:   splithttpConfig.XPaddingPlacement,
-		XPaddingMethod:      splithttpConfig.XPaddingMethod,
-		UplinkHTTPMethod:    splithttpConfig.UplinkHTTPMethod,
-		SessionPlacement:    splithttpConfig.SessionPlacement,
-		SessionKey:          splithttpConfig.SessionKey,
-		SeqPlacement:        splithttpConfig.SeqPlacement,
-		SeqKey:              splithttpConfig.SeqKey,
-		UplinkDataPlacement: splithttpConfig.UplinkDataPlacement,
-		UplinkDataKey:       splithttpConfig.UplinkDataKey,
-		UplinkChunkSize:     splithttpConfig.UplinkChunkSize,
-		NoGRPCHeader:        splithttpConfig.NoGRPCHeader,
-		NoSSEHeader:         splithttpConfig.NoSSEHeader,
-	}
-
-	return nodeInfo, nil
+	return snapshot.ToNodeInfo(), nil
 }
 
 func validateOptionalXPaddingBytes(settings json.RawMessage) error {

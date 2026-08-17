@@ -281,10 +281,7 @@ func (p *Panel) buildStaticNodeServices(server *core.Instance, plan runtimeConfi
 		apiConfig := *nodePlan.apiConfig
 		apiClient := nodePlan.newAPIClient(&apiConfig)
 
-		controllerConfig, err := nodePlan.materializeControllerConfig()
-		if err != nil {
-			return nil, err
-		}
+		controllerConfig := nodePlan.materializeControllerConfig()
 		materializeRuntimeCertConfig(apiClient, controllerConfig, p.logger)
 		runtimeService, err := runtimeRegistry.build(runtimeServiceConstruction{
 			server:           server,

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/api"
 )
 
 type NodeBinding struct {
@@ -14,14 +14,7 @@ type NodeBinding struct {
 	Name     string
 }
 
-type NodeBindingDiff struct {
-	Added     []NodeBinding
-	Removed   []NodeBinding
-	Updated   []NodeBinding
-	Unchanged []NodeBinding
-}
-
-func NormalizeNodeBindings(nodes []newV2board.MachineNode) ([]NodeBinding, error) {
+func NormalizeNodeBindings(nodes []api.MachineNode) ([]NodeBinding, error) {
 	bindings := make([]NodeBinding, 0, len(nodes))
 	seen := make(map[int]struct{}, len(nodes))
 
@@ -49,46 +42,6 @@ func NormalizeNodeBindings(nodes []newV2board.MachineNode) ([]NodeBinding, error
 
 	sortNodeBindings(bindings)
 	return bindings, nil
-}
-
-func DiffNodeBindings(oldBindings, newBindings []NodeBinding) NodeBindingDiff {
-	var diff NodeBindingDiff
-
-	oldByID := make(map[int]NodeBinding, len(oldBindings))
-	for _, binding := range oldBindings {
-		oldByID[binding.NodeID] = binding
-	}
-
-	newByID := make(map[int]NodeBinding, len(newBindings))
-	for _, binding := range newBindings {
-		newByID[binding.NodeID] = binding
-	}
-
-	for nodeID, newBinding := range newByID {
-		oldBinding, exists := oldByID[nodeID]
-		if !exists {
-			diff.Added = append(diff.Added, newBinding)
-			continue
-		}
-
-		if oldBinding.NodeType != newBinding.NodeType || oldBinding.Name != newBinding.Name {
-			diff.Updated = append(diff.Updated, newBinding)
-		} else {
-			diff.Unchanged = append(diff.Unchanged, newBinding)
-		}
-	}
-
-	for nodeID, oldBinding := range oldByID {
-		if _, exists := newByID[nodeID]; !exists {
-			diff.Removed = append(diff.Removed, oldBinding)
-		}
-	}
-
-	sortNodeBindings(diff.Added)
-	sortNodeBindings(diff.Removed)
-	sortNodeBindings(diff.Updated)
-	sortNodeBindings(diff.Unchanged)
-	return diff
 }
 
 func sortNodeBindings(bindings []NodeBinding) {

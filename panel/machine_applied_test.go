@@ -25,6 +25,20 @@ type machineAppliedTestClient struct {
 	ruleCalls int
 }
 
+type machineAppliedSnapshotTestClient struct {
+	*machineAppliedTestClient
+	snapshot      *api.NodeSnapshot
+	snapshotCalls int
+}
+
+func (c *machineAppliedSnapshotTestClient) GetNodeSnapshotContext(ctx context.Context) (*api.NodeSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.snapshotCalls++
+	return c.snapshot, nil
+}
+
 type orderedMachineRuntimeService struct {
 	client runtimePanelClient
 	order  *[]string
@@ -131,6 +145,36 @@ func (c *machineAppliedTestClient) GetNodeInfo() (*api.NodeInfo, error) {
 		return nil, c.fetchErr
 	}
 	return c.node, nil
+}
+
+func TestMachineAppliedPanelClientUsesNormalizedSnapshotCapability(t *testing.T) {
+	source := &machineAppliedSnapshotTestClient{
+		machineAppliedTestClient: &machineAppliedTestClient{
+			node: &api.NodeInfo{NodeID: 7, NodeType: "Vless", Port: 443},
+		},
+		snapshot: &api.NodeSnapshot{NodeID: 7, NodeType: "Vless", Port: 8443},
+	}
+	client := newMachineAppliedPanelClient(source, nil)
+
+	snapshot, err := client.GetNodeSnapshot()
+	if err != nil {
+		t.Fatalf("GetNodeSnapshot() error = %v", err)
+	}
+	if snapshot == source.snapshot || snapshot.Port != 8443 {
+		t.Fatalf("machine wrapper did not return an owned normalized snapshot: %#v", snapshot)
+	}
+	if source.snapshotCalls != 1 || source.nodeCalls != 0 {
+		t.Fatalf("snapshot capability dispatch = snapshots:%d legacy:%d", source.snapshotCalls, source.nodeCalls)
+	}
+
+	snapshot.Port = 9443
+	value, err := client.appliedNodeValue()
+	if err == nil {
+		t.Fatalf("appliedNodeValue() unexpectedly succeeded without users: %#v", value)
+	}
+	if source.snapshot.Port != 8443 {
+		t.Fatalf("machine wrapper leaked snapshot mutation to source: %#v", source.snapshot)
+	}
 }
 
 func (c *machineAppliedTestClient) GetUserList() (*[]api.UserInfo, error) {
