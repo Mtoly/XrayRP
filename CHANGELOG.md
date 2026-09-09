@@ -22,6 +22,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Upgraded supported Go, Redis, Hysteria core/extras to v2.12.0, sing, sing-box, artifact, container, stale-issue, and signing dependencies; GitHub Actions remain pinned to full commit SHAs.
 - Updated the Go toolchain to 1.26.6, Hysteria core/extras to v2.12.1, sing to v0.8.13, sing-box to v1.13.18, and refreshed the pinned Alpine and CodeQL maintenance inputs.
+- Updated Hysteria core/extras to v2.12.2 as the latest available patch release; the existing GO-2026-5288 scan exception remains required because the vulnerability database still reports no fixed version.
 - Docker builds now pin both the Go builder and Alpine runtime images by readable version and multi-platform manifest digest.
 - Controller and machine runtimes now share one Applied node value deep-clone module, preserving nil/empty collection and custom address compatibility semantics.
 - Initial startup and hot reload now use the same mode-specific runtime configuration validation: static mode requires at least one `Nodes` entry, while enabled `MachineConfig` is valid with no static `Nodes`.

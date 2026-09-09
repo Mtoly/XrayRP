@@ -88,3 +88,13 @@ now matches that policy.
 4. Update Hysteria and sing-box in a separate dependency batch, then run
    protocol lifecycle, QUIC, reload, panel compatibility, and release tests.
 5. Verify Docker image provenance and the pinned Action SHAs before merging.
+
+## Patch follow-up — 2026-09-09
+
+- Updated `github.com/apernet/hysteria/core/v2` and
+  `github.com/apernet/hysteria/extras/v2` from `v2.12.1` to `v2.12.2`.
+- `go test -count=1 ./service/hysteria2 ./service/controller` passed.
+- `govulncheck v1.6.0 ./...` still reports only reachable `GO-2026-5288` for
+  `core/v2@v2.12.2`; the database continues to publish no fixed version.
+- The existing `RequestHook: nil` defense-in-depth test and exact CI exception
+  remain in force; this patch update does not claim the advisory is cleared.
