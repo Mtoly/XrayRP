@@ -74,7 +74,7 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 			return nil, fmt.Errorf("load candidate tls certificate: %w", err)
 		}
 	} else {
-		certFile, keyFile, certErr := getOrIssueCert(spec.certConfig)
+		certFile, keyFile, certErr := getOrIssueCert(spec.certConfig, spec.certificateIdentity)
 		if certErr != nil {
 			packetConn.Close()
 			return nil, certErr
@@ -117,7 +117,7 @@ func (h *Hysteria2Service) buildServerConfigFor(spec serverBuildSpec) (*server.C
 
 // getOrIssueCert mirrors controller.getCertFile but is local to the hysteria2
 // package so we do not have to depend on unexported symbols.
-func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
+func getOrIssueCert(certConfig *mylego.CertConfig, certificateIdentity string) (string, string, error) {
 	if certConfig == nil {
 		return "", "", fmt.Errorf("CertConfig is nil")
 	}
@@ -129,7 +129,7 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 		}
 		return certConfig.CertFile, certConfig.KeyFile, nil
 	case "content":
-		return mylego.ContentCert(certConfig)
+		return mylego.ContentCert(certConfig, certificateIdentity)
 	case "dns":
 		lego, err := mylego.New(certConfig)
 		if err != nil {

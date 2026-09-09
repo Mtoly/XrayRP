@@ -25,12 +25,13 @@ type runtimeInstance interface {
 
 type runtimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type runtimeBuildSpec struct {
-	nodeInfo       *api.NodeInfo
-	inboundTag     string
-	certConfig     *mylego.CertConfig
-	certificatePEM []byte
-	privateKeyPEM  []byte
-	authUsers      []option.AnyTLSUser
+	nodeInfo            *api.NodeInfo
+	inboundTag          string
+	certConfig          *mylego.CertConfig
+	certificateIdentity string
+	certificatePEM      []byte
+	privateKeyPEM       []byte
+	authUsers           []option.AnyTLSUser
 }
 type reloadRuntimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)
 type startRuntimeFunc func(runtimeInstance) error

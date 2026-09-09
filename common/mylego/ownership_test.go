@@ -399,8 +399,10 @@ func TestContentCertRollsBackCertificateWhenKeyWriteFails(t *testing.T) {
 	if err := os.MkdirAll(certDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	certPath := filepath.Join(certDir, "node.example.com.crt")
-	keyPath := filepath.Join(certDir, "node.example.com.key")
+	contentIdentity := strings.Join([]string{"node.example.com", "candidate-cert", "candidate-key"}, "\x00")
+	fileBase := contentCertFileBase("node.example.com", contentIdentity)
+	certPath := filepath.Join(certDir, fileBase+".crt")
+	keyPath := filepath.Join(certDir, fileBase+".key")
 	if err := os.WriteFile(certPath, []byte("last-known-good-cert"), filePerm); err != nil {
 		t.Fatal(err)
 	}

@@ -133,7 +133,7 @@ func buildInboundTLSOptions(spec runtimeBuildSpec) (*option.InboundTLSOptions, e
 		return tlsOpt, nil
 	}
 
-	certFile, keyFile, err := getOrIssueCert(spec.certConfig)
+	certFile, keyFile, err := getOrIssueCert(spec.certConfig, spec.certificateIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func buildInboundTLSOptions(spec runtimeBuildSpec) (*option.InboundTLSOptions, e
 	return tlsOpt, nil
 }
 
-func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
+func getOrIssueCert(certConfig *mylego.CertConfig, certificateIdentity string) (string, string, error) {
 	if certConfig == nil {
 		return "", "", fmt.Errorf("CertConfig is nil")
 	}
@@ -153,7 +153,7 @@ func getOrIssueCert(certConfig *mylego.CertConfig) (string, string, error) {
 		}
 		return certConfig.CertFile, certConfig.KeyFile, nil
 	case "content":
-		return mylego.ContentCert(certConfig)
+		return mylego.ContentCert(certConfig, certificateIdentity)
 	case "dns":
 		lego, err := mylego.New(certConfig)
 		if err != nil {
