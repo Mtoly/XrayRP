@@ -1,6 +1,7 @@
 package specialruntime
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -146,6 +147,94 @@ func TestTasksUseCloseWhenTaskHasNoStopOrWait(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 	if want := []string{"close:fallback"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+type contextMarkerKey struct{}
+
+type contextAwareTask struct {
+	events *[]string
+}
+
+func (t *contextAwareTask) Start() error {
+	*t.events = append(*t.events, "legacy-start")
+	return errors.New("legacy Start called")
+}
+
+func (t *contextAwareTask) Close() error {
+	*t.events = append(*t.events, "legacy-close")
+	return errors.New("legacy Close called")
+}
+
+func (t *contextAwareTask) StartContext(ctx context.Context) error {
+	if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+		return errors.New("start context marker missing")
+	}
+	*t.events = append(*t.events, "context-start")
+	return nil
+}
+
+func (t *contextAwareTask) StopContext(ctx context.Context) error {
+	if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+		return errors.New("stop context marker missing")
+	}
+	*t.events = append(*t.events, "context-stop")
+	return nil
+}
+
+func (t *contextAwareTask) WaitContext(ctx context.Context) error {
+	if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+		return errors.New("wait context marker missing")
+	}
+	*t.events = append(*t.events, "context-wait")
+	return nil
+}
+
+func TestTasksPropagateContextToLifecycleCallbacks(t *testing.T) {
+	events := []string{}
+	tasks := NewTasks()
+	tasks.Add(&contextAwareTask{events: &events})
+	ctx := context.WithValue(context.Background(), contextMarkerKey{}, "marker")
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Start: func(ctx context.Context) error {
+			if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+				return errors.New("runtime start context marker missing")
+			}
+			events = append(events, "runtime-context-start")
+			return nil
+		},
+		Stop: func(ctx context.Context) error {
+			if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+				return errors.New("runtime stop context marker missing")
+			}
+			events = append(events, "runtime-context-stop")
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			if got := ctx.Value(contextMarkerKey{}); got != "marker" {
+				return errors.New("runtime join context marker missing")
+			}
+			events = append(events, "runtime-context-join")
+			return nil
+		},
+	})
+
+	if err := host.StartContext(ctx); err != nil {
+		t.Fatalf("StartContext() error = %v", err)
+	}
+	if err := host.StopProducersContext(ctx); err != nil {
+		t.Fatalf("StopProducersContext() error = %v", err)
+	}
+	if err := host.CloseStoppedContext(ctx); err != nil {
+		t.Fatalf("CloseStoppedContext() error = %v", err)
+	}
+
+	want := []string{
+		"runtime-context-start", "context-start", "context-stop",
+		"runtime-context-stop", "context-wait", "runtime-context-join",
+	}
+	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
