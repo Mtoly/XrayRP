@@ -193,3 +193,38 @@ func TestRuntimeHostTaskStartFailureRollsBackRuntimeAndTasks(t *testing.T) {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
 }
+
+func TestRuntimeHostRuntimeStartFailureUsesDetachedCleanupContext(t *testing.T) {
+	startErr := errors.New("runtime not ready")
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	startCanceled := false
+	stopCanceled := true
+	joinCanceled := true
+	host := NewRuntimeHost(nil, RuntimeHostCallbacks{
+		Start: func(ctx context.Context) error {
+			cancelParent()
+			startCanceled = ctx.Err() != nil
+			return startErr
+		},
+		Stop: func(ctx context.Context) error {
+			stopCanceled = ctx.Err() != nil
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			joinCanceled = ctx.Err() != nil
+			return nil
+		},
+	})
+
+	err := host.StartContext(parent)
+	if !errors.Is(err, startErr) {
+		t.Fatalf("StartContext() error = %v, want %v", err, startErr)
+	}
+	if !startCanceled {
+		t.Fatal("runtime start callback did not observe parent cancellation")
+	}
+	if stopCanceled || joinCanceled {
+		t.Fatalf("cleanup callbacks received canceled context: stop=%v join=%v", stopCanceled, joinCanceled)
+	}
+}
