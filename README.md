@@ -1,4 +1,4 @@
-# XrayR
+# XrayRP
 
 [![](https://img.shields.io/badge/TgChat-@XrayR讨论-blue.svg)](https://t.me/XrayR_project)
 [![](https://img.shields.io/badge/Channel-@XrayR通知-blue.svg)](https://t.me/XrayR_channel)
@@ -30,18 +30,19 @@ A Xray backend framework that can easily support many panels.
 
 Xboard / NewV2board 的兼容范围、WebSocket、Machine 模式和配置说明：[兼容性文档](./docs/xboard-newv2board.md)
 
+## 架构导航
+
+- CLI、配置加载与热重载：`cmd/`
+- Node runtime state 与 Authoritative snapshot synchronization：`service/controller/`
+- Specialized runtime lifecycle：`service/anytls/`、`service/tuic/`、`service/hysteria2/`
+- Panel transport mechanics 与适配器：`api/`、`api/internal/panelhttp/`
+- 证书获取、存储与续签：`common/mylego/`
+
+完整说明见 [架构导航](./docs/architecture.md)。
+
 
 ## 免责声明
 
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
-# 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
 # 本项目只是本人个人学习开发并维护，本人不保证任何可用性，也不对使用本软件造成的任何后果负责。
 
 ## 特点

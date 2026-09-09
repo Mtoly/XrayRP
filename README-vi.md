@@ -1,4 +1,4 @@
-# XrayR
+# XrayRP
 
 [![](https://img.shields.io/badge/TgChat-@XrayR讨论-blue.svg)](https://t.me/XrayR_project)
 [![](https://img.shields.io/badge/Channel-@XrayR通知-blue.svg)](https://t.me/XrayR_channel)
@@ -29,18 +29,13 @@ Sử dụng hướng dẫn: [Hướng dẫn chi tiết](https://xrayr-project.gi
 
 Tài liệu về khả năng tương thích Xboard / NewV2board, WebSocket, chế độ máy và cấu hình: [Hướng dẫn tương thích](./docs/xboard-newv2board.md).
 
+## Sơ đồ kiến trúc
+
+Xem [sơ đồ kiến trúc đầy đủ](./docs/architecture.md).
+
 ## Tuyên bố miễn trừ
 
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
-# Dự án này chỉ được duy trì cho mục đích học tập và phát triển cá nhân. Tôi không đảm bảo khả năng sử dụng và không chịu trách nhiệm về bất kỳ hậu quả nào do việc sử dụng phần mềm này.
+
 
 ## Đặt điểm nổi bật
 

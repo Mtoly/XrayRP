@@ -1,4 +1,4 @@
-# XrayR
+# XrayRP
 
 [![](https://img.shields.io/badge/TgChat-@XrayR讨论-blue.svg)](https://t.me/XrayR_project)
 [![](https://img.shields.io/badge/Channel-@XrayR通知-blue.svg)](https://t.me/XrayR_channel)
@@ -31,19 +31,14 @@ Tutorial：[Detailed tutorial](https://xrayr-project.github.io/XrayR-doc/)
 
 Xboard / NewV2board compatibility, WebSocket, machine mode, and configuration notes: [compatibility guide](./docs/xboard-newv2board.md).
 
+## Architecture map
+
+See the complete [architecture map](./docs/architecture.md).
+
 
 ## Disclaimer
 
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
-# This project is maintained for personal learning and development only. I do not guarantee its availability and accept no responsibility for consequences arising from its use.
+
 
 ## Features
 
