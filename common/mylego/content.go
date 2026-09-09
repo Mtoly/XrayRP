@@ -1,13 +1,15 @@
 package mylego
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func ContentCert(certConfig *CertConfig) (string, string, error) {
+func ContentCert(certConfig *CertConfig, identity ...string) (string, string, error) {
 	if certConfig == nil {
 		return "", "", fmt.Errorf("CertConfig is nil")
 	}
@@ -19,7 +21,11 @@ func ContentCert(certConfig *CertConfig) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	fileBase := safeContentCertFileBase(certConfig.CertDomain)
+	contentIdentity := strings.Join(identity, "\x00")
+	if strings.TrimSpace(contentIdentity) == "" {
+		contentIdentity = strings.Join([]string{certConfig.CertDomain, certConfig.CertContent, certConfig.KeyContent}, "\x00")
+	}
+	fileBase := contentCertFileBase(certConfig.CertDomain, contentIdentity)
 	certFile := filepath.Join(certDir, fileBase+".crt")
 	keyFile := filepath.Join(certDir, fileBase+".key")
 
@@ -53,6 +59,11 @@ func panelContentCertDir() (string, error) {
 		return "", err
 	}
 	return certDir, nil
+}
+
+func contentCertFileBase(domain, identity string) string {
+	hash := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%s-%s", safeContentCertFileBase(domain), hex.EncodeToString(hash[:8]))
 }
 
 func safeContentCertFileBase(domain string) string {

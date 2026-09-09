@@ -28,12 +28,13 @@ type runtimeServer interface {
 
 type serverConfigFactory func(*Hysteria2Service, serverBuildSpec) (*server.Config, error)
 type serverBuildSpec struct {
-	nodeInfo       *api.NodeInfo
-	certConfig     *mylego.CertConfig
-	certificatePEM []byte
-	privateKeyPEM  []byte
-	authGate       *runtimeAuthGate
-	trafficContext context.Context
+	nodeInfo            *api.NodeInfo
+	certConfig          *mylego.CertConfig
+	certificateIdentity string
+	certificatePEM      []byte
+	privateKeyPEM       []byte
+	authGate            *runtimeAuthGate
+	trafficContext      context.Context
 }
 type runtimeServerFactory func(*server.Config) (runtimeServer, error)
 type serveRuntimeFunc func(runtimeServer) error

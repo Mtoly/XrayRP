@@ -197,10 +197,11 @@ func (s *AnyTLSService) StartContext(parent context.Context) (err error) {
 
 	startupUsers := s.buildCandidateUserState(userInfo, nodeInfo)
 	boxInstance, inboundTag, err := s.buildRuntime(runtimeBuildSpec{
-		nodeInfo:   nodeInfo,
-		inboundTag: tag,
-		certConfig: cloneCertConfig(s.config.CertConfig),
-		authUsers:  append([]option.AnyTLSUser(nil), startupUsers.authUsers...),
+		nodeInfo:            nodeInfo,
+		inboundTag:          tag,
+		certConfig:          cloneCertConfig(s.config.CertConfig),
+		certificateIdentity: contentCertificateIdentity(clientInfo, nodeInfo, s.config.ListenIP),
+		authUsers:           append([]option.AnyTLSUser(nil), startupUsers.authUsers...),
 	})
 	if err != nil {
 		return fail(err)
@@ -518,11 +519,12 @@ func (s *AnyTLSService) reloadNodeWithCertificateLockedContext(ctx context.Conte
 
 	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, candidateNode)
 	spec := runtimeBuildSpec{
-		nodeInfo:       candidateNode,
-		inboundTag:     oldInboundTag,
-		certConfig:     candidateCertConfig,
-		certificatePEM: certificatePEM(renewal),
-		privateKeyPEM:  privateKeyPEM(renewal),
+		nodeInfo:            candidateNode,
+		inboundTag:          oldInboundTag,
+		certConfig:          candidateCertConfig,
+		certificateIdentity: contentCertificateIdentity(s.clientInfo, candidateNode, s.config.ListenIP),
+		certificatePEM:      certificatePEM(renewal),
+		privateKeyPEM:       privateKeyPEM(renewal),
 	}
 	candidateRuntime, _, err := s.buildReloadRuntime(spec)
 	if err != nil {
@@ -540,9 +542,10 @@ func (s *AnyTLSService) reloadNodeWithCertificateLockedContext(ctx context.Conte
 	}
 	restoreOldRuntime := func() (runtimeInstance, []runtimeInstance, error) {
 		restoredRuntime, _, restoreErr := s.buildReloadRuntime(runtimeBuildSpec{
-			nodeInfo:   oldNodeInfo,
-			inboundTag: oldInboundTag,
-			certConfig: oldCertConfig,
+			nodeInfo:            oldNodeInfo,
+			inboundTag:          oldInboundTag,
+			certConfig:          oldCertConfig,
+			certificateIdentity: contentCertificateIdentity(s.clientInfo, oldNodeInfo, s.config.ListenIP),
 		})
 		if restoreErr != nil {
 			return nil, nil, restoreErr
@@ -688,6 +691,13 @@ func cloneCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
 		}
 	}
 	return &cloned
+}
+
+func contentCertificateIdentity(clientInfo api.ClientInfo, nodeInfo *api.NodeInfo, listenIP string) string {
+	if nodeInfo == nil {
+		return fmt.Sprintf("%s:%d:%s", clientInfo.APIHost, clientInfo.NodeID, listenIP)
+	}
+	return fmt.Sprintf("%s:%d:%s:%d:%s", clientInfo.APIHost, clientInfo.NodeID, listenIP, nodeInfo.NodeID, nodeInfo.NodeType)
 }
 
 func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {

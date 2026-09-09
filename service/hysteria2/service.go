@@ -275,8 +275,9 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	}
 
 	candidate, err := h.startReloadCandidateContext(ctx, serverBuildSpec{
-		nodeInfo:   nodeInfo,
-		certConfig: cloneCertConfig(h.config.CertConfig),
+		nodeInfo:            nodeInfo,
+		certConfig:          cloneCertConfig(h.config.CertConfig),
+		certificateIdentity: contentCertificateIdentity(clientInfo, nodeInfo, h.config.ListenIP),
 	})
 	if err != nil {
 		if candidate.runtime != nil {
@@ -630,10 +631,11 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLockedContext(ctx context.Co
 
 	candidateCertConfig := deriveReloadCertConfig(oldCertConfig, oldNodeInfo, candidateNode)
 	candidateSpec := serverBuildSpec{
-		nodeInfo:       candidateNode,
-		certConfig:     candidateCertConfig,
-		certificatePEM: certificatePEM(renewal),
-		privateKeyPEM:  privateKeyPEM(renewal),
+		nodeInfo:            candidateNode,
+		certConfig:          candidateCertConfig,
+		certificateIdentity: contentCertificateIdentity(h.clientInfo, candidateNode, h.config.ListenIP),
+		certificatePEM:      certificatePEM(renewal),
+		privateKeyPEM:       privateKeyPEM(renewal),
 	}
 
 	closeRuntime := h.closeRuntime
@@ -664,8 +666,9 @@ func (h *Hysteria2Service) reloadNodeWithCertificateLockedContext(ctx context.Co
 		restoreCtx, restoreCancel := service.WithDefaultTimeout(context.WithoutCancel(ctx), service.DefaultStartTimeout)
 		defer restoreCancel()
 		restored, restoreErr := h.startReloadCandidateContext(restoreCtx, serverBuildSpec{
-			nodeInfo:   oldNodeInfo,
-			certConfig: oldCertConfig,
+			nodeInfo:            oldNodeInfo,
+			certConfig:          oldCertConfig,
+			certificateIdentity: contentCertificateIdentity(h.clientInfo, oldNodeInfo, h.config.ListenIP),
 		})
 		if restoreErr != nil {
 			if restored.runtime != nil {
@@ -989,6 +992,13 @@ func (h *Hysteria2Service) finishReloadWithOwnership(runtime runtimeServer, clea
 	if watcherDone != nil {
 		go h.watchRuntime(runtime, serve, cancelTraffic, watcherDone)
 	}
+}
+
+func contentCertificateIdentity(clientInfo api.ClientInfo, nodeInfo *api.NodeInfo, listenIP string) string {
+	if nodeInfo == nil {
+		return fmt.Sprintf("%s:%d:%s", clientInfo.APIHost, clientInfo.NodeID, listenIP)
+	}
+	return fmt.Sprintf("%s:%d:%s:%d:%s", clientInfo.APIHost, clientInfo.NodeID, listenIP, nodeInfo.NodeID, nodeInfo.NodeType)
 }
 
 func cloneNodeInfo(nodeInfo *api.NodeInfo) *api.NodeInfo {
