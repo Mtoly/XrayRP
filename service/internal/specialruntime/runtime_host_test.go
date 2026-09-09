@@ -228,3 +228,37 @@ func TestRuntimeHostRuntimeStartFailureUsesDetachedCleanupContext(t *testing.T) 
 		t.Fatalf("cleanup callbacks received canceled context: stop=%v join=%v", stopCanceled, joinCanceled)
 	}
 }
+
+func TestRuntimeHostStopsProducersBeforeRuntimeShutdown(t *testing.T) {
+	events := []string{}
+	tasks := NewTasks()
+	tasks.Add(&recordingTask{name: "first", events: &events})
+	tasks.Add(&recordingTask{name: "second", events: &events})
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Stop: func(context.Context) error {
+			events = append(events, "runtime-stop")
+			return nil
+		},
+		Join: func(context.Context) error {
+			events = append(events, "runtime-join")
+			return nil
+		},
+	})
+
+	if err := host.StopProducersContext(context.Background()); err != nil {
+		t.Fatalf("StopProducersContext() error = %v", err)
+	}
+	if want := []string{"stop:second", "stop:first"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events after StopProducersContext() = %v, want %v", events, want)
+	}
+	if err := host.CloseStoppedContext(context.Background()); err != nil {
+		t.Fatalf("CloseStoppedContext() error = %v", err)
+	}
+	want := []string{
+		"stop:second", "stop:first", "runtime-stop",
+		"wait:second", "wait:first", "runtime-join",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events after shutdown = %v, want %v", events, want)
+	}
+}
