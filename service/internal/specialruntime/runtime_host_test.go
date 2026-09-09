@@ -153,3 +153,43 @@ func TestRuntimeHostAggregatesStopAndJoinErrors(t *testing.T) {
 		t.Fatalf("CloseStoppedContext() error = %v, want both runtime errors", err)
 	}
 }
+
+func TestRuntimeHostTaskStartFailureRollsBackRuntimeAndTasks(t *testing.T) {
+	startErr := errors.New("task start failed")
+	stopErr := errors.New("task stop failed")
+	waitErr := errors.New("task wait failed")
+	runtimeStopErr := errors.New("runtime stop failed")
+	runtimeJoinErr := errors.New("runtime join failed")
+	events := []string{}
+	tasks := NewTasks()
+	tasks.Add(&recordingTask{name: "first", events: &events, waitErr: waitErr})
+	tasks.Add(&recordingTask{name: "second", events: &events, startErr: startErr, stopErr: stopErr})
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Stop: func(context.Context) error {
+			events = append(events, "runtime-stop")
+			return runtimeStopErr
+		},
+		Join: func(context.Context) error {
+			events = append(events, "runtime-join")
+			return runtimeJoinErr
+		},
+	})
+
+	err := host.StartContext(context.Background())
+	for _, want := range []error{startErr, stopErr, waitErr, runtimeStopErr, runtimeJoinErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("StartContext() error = %v, want joined %v", err, want)
+		}
+	}
+	if !StartCleanupFailed(err) {
+		t.Fatalf("StartContext() error = %v, want cleanup failure classification", err)
+	}
+	wantEvents := []string{
+		"start:first", "start:second",
+		"stop:second", "stop:first",
+		"runtime-stop", "wait:second", "wait:first", "runtime-join",
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
