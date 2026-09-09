@@ -1,6 +1,7 @@
 package mylego
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/x509"
 	"encoding/json"
@@ -257,16 +258,30 @@ func loadPrivateKey(file string) (crypto.PrivateKey, error) {
 		return nil, err
 	}
 
-	keyBlock, _ := pem.Decode(keyBytes)
+	keyBlock, rest := pem.Decode(keyBytes)
+	if keyBlock == nil {
+		return nil, errors.New("decode account private key PEM: block not found")
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("decode account private key PEM: trailing data")
+	}
 
 	switch keyBlock.Type {
 	case "RSA PRIVATE KEY":
-		return x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		privateKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse RSA account private key: %w", err)
+		}
+		return privateKey, nil
 	case "EC PRIVATE KEY":
-		return x509.ParseECPrivateKey(keyBlock.Bytes)
+		privateKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse EC account private key: %w", err)
+		}
+		return privateKey, nil
+	default:
+		return nil, fmt.Errorf("unknown account private key type %q", keyBlock.Type)
 	}
-
-	return nil, errors.New("unknown private key type")
 }
 
 func tryRecoverRegistration(privateKey crypto.PrivateKey) (*registration.Resource, error) {
