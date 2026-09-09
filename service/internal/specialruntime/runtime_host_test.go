@@ -358,3 +358,71 @@ func TestRuntimeHostTaskStartFailureUsesDetachedCleanupContext(t *testing.T) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
+
+type rollbackContextTask struct {
+	events *[]string
+}
+
+func (t *rollbackContextTask) Start() error { return nil }
+func (t *rollbackContextTask) Close() error { return errors.New("legacy Close called") }
+
+func (t *rollbackContextTask) StopContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("stop context marker missing")
+	}
+	*t.events = append(*t.events, "task-stop")
+	return nil
+}
+
+func (t *rollbackContextTask) WaitContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("wait context marker missing")
+	}
+	*t.events = append(*t.events, "task-wait")
+	return nil
+}
+
+func TestRuntimeHostRollbackUsesDetachedCleanupContext(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := context.WithValue(parent, contextMarkerKey{}, "marker")
+	cancel()
+	events := []string{}
+	tasks := NewTasks()
+	tasks.Add(&rollbackContextTask{events: &events})
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Stop: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime stop context marker missing")
+			}
+			events = append(events, "runtime-stop")
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime join context marker missing")
+			}
+			events = append(events, "runtime-join")
+			return nil
+		},
+	})
+
+	if err := host.RollbackContext(ctx); err != nil {
+		t.Fatalf("RollbackContext() error = %v", err)
+	}
+	want := []string{"task-stop", "runtime-stop", "task-wait", "runtime-join"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}

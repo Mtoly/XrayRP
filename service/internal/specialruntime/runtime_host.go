@@ -82,10 +82,12 @@ func (h *RuntimeHost) RollbackContext(ctx context.Context) error {
 	if h == nil {
 		return nil
 	}
+	cleanupCtx, cancel := service.CleanupContext(ctx)
+	defer cancel()
 	if h.tasks != nil {
-		return h.tasks.RollbackContext(ctx, h.runtimeShutdown())
+		return h.tasks.RollbackContext(cleanupCtx, h.runtimeShutdown())
 	}
-	return h.closeRuntimeContext(ctx)
+	return h.closeRuntimeContext(cleanupCtx)
 }
 
 func (h *RuntimeHost) runtimeShutdown() RuntimeShutdown {
