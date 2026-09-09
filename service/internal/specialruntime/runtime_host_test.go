@@ -262,3 +262,99 @@ func TestRuntimeHostStopsProducersBeforeRuntimeShutdown(t *testing.T) {
 		t.Fatalf("events after shutdown = %v, want %v", events, want)
 	}
 }
+
+type cancelingStartTask struct {
+	events       *[]string
+	cancelParent context.CancelFunc
+	startErr     error
+	stopCanceled *bool
+	waitCanceled *bool
+}
+
+func (t *cancelingStartTask) Start() error {
+	return errors.New("legacy Start called")
+}
+
+func (t *cancelingStartTask) Close() error {
+	return errors.New("legacy Close called")
+}
+
+func (t *cancelingStartTask) StartContext(ctx context.Context) error {
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("start context marker missing")
+	}
+	*t.events = append(*t.events, "task-start")
+	t.cancelParent()
+	return t.startErr
+}
+
+func (t *cancelingStartTask) StopContext(ctx context.Context) error {
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("stop context marker missing")
+	}
+	*t.stopCanceled = ctx.Err() != nil
+	*t.events = append(*t.events, "task-stop")
+	return nil
+}
+
+func (t *cancelingStartTask) WaitContext(ctx context.Context) error {
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("wait context marker missing")
+	}
+	*t.waitCanceled = ctx.Err() != nil
+	*t.events = append(*t.events, "task-wait")
+	return nil
+}
+
+func TestRuntimeHostTaskStartFailureUsesDetachedCleanupContext(t *testing.T) {
+	startErr := errors.New("task not ready")
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	events := []string{}
+	stopCanceled := true
+	waitCanceled := true
+	tasks := NewTasks()
+	tasks.Add(&cancelingStartTask{
+		events:       &events,
+		cancelParent: cancelParent,
+		startErr:     startErr,
+		stopCanceled: &stopCanceled,
+		waitCanceled: &waitCanceled,
+	})
+	runtimeStopCanceled := true
+	runtimeJoinCanceled := true
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Stop: func(ctx context.Context) error {
+			runtimeStopCanceled = ctx.Err() != nil
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime stop context marker missing")
+			}
+			events = append(events, "runtime-stop")
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			runtimeJoinCanceled = ctx.Err() != nil
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime join context marker missing")
+			}
+			events = append(events, "runtime-join")
+			return nil
+		},
+	})
+
+	ctx := context.WithValue(parent, contextMarkerKey{}, "marker")
+	err := host.StartContext(ctx)
+	if !errors.Is(err, startErr) {
+		t.Fatalf("StartContext() error = %v, want %v", err, startErr)
+	}
+	if StartCleanupFailed(err) {
+		t.Fatalf("StartContext() error = %v, cleanup unexpectedly failed", err)
+	}
+	if stopCanceled || waitCanceled || runtimeStopCanceled || runtimeJoinCanceled {
+		t.Fatalf("cleanup callbacks received canceled context: stop=%v wait=%v runtime-stop=%v runtime-join=%v", stopCanceled, waitCanceled, runtimeStopCanceled, runtimeJoinCanceled)
+	}
+	want := []string{"task-start", "task-stop", "runtime-stop", "task-wait", "runtime-join"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
