@@ -46,11 +46,26 @@ func (h *RuntimeHost) StartContext(ctx context.Context) error {
 			cancel()
 			return &runtimeStartFailure{startErr: err, cleanupErr: cleanupErr}
 		}
+		if err := ctx.Err(); err != nil {
+			cleanupCtx, cancel := service.CleanupContext(ctx)
+			cleanupErr := h.closeRuntimeContext(cleanupCtx)
+			cancel()
+			return &runtimeStartFailure{startErr: err, cleanupErr: cleanupErr}
+		}
 	}
 	if h.tasks == nil {
 		return nil
 	}
-	return h.tasks.StartContext(ctx, h.runtimeShutdown())
+	if err := h.tasks.StartContext(ctx, h.runtimeShutdown()); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		cleanupCtx, cancel := service.CleanupContext(ctx)
+		cleanupErr := h.tasks.RollbackContext(cleanupCtx, h.runtimeShutdown())
+		cancel()
+		return &taskStartFailure{startErr: err, cleanupErr: cleanupErr}
+	}
+	return nil
 }
 
 // StopProducersContext stops periodic task producers without touching the

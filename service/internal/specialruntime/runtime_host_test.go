@@ -426,3 +426,140 @@ func TestRuntimeHostRollbackUsesDetachedCleanupContext(t *testing.T) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
+
+type cancelAfterSuccessfulStartTask struct {
+	events       *[]string
+	cancelParent context.CancelFunc
+}
+
+func (t *cancelAfterSuccessfulStartTask) Start() error {
+	return errors.New("legacy Start called")
+}
+
+func (t *cancelAfterSuccessfulStartTask) Close() error {
+	return errors.New("legacy Close called")
+}
+
+func (t *cancelAfterSuccessfulStartTask) StartContext(ctx context.Context) error {
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("start context marker missing")
+	}
+	*t.events = append(*t.events, "task-start")
+	t.cancelParent()
+	return nil
+}
+
+func (t *cancelAfterSuccessfulStartTask) StopContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("stop context marker missing")
+	}
+	*t.events = append(*t.events, "task-stop")
+	return nil
+}
+
+func (t *cancelAfterSuccessfulStartTask) WaitContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ctx.Value(contextMarkerKey{}) != "marker" {
+		return errors.New("wait context marker missing")
+	}
+	*t.events = append(*t.events, "task-wait")
+	return nil
+}
+
+func TestRuntimeHostRollsBackWhenStartupContextCancelsAfterTaskStart(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx := context.WithValue(parent, contextMarkerKey{}, "marker")
+	events := []string{}
+	tasks := NewTasks()
+	tasks.Add(&cancelAfterSuccessfulStartTask{events: &events, cancelParent: cancelParent})
+	host := NewRuntimeHost(tasks, RuntimeHostCallbacks{
+		Stop: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime stop context marker missing")
+			}
+			events = append(events, "runtime-stop")
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime join context marker missing")
+			}
+			events = append(events, "runtime-join")
+			return nil
+		},
+	})
+
+	err := host.StartContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartContext() error = %v, want context.Canceled", err)
+	}
+	if StartCleanupFailed(err) {
+		t.Fatalf("StartContext() error = %v, cleanup unexpectedly failed", err)
+	}
+	want := []string{"task-start", "task-stop", "runtime-stop", "task-wait", "runtime-join"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestRuntimeHostRollsBackWhenStartupContextCancelsAfterRuntimeStart(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx := context.WithValue(parent, contextMarkerKey{}, "marker")
+	events := []string{}
+	host := NewRuntimeHost(nil, RuntimeHostCallbacks{
+		Start: func(ctx context.Context) error {
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime start context marker missing")
+			}
+			events = append(events, "runtime-start")
+			cancelParent()
+			return nil
+		},
+		Stop: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime stop context marker missing")
+			}
+			events = append(events, "runtime-stop")
+			return nil
+		},
+		Join: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ctx.Value(contextMarkerKey{}) != "marker" {
+				return errors.New("runtime join context marker missing")
+			}
+			events = append(events, "runtime-join")
+			return nil
+		},
+	})
+
+	err := host.StartContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartContext() error = %v, want context.Canceled", err)
+	}
+	if !RuntimeStartFailed(err) {
+		t.Fatalf("StartContext() error = %v, want runtime-start failure classification", err)
+	}
+	if StartCleanupFailed(err) {
+		t.Fatalf("StartContext() error = %v, cleanup unexpectedly failed", err)
+	}
+	want := []string{"runtime-start", "runtime-stop", "runtime-join"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
