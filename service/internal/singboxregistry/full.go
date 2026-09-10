@@ -18,5 +18,6 @@ func WithFullRegistry(ctx context.Context) context.Context {
 		include.EndpointRegistry(),
 		include.DNSTransportRegistry(),
 		include.ServiceRegistry(),
+		include.CertificateProviderRegistry(),
 	)
 }
