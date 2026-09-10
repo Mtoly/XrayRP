@@ -46,7 +46,7 @@ func buildInboundWithUsers(config *Config, node inboundListenerView, tag string,
 
 	sniffingConfig := &conf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &conf.StringList{"http", "tls", "quic", "fakedns"},
+		DestOverride: conf.StringList{"http", "tls", "quic", "fakedns"},
 	}
 	if config.DisableSniffing {
 		sniffingConfig.Enabled = false
@@ -159,7 +159,7 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 	// SniffingConfig
 	sniffingConfig := &conf.SniffingConfig{
 		Enabled:      true,
-		DestOverride: &conf.StringList{"http", "tls", "quic", "fakedns"},
+		DestOverride: conf.StringList{"http", "tls", "quic", "fakedns"},
 	}
 	if config.DisableSniffing {
 		sniffingConfig.Enabled = false
@@ -324,8 +324,8 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 			XPaddingPlacement:   node.transport.xPaddingPlacement,
 			XPaddingMethod:      node.transport.xPaddingMethod,
 			UplinkHTTPMethod:    node.transport.uplinkHTTPMethod,
-			SessionPlacement:    node.transport.sessionPlacement,
-			SessionKey:          node.transport.sessionKey,
+			SessionIDPlacement:  node.transport.sessionPlacement,
+			SessionIDKey:        node.transport.sessionKey,
 			SeqPlacement:        node.transport.seqPlacement,
 			SeqKey:              node.transport.seqKey,
 			UplinkDataPlacement: node.transport.uplinkDataPlacement,
