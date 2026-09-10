@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -169,6 +170,12 @@ type anyTLSTracker struct {
 var _ adapter.ConnectionTracker = (*anyTLSTracker)(nil)
 
 func (t *anyTLSTracker) ModeList() []string { return nil }
+
+// RoutedFlow intentionally returns nil: prior versions only enforced
+// connection and packet-connection paths, so flow routing remains unchanged.
+func (t *anyTLSTracker) RoutedFlow(context.Context, adapter.InboundContext, adapter.Rule, adapter.Outbound) tun.FlowTracker {
+	return nil
+}
 
 func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) net.Conn {
 	if t.svc == nil {
