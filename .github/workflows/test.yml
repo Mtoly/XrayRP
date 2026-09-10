@@ -157,6 +157,8 @@ jobs:
           cache: true
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - name: Verify Hysteria sniff hook remains disabled
+        run: go test -count=1 ./service/hysteria2 -run '^TestBuildServerConfigKeepsVulnerableSniffHookDisabled$'
       - name: Scan reachable vulnerabilities
         shell: bash
         run: |
@@ -175,22 +177,9 @@ jobs:
             exit 0
           fi
 
-          if [[ "$(wc -l < "$affected")" -ne 1 ]] || ! grep -Fxq 'GO-2026-5288' "$affected"; then
-            echo "Reachable vulnerabilities found:" >&2
-            cat "$affected" >&2
-            exit 1
-          fi
-
-          core_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/core/v2)"
-          extras_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/extras/v2)"
-          if ! dpkg --compare-versions "${core_version#v}" ge '2.8.2' \
-            || ! dpkg --compare-versions "${extras_version#v}" ge '2.8.2'; then
-            echo "GO-2026-5288 cannot be allowed with Hysteria core=$core_version extras=$extras_version; both must be at least v2.8.2." >&2
-            exit 1
-          fi
-          go test -count=1 ./service/hysteria2 -run '^TestBuildServerConfigKeepsVulnerableSniffHookDisabled$'
-
-          echo "Allowing GO-2026-5288: the vulnerability database has no fixed version; core=$core_version extras=$extras_version and Hysteria request sniffing remains disabled."
+          echo "Reachable vulnerabilities found:" >&2
+          cat "$affected" >&2
+          exit 1
 
   codeql:
     name: CodeQL
