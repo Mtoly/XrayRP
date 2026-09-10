@@ -156,7 +156,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - name: Scan reachable vulnerabilities
         shell: bash
         run: |

@@ -20,6 +20,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Changed
 
+- Updated the CI vulnerability scanner to govulncheck v1.8.0 so the security gate can analyze the Go 1.27 codebase.
 - Upgraded supported Go, Redis, Hysteria core/extras to v2.12.0, sing, sing-box, artifact, container, stale-issue, and signing dependencies; GitHub Actions remain pinned to full commit SHAs.
 - Updated the Go toolchain to 1.26.6, Hysteria core/extras to v2.12.1, sing to v0.8.13, sing-box to v1.13.18, and refreshed the pinned Alpine and CodeQL maintenance inputs.
 - Updated Hysteria core/extras to v2.12.2 as the latest available patch release; the existing GO-2026-5288 scan exception remains required because the vulnerability database still reports no fixed version.
@@ -43,6 +44,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Preserved explicit XHTTP transport settings when advanced `extra` options are present under Xray-core v26, instead of silently replacing headers, padding, placement, and uplink fields with upstream defaults.
 - Restored release-page artifact builds and uploads for published GitHub Releases, including the repository's historical SemVer tags without a leading `v`; release commands now identify the repository explicitly, and tag pushes no longer start a duplicate artifact workflow.
 - Removed the deleted `tools` source root from the panel adapter isolation check so required test, race, and coverage jobs pass in clean checkouts.
 - Configuration hot reload now supports static-to-static and machine-to-machine updates, rejects static/machine mode changes before closing the current runtime, and restores the last-known-good runtime when a same-mode candidate fails to start.

@@ -395,7 +395,11 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 				}
 			}
 		}
-		streamSetting.SplitHTTPSettings = splithttpSetting
+		mergedSplitHTTPSetting, err := mergeSplitHTTPExtra(splithttpSetting)
+		if err != nil {
+			return nil, err
+		}
+		streamSetting.SplitHTTPSettings = mergedSplitHTTPSetting
 	}
 	streamSetting.Network = &transportProtocol
 
@@ -465,6 +469,106 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 	inboundDetourConfig.StreamSetting = streamSetting
 
 	return inboundDetourConfig.Build()
+}
+
+func mergeSplitHTTPExtra(explicit *conf.SplitHTTPConfig) (*conf.SplitHTTPConfig, error) {
+	if explicit == nil || explicit.Extra == nil {
+		return explicit, nil
+	}
+
+	var merged conf.SplitHTTPConfig
+	if err := json.Unmarshal(explicit.Extra, &merged); err != nil {
+		return nil, fmt.Errorf("decode XHTTP extra: %w", err)
+	}
+	merged.Extra = nil
+	merged.Host = explicit.Host
+	merged.Path = explicit.Path
+	merged.Mode = explicit.Mode
+	if explicit.Headers != nil {
+		merged.Headers = explicit.Headers
+	}
+	if explicit.XPaddingBytes != (conf.Int32Range{}) {
+		merged.XPaddingBytes = explicit.XPaddingBytes
+	}
+	if explicit.XPaddingObfsMode {
+		merged.XPaddingObfsMode = true
+	}
+	if explicit.XPaddingKey != "" {
+		merged.XPaddingKey = explicit.XPaddingKey
+	}
+	if explicit.XPaddingHeader != "" {
+		merged.XPaddingHeader = explicit.XPaddingHeader
+	}
+	if explicit.XPaddingPlacement != "" {
+		merged.XPaddingPlacement = explicit.XPaddingPlacement
+	}
+	if explicit.XPaddingMethod != "" {
+		merged.XPaddingMethod = explicit.XPaddingMethod
+	}
+	if explicit.UplinkHTTPMethod != "" {
+		merged.UplinkHTTPMethod = explicit.UplinkHTTPMethod
+	}
+	if explicit.SessionIDPlacement != "" {
+		merged.SessionIDPlacement = explicit.SessionIDPlacement
+	}
+	if explicit.SessionIDKey != "" {
+		merged.SessionIDKey = explicit.SessionIDKey
+	}
+	if explicit.SeqPlacement != "" {
+		merged.SeqPlacement = explicit.SeqPlacement
+	}
+	if explicit.SeqKey != "" {
+		merged.SeqKey = explicit.SeqKey
+	}
+	if explicit.UplinkDataPlacement != "" {
+		merged.UplinkDataPlacement = explicit.UplinkDataPlacement
+	}
+	if explicit.UplinkDataKey != "" {
+		merged.UplinkDataKey = explicit.UplinkDataKey
+	}
+	if explicit.UplinkChunkSize != (conf.Int32Range{}) {
+		merged.UplinkChunkSize = explicit.UplinkChunkSize
+	}
+	if explicit.NoGRPCHeader {
+		merged.NoGRPCHeader = true
+	}
+	if explicit.NoSSEHeader {
+		merged.NoSSEHeader = true
+	}
+	if explicit.ScMaxEachPostBytes != (conf.Int32Range{}) {
+		merged.ScMaxEachPostBytes = explicit.ScMaxEachPostBytes
+	}
+	if explicit.ScMinPostsIntervalMs != (conf.Int32Range{}) {
+		merged.ScMinPostsIntervalMs = explicit.ScMinPostsIntervalMs
+	}
+	if explicit.ScMaxBufferedPosts != 0 {
+		merged.ScMaxBufferedPosts = explicit.ScMaxBufferedPosts
+	}
+	if explicit.ScStreamUpServerSecs != (conf.Int32Range{}) {
+		merged.ScStreamUpServerSecs = explicit.ScStreamUpServerSecs
+	}
+	if explicit.Xmux.MaxConcurrency != (conf.Int32Range{}) {
+		merged.Xmux.MaxConcurrency = explicit.Xmux.MaxConcurrency
+	}
+	if explicit.Xmux.MaxConnections != (conf.Int32Range{}) {
+		merged.Xmux.MaxConnections = explicit.Xmux.MaxConnections
+	}
+	if explicit.Xmux.CMaxReuseTimes != (conf.Int32Range{}) {
+		merged.Xmux.CMaxReuseTimes = explicit.Xmux.CMaxReuseTimes
+	}
+	if explicit.Xmux.HMaxRequestTimes != (conf.Int32Range{}) {
+		merged.Xmux.HMaxRequestTimes = explicit.Xmux.HMaxRequestTimes
+	}
+	if explicit.Xmux.HMaxReusableSecs != (conf.Int32Range{}) {
+		merged.Xmux.HMaxReusableSecs = explicit.Xmux.HMaxReusableSecs
+	}
+	if explicit.Xmux.HKeepAlivePeriod != 0 {
+		merged.Xmux.HKeepAlivePeriod = explicit.Xmux.HKeepAlivePeriod
+	}
+	if explicit.DownloadSettings != nil {
+		merged.DownloadSettings = explicit.DownloadSettings
+	}
+	return &merged, nil
 }
 
 func buildTLSCertificateConfig(config *Config) (*conf.TLSCertConfig, error) {
