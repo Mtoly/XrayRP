@@ -9,7 +9,7 @@ require (
 	github.com/bitly/go-simplejson v0.5.1
 	github.com/eko/gocache/lib/v4 v4.2.4
 	github.com/eko/gocache/store/go_cache/v4 v4.2.5
-	github.com/eko/gocache/store/redis/v4 v4.2.6
+	github.com/eko/gocache/store/redis/v4 v4.2.9
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-acme/lego/v4 v4.35.2
 	github.com/go-resty/resty/v2 v2.17.2
