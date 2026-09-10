@@ -54,7 +54,7 @@ func (h *RuntimeHost) StartContext(ctx context.Context) error {
 		}
 	}
 	if h.tasks == nil {
-		return nil
+		return ctx.Err()
 	}
 	if err := h.tasks.StartContext(ctx, h.runtimeShutdown()); err != nil {
 		return err

@@ -563,3 +563,13 @@ func TestRuntimeHostRollsBackWhenStartupContextCancelsAfterRuntimeStart(t *testi
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
+
+func TestRuntimeHostRejectsCanceledContextBeforeTasklessStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	host := NewRuntimeHost(nil, RuntimeHostCallbacks{})
+	if err := host.StartContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("StartContext() error = %v, want context.Canceled", err)
+	}
+}
