@@ -154,7 +154,7 @@ func cipherFromString(c string) shadowsocks.CipherType {
 	case "chacha20-poly1305", "aead_chacha20_poly1305", "chacha20-ietf-poly1305":
 		return shadowsocks.CipherType_CHACHA20_POLY1305
 	case "none", "plain":
-		return shadowsocks.CipherType_NONE
+		return shadowsocks.CipherType_UNKNOWN
 	default:
 		return shadowsocks.CipherType_UNKNOWN
 	}

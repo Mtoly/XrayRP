@@ -117,7 +117,7 @@ func TestContractGetNodeInfo(t *testing.T) {
 	if node.NodeType != "Vless" || node.NodeID != contractNodeID || node.Port != 8443 || node.TransportProtocol != "ws" || !node.EnableTLS || !node.EnableVless || node.VlessFlow != "xtls-rprx-vision" {
 		t.Fatalf("unexpected node: %#v", node)
 	}
-	if len(node.NameServerConfig) != 1 || node.NameServerConfig[0].Address == nil || node.NameServerConfig[0].Address.Address.String() != "1.1.1.1" || !reflect.DeepEqual(node.NameServerConfig[0].Domains, []string{"domain:example.com"}) {
+	if len(node.NameServerConfig) != 1 || node.NameServerConfig[0].Address == nil || node.NameServerConfig[0].Address.Address.String() != "1.1.1.1" || !reflect.DeepEqual([]string(node.NameServerConfig[0].Domains), []string{"domain:example.com"}) {
 		t.Fatalf("unexpected DNS config: %#v", node.NameServerConfig)
 	}
 	assertRequest(t, <-requests, http.MethodPost, "/api/server/config")
