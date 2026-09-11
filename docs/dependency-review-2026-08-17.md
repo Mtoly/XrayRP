@@ -17,8 +17,8 @@ Commands and observed results:
 - `go mod tidy -diff`: no diff.
 - `go mod verify`: `all modules verified`.
 - `go version`: `go1.26.6`; `go.mod`: `go 1.26.6`.
-- After the update, `govulncheck -format openvex ./...` reports only the
-  existing `GO-2026-5288` exception.
+- At the time of this review, the updated scan reported only reachable
+  `GO-2026-5288`; the narrow CI exception described below was then in effect.
 
 ## Priority matrix (pre-update inventory)
 
@@ -40,13 +40,14 @@ Commands and observed results:
 
 ## Security interpretation
 
-The seven standard-library advisories from the initial scan are cleared by the
-Go patch update to `1.26.6`. `GO-2026-5288` is the Hysteria sniff OOM advisory
-and has no fixed version in the vulnerability database; the existing code and
-CI exception keep the vulnerable sniff hook disabled and test that invariant.
+At the time of this review, the Go patch update to `1.26.6` cleared the seven
+standard-library advisories from the initial scan. `GO-2026-5288` was the
+remaining Hysteria sniff OOM advisory and had no fixed version in the
+vulnerability database; the code kept the vulnerable sniff hook disabled, and
+CI used a narrow exception while testing that invariant.
 
-The current CI policy accepts only `GO-2026-5288`, and the updated local scan
-now matches that policy.
+The CI policy recorded on 2026-08-17 accepted only `GO-2026-5288`. That policy
+was superseded by the 2026-09-11 follow-up below.
 
 ## Primary sources
 
@@ -96,5 +97,15 @@ now matches that policy.
 - `go test -count=1 ./service/hysteria2 ./service/controller` passed.
 - `govulncheck v1.6.0 ./...` still reports only reachable `GO-2026-5288` for
   `core/v2@v2.12.2`; the database continues to publish no fixed version.
-- The existing `RequestHook: nil` defense-in-depth test and exact CI exception
-  remain in force; this patch update does not claim the advisory is cleared.
+- The `RequestHook: nil` defense-in-depth test and exact CI exception remained
+  in force at the time; the exception was superseded by the 2026-09-11 policy
+  follow-up below.
+
+## Policy follow-up — 2026-09-11
+
+- PR #208 removed the expired `GO-2026-5288` exception after the Hysteria
+  `v2.12.2` update still provided no fixed dependency version.
+- `govulncheck` now fails closed on every reachable vulnerability reported with
+  OpenVEX status `affected`; `GO-2026-5288` therefore remains release-blocking.
+- The independent `RequestHook: nil` regression test remains in CI as
+  defense-in-depth evidence, but it no longer permits an affected result to pass.
