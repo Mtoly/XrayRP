@@ -7,7 +7,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Security
 
 - Releases publish platform archives with one signed SHA256 index; per-platform SPDX SBOMs, source mappings, keyless signatures, and GitHub provenance attestations remain generated as workflow evidence.
-- `govulncheck` blocks reachable findings except for a temporary, narrowly validated `GO-2026-5288` allowance: Hysteria core and extras must be at least v2.8.2 and the request-sniff hook must remain disabled.
+- `govulncheck` now fails closed on every reachable vulnerability; the expired `GO-2026-5288` allowance has been removed.
 - Runtime configuration now rejects plaintext HTTP for remote panel API hosts before publishing a candidate; HTTP remains available for loopback development endpoints.
 - Panel adapter parsing errors no longer serialize node or user responses that may contain passwords, UUIDs, protocol keys, or certificate material.
 
@@ -23,7 +23,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 - Updated the CI vulnerability scanner to govulncheck v1.8.0 so the security gate can analyze the Go 1.27 codebase.
 - Upgraded supported Go, Redis, Hysteria core/extras to v2.12.0, sing, sing-box, artifact, container, stale-issue, and signing dependencies; GitHub Actions remain pinned to full commit SHAs.
 - Updated the Go toolchain to 1.26.6, Hysteria core/extras to v2.12.1, sing to v0.8.13, sing-box to v1.13.18, and refreshed the pinned Alpine and CodeQL maintenance inputs.
-- Updated Hysteria core/extras to v2.12.2 as the latest available patch release; the existing GO-2026-5288 scan exception remains required because the vulnerability database still reports no fixed version.
+- Updated Hysteria core/extras to v2.12.2 as the latest available patch release; reachable vulnerability findings remain release-blocking until a fixed dependency version is available.
 - Docker builds now pin both the Go builder and Alpine runtime images by readable version and multi-platform manifest digest.
 - Controller and machine runtimes now share one Applied node value deep-clone module, preserving nil/empty collection and custom address compatibility semantics.
 - Initial startup and hot reload now use the same mode-specific runtime configuration validation: static mode requires at least one `Nodes` entry, while enabled `MachineConfig` is valid with no static `Nodes`.
