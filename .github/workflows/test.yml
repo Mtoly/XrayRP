@@ -166,7 +166,8 @@ jobs:
 
           report="$(mktemp)"
           affected="$(mktemp)"
-          trap 'rm -f "$report" "$affected"' EXIT
+          unexpected="$(mktemp)"
+          trap 'rm -f "$report" "$affected" "$unexpected"' EXIT
 
           govulncheck -format openvex ./... > "$report"
           jq -r '.statements[]? | select(.status == "affected") | .vulnerability.name' "$report" \
@@ -177,9 +178,22 @@ jobs:
             exit 0
           fi
 
-          echo "Reachable vulnerabilities found:" >&2
-          cat "$affected" >&2
-          exit 1
+          grep -Fxv 'GO-2026-5288' "$affected" > "$unexpected" || true
+          if [[ -s "$unexpected" ]]; then
+            echo "Unexpected reachable vulnerabilities found:" >&2
+            cat "$unexpected" >&2
+            exit 1
+          fi
+
+          core_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/core/v2)"
+          extras_version="$(go list -m -f '{{.Version}}' github.com/apernet/hysteria/extras/v2)"
+          if ! dpkg --compare-versions "${core_version#v}" ge '2.8.2' \
+            || ! dpkg --compare-versions "${extras_version#v}" ge '2.8.2'; then
+            echo "GO-2026-5288 cannot be allowed with Hysteria core=$core_version extras=$extras_version; both must be at least v2.8.2." >&2
+            exit 1
+          fi
+
+          echo "::warning title=Temporary vulnerability allowance::Allowing GO-2026-5288 while Hysteria request sniffing remains disabled; core=$core_version extras=$extras_version."
 
   codeql:
     name: CodeQL
