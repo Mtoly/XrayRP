@@ -10,6 +10,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.
 - Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
 
 ## 0.9.2 - 2026-09-12
