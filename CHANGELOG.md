@@ -4,6 +4,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Fixed
+
+- Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
+
 ## 0.9.2 - 2026-09-12
 
 ### Security
