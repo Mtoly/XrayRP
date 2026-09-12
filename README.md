@@ -15,7 +15,7 @@ A Xray backend framework that can easily support many panels.
 
 ## 当前版本
 
-当前预发布版本：`0.9.1-alpha`
+当前版本：`0.9.2`
 
 本版本的主要更新内容请见 [CHANGELOG.md](./CHANGELOG.md)。
 
