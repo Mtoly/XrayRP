@@ -14,7 +14,7 @@ A Xray backend framework that can easily support many panels.
 
 ## Current Version
 
-Current prerelease version: `0.9.1-alpha`
+Current release: `0.9.2`
 
 See [CHANGELOG.md](./CHANGELOG.md) for the main changes in this version.
 

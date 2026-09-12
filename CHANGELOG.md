@@ -4,6 +4,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+## 0.9.2 - 2026-09-12
+
 ### Security
 
 - Releases publish platform archives with one signed SHA256 index; per-platform SPDX SBOMs, source mappings, keyless signatures, and GitHub provenance attestations remain generated as workflow evidence.
