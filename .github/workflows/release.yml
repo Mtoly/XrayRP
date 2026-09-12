@@ -201,6 +201,9 @@ jobs:
             -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildCommit=$COMMIT \
             -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildTime=$BUILD_TIME \
             -X github.com/Mtoly/XrayRP/internal/buildinfo.BuildDirty=false"
+          if [[ "$GOOS" == "android" ]]; then
+            ldflags="$ldflags -checklinkname=0"
+          fi
           go build -v -o build_assets/XrayR -tags with_quic -trimpath -ldflags "$ldflags" .
           if [[ "$GOARCH" == "mips" || "$GOARCH" == "mipsle" ]]; then
             GOMIPS=softfloat go build -v -o build_assets/XrayR_softfloat \
