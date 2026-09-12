@@ -8,6 +8,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Temporarily allowlisted `GO-2026-5288` only when it is the sole reachable finding, Hysteria core and extras remain at least v2.8.2, and the request-sniffing mitigation test passes; every other reachable vulnerability remains release-blocking.
 
+### Fixed
+
+- Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
+
 ## 0.9.2 - 2026-09-12
 
 ### Security
