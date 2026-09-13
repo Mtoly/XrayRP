@@ -35,6 +35,10 @@ Observability: # Optional local health, readiness, and Prometheus metrics server
 #   ControllerConfig: # Shared controller defaults applied to every discovered server/node.
 #     ListenIP: 0.0.0.0 # Local listen IP for inbound services created from discovered nodes.
 #     SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
+#     # Trusted HTTP header names for X-Forwarded-For; empty by default. Use names, not IPs/CIDRs.
+#     # Example: CF-Connecting-IP. Header presence only; restrict origin access to trusted proxies/CDNs.
+#     TrustedXForwardedFor:
+#       - CF-Connecting-IP
 #     UpdatePeriodic: 60 # Fallback per-node interval; panel pull_interval has a 30s minimum and push_interval has a 5s minimum.
 #     WebSocketConfig: # Shared machine WebSocket control-plane settings.
 #       Enable: true # Enable shared machine WebSocket for sync.nodes, per-node mailbox routing, and node.status reports.
@@ -59,6 +63,10 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
     ControllerConfig: # Runtime behavior for this node.
       ListenIP: 0.0.0.0 # Local IP address for inbound listeners.
       SendIP: 0.0.0.0 # Local outbound source IP. Use 0.0.0.0 for the system default.
+      # Trusted HTTP header names for X-Forwarded-For; empty by default. Use names, not IPs/CIDRs.
+      # Example: CF-Connecting-IP. This checks header presence only; restrict origin access to trusted proxies/CDNs.
+      TrustedXForwardedFor:
+        - CF-Connecting-IP
       UpdatePeriodic: 60 # Local fallback interval. Xboard pull_interval controls sync (minimum 30s) and push_interval controls reports (minimum 5s) when provided.
       EnableDNS: false # Enable custom DNS config from DnsConfigPath.
       DNSType: AsIs # DNS strategy: AsIs, UseIP, UseIPv4, or UseIPv6.

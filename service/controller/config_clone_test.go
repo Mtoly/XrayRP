@@ -82,6 +82,7 @@ func TestConfigCloneDetachesNestedValues(t *testing.T) {
 			MaxTimeDiff:      60,
 			ShortIds:         []string{"short-id"},
 		},
+		TrustedXForwardedFor: []string{"CF-Connecting-IP"},
 		WebSocketConfig: &WebSocketConfig{
 			Enable:            true,
 			Endpoint:          "wss://panel.example/ws",
@@ -119,7 +120,11 @@ func TestConfigCloneDetachesNestedValues(t *testing.T) {
 	cloned.REALITYConfigs.ServerNames[0] = "clone.example.com"
 	cloned.REALITYConfigs.ShortIds[0] = "clone-short-id"
 	cloned.WebSocketConfig.Endpoint = "wss://clone.example/ws"
+	cloned.TrustedXForwardedFor[0] = "clone-header"
 
+	if original.TrustedXForwardedFor[0] != "CF-Connecting-IP" {
+		t.Fatalf("trusted forwarded headers were aliased: %#v", original.TrustedXForwardedFor)
+	}
 	if original.CertConfig.DNSEnv["DNS_TOKEN"] != "source-token" || original.CertConfig.CertFile != "/tmp/node.crt" {
 		t.Fatalf("certificate config was aliased: %#v", original.CertConfig)
 	}

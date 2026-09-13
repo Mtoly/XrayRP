@@ -201,7 +201,8 @@ func TestBuildMachineNodeAPIConfigIncludesMachineID(t *testing.T) {
 
 func TestBuildMachineControllerConfigReturnsFreshConfigPerNode(t *testing.T) {
 	template := &controller.Config{
-		UpdatePeriodic: 45,
+		UpdatePeriodic:       45,
+		TrustedXForwardedFor: []string{"CF-Connecting-IP"},
 		WebSocketConfig: &controller.WebSocketConfig{
 			Enable:            false,
 			Endpoint:          "wss://panel.example.com/ws",
@@ -230,6 +231,13 @@ func TestBuildMachineControllerConfigReturnsFreshConfigPerNode(t *testing.T) {
 	if cfg1 == cfg2 {
 		t.Fatal("expected fresh top-level controller configs")
 	}
+	if len(cfg1.TrustedXForwardedFor) != 1 || cfg1.TrustedXForwardedFor[0] != "CF-Connecting-IP" || len(cfg2.TrustedXForwardedFor) != 1 || cfg2.TrustedXForwardedFor[0] != "CF-Connecting-IP" {
+		t.Fatalf("expected TrustedXForwardedFor to propagate, got %#v and %#v", cfg1.TrustedXForwardedFor, cfg2.TrustedXForwardedFor)
+	}
+	if cfg1.TrustedXForwardedFor == nil || &cfg1.TrustedXForwardedFor[0] == &cfg2.TrustedXForwardedFor[0] {
+		t.Fatal("expected independent TrustedXForwardedFor slices")
+	}
+
 	if cfg1.UpdatePeriodic != template.UpdatePeriodic || cfg2.UpdatePeriodic != template.UpdatePeriodic {
 		t.Fatalf("expected UpdatePeriodic %d, got %d and %d", template.UpdatePeriodic, cfg1.UpdatePeriodic, cfg2.UpdatePeriodic)
 	}
