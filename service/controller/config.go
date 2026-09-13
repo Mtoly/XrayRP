@@ -15,6 +15,7 @@ type Config struct {
 	DisableUploadTraffic      bool                             `mapstructure:"DisableUploadTraffic"`
 	DisableGetRule            bool                             `mapstructure:"DisableGetRule"`
 	EnableProxyProtocol       bool                             `mapstructure:"EnableProxyProtocol"`
+	TrustedXForwardedFor      []string                         `mapstructure:"TrustedXForwardedFor"`
 	EnableFallback            bool                             `mapstructure:"EnableFallback"`
 	DisableIVCheck            bool                             `mapstructure:"DisableIVCheck"`
 	DisableSniffing           bool                             `mapstructure:"DisableSniffing"`

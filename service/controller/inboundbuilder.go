@@ -459,16 +459,33 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 		streamSetting.TLSSettings = tlsSettings
 	}
 
-	// Support ProxyProtocol for any transport protocol
-	if networkType != "tcp" && networkType != "ws" && (config.EnableProxyProtocol || node.transport.acceptProxyProtocol) {
-		sockoptConfig := &conf.SocketConfig{
-			AcceptProxyProtocol: config.EnableProxyProtocol || node.transport.acceptProxyProtocol,
+	// Support ProxyProtocol for any transport protocol without replacing existing socket settings.
+	acceptProxyProtocol := config.EnableProxyProtocol || node.transport.acceptProxyProtocol
+	if networkType != "tcp" && networkType != "ws" && acceptProxyProtocol {
+		if streamSetting.SocketSettings == nil {
+			streamSetting.SocketSettings = &conf.SocketConfig{}
 		}
-		streamSetting.SocketSettings = sockoptConfig
+		streamSetting.SocketSettings.AcceptProxyProtocol = acceptProxyProtocol
 	}
+	if supportsTrustedXForwardedFor(networkType) && len(config.TrustedXForwardedFor) > 0 {
+		if streamSetting.SocketSettings == nil {
+			streamSetting.SocketSettings = &conf.SocketConfig{}
+		}
+		streamSetting.SocketSettings.TrustedXForwardedFor = cloneSlice(config.TrustedXForwardedFor)
+	}
+
 	inboundDetourConfig.StreamSetting = streamSetting
 
 	return inboundDetourConfig.Build()
+}
+
+func supportsTrustedXForwardedFor(networkType string) bool {
+	switch networkType {
+	case "websocket", "httpupgrade", "grpc", "splithttp":
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeSplitHTTPExtra(explicit *conf.SplitHTTPConfig) (*conf.SplitHTTPConfig, error) {

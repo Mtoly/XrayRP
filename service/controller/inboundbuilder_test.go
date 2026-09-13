@@ -213,3 +213,61 @@ func TestInboundBuilderPrefersCompletePanelREALITYConfig(t *testing.T) {
 		t.Fatalf("expected panel REALITY settings, got dest %q xver %d", realityConfig.Dest, realityConfig.Xver)
 	}
 }
+
+func TestInboundBuilderTrustedXForwardedFor(t *testing.T) {
+	transports := []struct {
+		name     string
+		protocol string
+	}{
+		{"xhttp", "xhttp"}, {"websocket", "ws"}, {"httpupgrade", "httpupgrade"}, {"grpc", "grpc"},
+	}
+	for _, tt := range transports {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &api.NodeInfo{NodeType: "V2ray", Port: 8443, TransportProtocol: tt.protocol, EnableVless: true}
+			inbound, err := InboundBuilder(&Config{TrustedXForwardedFor: []string{"CF-Connecting-IP"}}, node, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receiver, err := inbound.ReceiverSettings.GetInstance()
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := receiver.(*proxyman.ReceiverConfig).StreamSettings
+			if settings.SocketSettings == nil || len(settings.SocketSettings.TrustedXForwardedFor) != 1 || settings.SocketSettings.TrustedXForwardedFor[0] != "CF-Connecting-IP" {
+				t.Fatalf("socket settings = %#v", settings.SocketSettings)
+			}
+		})
+	}
+}
+
+func TestInboundBuilderTrustedXForwardedForPreservesProxyProtocol(t *testing.T) {
+	node := &api.NodeInfo{NodeType: "V2ray", Port: 8443, TransportProtocol: "xhttp", EnableVless: true, AcceptProxyProtocol: true}
+	inbound, err := InboundBuilder(&Config{EnableProxyProtocol: true, TrustedXForwardedFor: []string{"CF-Connecting-IP"}}, node, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := inbound.ReceiverSettings.GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := receiver.(*proxyman.ReceiverConfig).StreamSettings
+	if settings.SocketSettings == nil || !settings.SocketSettings.AcceptProxyProtocol || len(settings.SocketSettings.TrustedXForwardedFor) != 1 {
+		t.Fatalf("socket settings = %#v", settings.SocketSettings)
+	}
+}
+
+func TestInboundBuilderTrustedXForwardedForDefault(t *testing.T) {
+	node := &api.NodeInfo{NodeType: "V2ray", Port: 8443, TransportProtocol: "xhttp", EnableVless: true}
+	inbound, err := InboundBuilder(&Config{}, node, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, err := inbound.ReceiverSettings.GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := receiver.(*proxyman.ReceiverConfig).StreamSettings
+	if settings.SocketSettings != nil {
+		t.Fatalf("socket settings = %#v, want nil", settings.SocketSettings)
+	}
+}

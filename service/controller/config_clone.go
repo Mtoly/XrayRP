@@ -20,6 +20,7 @@ func (config *Config) Clone() *Config {
 	cloned.FallBackConfigs = cloneFallBackConfigs(config.FallBackConfigs)
 	cloned.REALITYConfigs = cloneLocalREALITYConfig(config.REALITYConfigs)
 	cloned.WebSocketConfig = cloneWebSocketConfig(config.WebSocketConfig)
+	cloned.TrustedXForwardedFor = cloneSlice(config.TrustedXForwardedFor)
 	return &cloned
 }
 
