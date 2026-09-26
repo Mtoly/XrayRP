@@ -32,6 +32,7 @@ type NodeSnapshot struct {
 	RouteOnly           bool
 	EnableVless         bool
 	VlessFlow           string
+	VlessDecryption     string
 	CypherMethod        string
 	ServerKey           string
 	ServiceName         string
@@ -124,6 +125,7 @@ func NormalizeNodeInfo(nodeInfo *NodeInfo) *NodeSnapshot {
 		RouteOnly:             nodeInfo.RouteOnly,
 		EnableVless:           nodeInfo.EnableVless,
 		VlessFlow:             nodeInfo.VlessFlow,
+		VlessDecryption:       nodeInfo.VlessDecryption,
 		CypherMethod:          nodeInfo.CypherMethod,
 		ServerKey:             nodeInfo.ServerKey,
 		ServiceName:           nodeInfo.ServiceName,
@@ -280,6 +282,7 @@ func (snapshot *NodeSnapshot) ToNodeInfo() *NodeInfo {
 		RouteOnly:             snapshot.RouteOnly,
 		EnableVless:           snapshot.EnableVless,
 		VlessFlow:             snapshot.VlessFlow,
+		VlessDecryption:       snapshot.VlessDecryption,
 		CypherMethod:          snapshot.CypherMethod,
 		ServerKey:             snapshot.ServerKey,
 		ServiceName:           snapshot.ServiceName,

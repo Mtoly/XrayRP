@@ -54,6 +54,22 @@ func TestNodeSnapshotRoundTripPreservesCompatibilityNodeInfo(t *testing.T) {
 	}
 }
 
+func TestNodeSnapshotPreservesVlessDecryption(t *testing.T) {
+	source := &api.NodeInfo{VlessDecryption: "test-vless-decryption"}
+	snapshot := api.NormalizeNodeInfo(source)
+	clone := snapshot.Clone()
+	source.VlessDecryption = "changed"
+	if snapshot.VlessDecryption != "test-vless-decryption" || clone.VlessDecryption != "test-vless-decryption" {
+		t.Fatal("VLESS decryption changed in an owned snapshot")
+	}
+	if clone.ToNodeInfo().VlessDecryption != "test-vless-decryption" {
+		t.Fatal("VLESS decryption was lost during compatibility materialization")
+	}
+	if snapshot.Equal(api.NormalizeNodeInfo(source)) {
+		t.Fatal("a VLESS decryption change must trigger runtime replacement")
+	}
+}
+
 func TestNodeSnapshotMaterializesNeutralNameServers(t *testing.T) {
 	disableCache := true
 	snapshot := &api.NodeSnapshot{

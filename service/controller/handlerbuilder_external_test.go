@@ -182,6 +182,23 @@ func TestNodeHandlerBuilderOwnsInputsAndKeepsCredentialsOpaque(t *testing.T) {
 	}
 }
 
+func TestNodeHandlerBuilderDoesNotFormatVlessDecryption(t *testing.T) {
+	const decryption = "test-vless-decryption"
+	builder, err := controller.NewNodeHandlerBuilder(&controller.Config{}, &api.NodeInfo{VlessDecryption: decryption})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(builder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{fmt.Sprintf("%v", builder), fmt.Sprintf("%+v", builder), fmt.Sprintf("%#v", builder), string(encoded)} {
+		if strings.Contains(output, decryption) {
+			t.Fatal("formatted handler builder exposed VLESS decryption")
+		}
+	}
+}
+
 func TestNodeHandlerBuilderRejectsInvalidOrUninitializedUse(t *testing.T) {
 	if _, err := controller.NewNodeHandlerBuilder(nil, &api.NodeInfo{}); err == nil {
 		t.Fatal("NewNodeHandlerBuilder(nil config) succeeded")

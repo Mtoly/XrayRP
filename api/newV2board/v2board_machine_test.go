@@ -1,6 +1,8 @@
 package newV2board_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,7 +10,70 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
+	"github.com/Mtoly/XrayRP/service/controller"
+	xrayvless "github.com/xtls/xray-core/proxy/vless/inbound"
 )
+
+func TestMachineVlessDecryptionReachesInboundPerNode(t *testing.T) {
+	firstKey := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	secondKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v2/server/machine/nodes" {
+			_, _ = w.Write([]byte(`{"nodes":[{"id":11,"type":"vless"},{"id":12,"type":"vless"},{"id":13,"type":"vless"}]}`))
+			return
+		}
+		if r.URL.Path != "/api/v2/server/config" || r.URL.Query().Get("machine_id") != "7" {
+			t.Errorf("unexpected machine config request")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch r.URL.Query().Get("node_id") {
+		case "11":
+			_, _ = w.Write([]byte(`{"server_port":8443,"network":"tcp","decryption":"mlkem768x25519plus.native.0s.` + firstKey + `","encryption":"client-only"}`))
+		case "12":
+			_, _ = w.Write([]byte(`{"server_port":8444,"network":"tcp","decryption":"mlkem768x25519plus.native.0s.` + secondKey + `"}`))
+		case "13":
+			_, _ = w.Write([]byte(`{"server_port":8445,"network":"tcp","decryption":null,"encryption":"client-only"}`))
+		default:
+			t.Errorf("unexpected node_id")
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	bindings, err := newV2board.DiscoverMachineNodes(newV2board.MachineDiscoveryConfig{APIHost: server.URL, MachineID: 7, Token: "machine-token"})
+	if err != nil || len(bindings.Nodes) != 3 {
+		t.Fatal("machine discovery did not return the VLESS nodes")
+	}
+	for i, binding := range bindings.Nodes {
+		want := []string{firstKey, secondKey, "none"}[i]
+		client := newV2board.New(&api.Config{APIHost: server.URL, MachineID: 7, NodeID: binding.ID, NodeType: binding.Type, Key: "machine-token"})
+		snapshot, err := client.GetNodeSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := snapshot.ToNodeInfo()
+		if api.NormalizeNodeInfo(info).VlessDecryption != snapshot.VlessDecryption {
+			t.Fatal("machine VLESS decryption lost during normalization")
+		}
+		built, err := controller.InboundBuilder(&controller.Config{}, info, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings, err := built.ProxySettings.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.(*xrayvless.Config).Decryption != want {
+			t.Fatal("machine node's VLESS decryption was lost or mixed with another node")
+		}
+		legacyInfo, err := client.GetNodeInfo()
+		if err != nil || legacyInfo.VlessDecryption != snapshot.VlessDecryption {
+			t.Fatal("legacy machine node path lost VLESS decryption")
+		}
+	}
+}
 
 func TestNewV2boardClientOmitsMachineIDWhenUnset(t *testing.T) {
 	query := getUserListQuery(t, &api.Config{

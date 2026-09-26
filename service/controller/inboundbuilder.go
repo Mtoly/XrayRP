@@ -180,11 +180,18 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 		useVless := node.enableVless || strings.EqualFold(node.listener.nodeType, "Vless") || strings.EqualFold(node.listener.nodeType, "VLESS")
 		if useVless {
 			protocol = "vless"
+			decryption := strings.TrimSpace(node.vlessDecryption)
+			if decryption == "" {
+				decryption = "none"
+			}
 			if config.EnableFallback {
+				if decryption != "none" {
+					return nil, fmt.Errorf("VLESS encryption cannot be used with fallbacks")
+				}
 				fallbackConfigs, err := buildVlessFallbacks(config.FallBackConfigs)
 				if err == nil {
 					proxySetting = &conf.VLessInboundConfig{
-						Decryption: "none",
+						Decryption: decryption,
 						Fallbacks:  fallbackConfigs,
 					}
 				} else {
@@ -192,7 +199,7 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 				}
 			} else {
 				proxySetting = &conf.VLessInboundConfig{
-					Decryption: "none",
+					Decryption: decryption,
 				}
 			}
 		} else {
@@ -476,7 +483,12 @@ func buildInbound(config *Config, node inboundNodeView, tag string) (*core.Inbou
 
 	inboundDetourConfig.StreamSetting = streamSetting
 
-	return inboundDetourConfig.Build()
+	inbound, err := inboundDetourConfig.Build()
+	if err != nil && protocol == "vless" && strings.TrimSpace(node.vlessDecryption) != "" && strings.TrimSpace(node.vlessDecryption) != "none" {
+		// Xray-core can include the decryption value in validation errors.
+		return nil, fmt.Errorf("build encrypted VLESS inbound failed: invalid decryption or inbound settings")
+	}
+	return inbound, err
 }
 
 func supportsTrustedXForwardedFor(networkType string) bool {
