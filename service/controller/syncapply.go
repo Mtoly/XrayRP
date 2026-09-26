@@ -872,7 +872,7 @@ func (a nodeRuntimeStateApplyModule) rollbackRuntimeUsersAfterAddFailureSnapshot
 func (a nodeRuntimeStateApplyModule) removeRuntimeUsersBestEffort(tag string, users []api.UserInfo) error {
 	var rollbackErrs []error
 	for _, user := range users {
-		key := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+		key := buildRuntimeUserTag(user, tag)
 		if err := a.hooks.runtime.removeUsers([]string{key}, tag); err != nil {
 			rollbackErrs = append(rollbackErrs, err)
 		}

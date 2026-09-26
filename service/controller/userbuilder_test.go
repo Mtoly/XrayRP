@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xtls/xray-core/proxy/vless"
@@ -25,6 +26,53 @@ func TestFocusedVlessUserBuilderUsesEffectiveFlow(t *testing.T) {
 	}
 	if got := account.(*vless.Account).Flow; got != "xtls-rprx-vision" {
 		t.Fatalf("VLESS flow = %q, want xtls-rprx-vision", got)
+	}
+}
+
+func TestRuntimeUserTagDoesNotExposePanelIdentity(t *testing.T) {
+	const sentinel = "11111111-2222-3333-4444-555555555555"
+	controller := &Controller{}
+	user := api.UserInfo{
+		UID:    17,
+		Email:  sentinel + "@v2board.user",
+		UUID:   sentinel,
+		Passwd: "test-secret-password",
+	}
+
+	users := controller.buildVlessUser(&[]api.UserInfo{user}, vlessUserNodeView{}, "node-tag")
+	if len(users) != 1 {
+		t.Fatalf("users length = %d, want 1", len(users))
+	}
+	if got := users[0].Email; got != "node-tag|17" {
+		t.Fatalf("runtime user tag = %q, want node-tag|17", got)
+	}
+	if strings.Contains(users[0].Email, sentinel) || strings.Contains(users[0].Email, user.Passwd) {
+		t.Fatalf("runtime user tag contains panel credential: %q", users[0].Email)
+	}
+
+	account, err := users[0].Account.GetInstance()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := account.(*vless.Account).Id; got != sentinel {
+		t.Fatalf("VLESS account ID = %q, want original authentication UUID", got)
+	}
+}
+
+func TestRuntimeLimiterUsersOwnOpaqueRuntimeTags(t *testing.T) {
+	const sentinel = "11111111-2222-3333-4444-555555555555"
+	controller := &Controller{}
+	input := []api.UserInfo{{UID: 17, Email: sentinel + "@v2board.user", UUID: sentinel}}
+
+	got := controller.runtimeLimiterUsers("node-tag", &input)
+	if got == &input || got == nil || len(*got) != 1 {
+		t.Fatalf("runtimeLimiterUsers did not return an owned copy: %#v", got)
+	}
+	if (*got)[0].Email != "node-tag|17" {
+		t.Fatalf("runtime limiter key = %q, want node-tag|17", (*got)[0].Email)
+	}
+	if input[0].Email != sentinel+"@v2board.user" {
+		t.Fatal("runtimeLimiterUsers mutated the panel-owned input")
 	}
 }
 

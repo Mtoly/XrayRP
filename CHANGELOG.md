@@ -11,6 +11,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Security
 
 - Temporarily allowlisted `GO-2026-5288` only when it is the sole reachable finding, Hysteria core and extras remain at least v2.8.2, and the request-sniffing mitigation test passes; every other reachable vulnerability remains release-blocking.
+- Prevented panel user identifiers and credentials from entering Xray runtime user tags and debug-visible traffic counter names; authentication UUIDs remain confined to protocol account settings.
 
 ### Fixed
 

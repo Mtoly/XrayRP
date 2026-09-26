@@ -163,8 +163,7 @@ func limitUser(c *Controller, user api.UserInfo, tag string, silentUsers *[]api.
 		currentSpeedLimit: c.config.AutoSpeedLimitConfig.LimitSpeed,
 		originSpeedLimit:  user.SpeedLimit,
 	}
-	userTag := c.buildUserTagFrom(user, tag)
-	c.logger.Printf("Limit User: %s Speed: %d End: %s", userTag, c.config.AutoSpeedLimitConfig.LimitSpeed, time.Unix(c.limitedUsers[user].end, 0).Format("01-02 15:04:05"))
+	c.logger.Printf("Limit User: uid=%d Speed: %d End: %s", user.UID, c.config.AutoSpeedLimitConfig.LimitSpeed, time.Unix(c.limitedUsers[user].end, 0).Format("01-02 15:04:05"))
 	user.SpeedLimit = speedLimitBytes(c.config.AutoSpeedLimitConfig.LimitSpeed)
 	*silentUsers = append(*silentUsers, user)
 }

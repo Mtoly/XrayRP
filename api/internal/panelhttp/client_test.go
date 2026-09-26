@@ -365,6 +365,59 @@ func TestDebugRedactionDoesNotMutateHTTPHeaders(t *testing.T) {
 	assertRedacted(t, logs.String(), secret)
 }
 
+func TestDebugLogsExcludeSensitiveHTTPErrorBodies(t *testing.T) {
+	const (
+		uuid       = "11111111-2222-3333-4444-555555555555"
+		machineTok = "secret-machine-token"
+		password   = "test-secret-password"
+		decryption = "test-secret-decryption"
+		encryption = "test-secret-encryption"
+	)
+	body := `{"uuid":"` + uuid + `","token":"` + machineTok + `","password":"` + password + `","decryption":"` + decryption + `","encryption":"` + encryption + `"}`
+	logs := captureLogrus(t)
+	client, policy := NewClient(ClientConfig{
+		BaseURL:     "https://panel.example",
+		Credentials: []string{machineTok},
+	})
+	client.SetDebug(true)
+	statuses := []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity, http.StatusInternalServerError}
+	for _, status := range statuses {
+		status := status
+		client.SetTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: status,
+				Status:     fmt.Sprintf("%d status", status),
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		}))
+
+		res, requestErr := client.R().
+			SetQueryParam("token", machineTok).
+			SetBody(map[string]string{"uuid": uuid, "password": password, "decryption": decryption, "encryption": encryption}).
+			Post("/api/v2/server/user")
+		if requestErr != nil {
+			t.Fatalf("status %d debug request failed: %v", status, requestErr)
+		}
+		if err := policy.CheckResponse(res, "/api/v2/server/user", nil); err == nil {
+			t.Fatalf("status %d unexpectedly accepted", status)
+		}
+	}
+
+	debugLog := logs.String()
+	for _, secret := range []string{uuid, machineTok, password, decryption, encryption} {
+		if strings.Contains(debugLog, secret) {
+			t.Fatalf("debug log contains sensitive value %q: %s", secret, debugLog)
+		}
+	}
+	for _, context := range []string{"POST", "/api/v2/server/user"} {
+		if !strings.Contains(debugLog, context) {
+			t.Fatalf("debug log lost safe request context %q: %s", context, debugLog)
+		}
+	}
+}
+
 func TestRedactingLoggerPreservesSeverity(t *testing.T) {
 	logger := log.StandardLogger()
 	oldOutput := logger.Out

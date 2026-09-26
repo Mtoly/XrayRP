@@ -1564,7 +1564,7 @@ func TestSyncApply_UUIDChangeIsRuntimeAffecting(t *testing.T) {
 		t.Fatalf("expected one runtime add payload, got %d", len(recorder.addedUserPayloads))
 	}
 	assertUserPayload(t, recorder.addedUserPayloads[0], []api.UserInfo{nextUsers[0]})
-	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" {
+	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|1" {
 		t.Fatalf("expected old runtime user removal key, got %#v", recorder.removedUsers)
 	}
 	if recorder.snapshotLimiterCalls != 1 || recorder.restoreLimiterCalls != 0 {
@@ -1649,7 +1649,7 @@ func TestSyncApply_RuntimeAddFailureRestoresLimiterAndDoesNotCommitUserState(t *
 	}
 	assertUserPayload(t, recorder.addedUserPayloads[0], []api.UserInfo{nextUsers[0]})
 	assertUserPayload(t, recorder.addedUserPayloads[1], []api.UserInfo{currentUsers[0]})
-	if len(recorder.removedUsers) != 2 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" || len(recorder.removedUsers[1]) != 1 || recorder.removedUsers[1][0] != tag+"|user@example.com|1" {
+	if len(recorder.removedUsers) != 2 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|1" || len(recorder.removedUsers[1]) != 1 || recorder.removedUsers[1][0] != tag+"|1" {
 		t.Fatalf("expected runtime update to remove old user then roll back partially added user, got %#v", recorder.removedUsers)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
@@ -1686,7 +1686,7 @@ func TestSyncApply_RuntimeRemoveFailureRestoresLimiterAndDoesNotCommitUserState(
 		t.Fatalf("expected runtime restore payload after remove failure, got %#v", recorder.addedUserPayloads)
 	}
 	assertUserPayload(t, recorder.addedUserPayloads[0], []api.UserInfo{currentUsers[0]})
-	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|user@example.com|1" {
+	if len(recorder.removedUsers) != 1 || len(recorder.removedUsers[0]) != 1 || recorder.removedUsers[0][0] != tag+"|1" {
 		t.Fatalf("expected runtime update to attempt old user removal, got %#v", recorder.removedUsers)
 	}
 	_, _, appliedUsers := controller.getStateSnapshot()
@@ -1884,7 +1884,7 @@ func TestSyncApply_InitialUserLimiterFailureRemovesCandidateRuntimeUsers(t *test
 				t.Fatal("failed initial limiter remained published")
 			}
 			if nodeType == "V2ray" {
-				wantKey := tag + "|next@example.test|2"
+				wantKey := tag + "|2"
 				if len(recorder.removedUsers) != 1 || !reflect.DeepEqual(recorder.removedUsers[0], []string{wantKey}) {
 					t.Fatalf("candidate runtime removals = %#v, want %q", recorder.removedUsers, wantKey)
 				}
@@ -1939,7 +1939,7 @@ func TestSyncApply_UserDiffPayloadOrder(t *testing.T) {
 	if len(recorder.removedUsers) != 1 {
 		t.Fatalf("expected one runtime remove batch, got %#v", recorder.removedUsers)
 	}
-	wantRemovedUsers := []string{tag + "|deleted@example.com|1", tag + "|runtime@example.com|2"}
+	wantRemovedUsers := []string{tag + "|1", tag + "|2"}
 	if !reflect.DeepEqual(recorder.removedUsers[0], wantRemovedUsers) {
 		t.Fatalf("unexpected runtime remove payload:\n got: %#v\nwant: %#v", recorder.removedUsers[0], wantRemovedUsers)
 	}
