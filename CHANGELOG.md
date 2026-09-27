@@ -6,7 +6,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Added
 
-- Docker releases explicitly publish `latest` alongside the release tag, so `ghcr.io/mtoly/xrayrp:latest` always follows the most recently published release.
+- Docker releases explicitly publish the original release tag and `latest`, including legacy non-SemVer release tags, so `ghcr.io/mtoly/xrayrp:latest` always follows the most recently published release.
 
 ### Security
 

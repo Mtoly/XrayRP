@@ -28,14 +28,17 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # Explicit release-tag contract: every published release publishes its
-          # version tag, and `latest` always follows the most recently published
-          # release (stable and pre-release alike). Declared here instead of
-          # relying on metadata-action's implicit defaults, which do not
-          # guarantee that a pre-release updates `latest`.
+          # original Git tag and `latest`, so `latest` always follows the most
+          # recently published release (stable and pre-release alike).
+          # `type=ref,event=tag` keeps that Git tag exactly as published instead
+          # of normalizing it to SemVer: published releases are not required to
+          # be canonical SemVer, and `type=semver` silently drops the rest.
+          # Declared here instead of relying on metadata-action's implicit
+          # defaults, which do not guarantee that a pre-release updates `latest`.
           tags: |
-            type=semver,pattern={{version}}
+            type=ref,event=tag
             type=raw,value=latest
-          # Emit the version tag and `latest` from the tag rules above only.
+          # Emit the Git tag and `latest` from the tag rules above only.
           flavor: |
             latest=false
       - name: Set up QEMU
@@ -87,10 +90,11 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Same explicit contract as the build job: this step decides which
+          # Same explicit contract as the build job: every published release
+          # publishes its original Git tag and `latest`. This step decides which
           # tags the merged multi-arch manifest is published under.
           tags: |
-            type=semver,pattern={{version}}
+            type=ref,event=tag
             type=raw,value=latest
           flavor: |
             latest=false
