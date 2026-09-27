@@ -629,6 +629,7 @@ func (c *APIClient) parseV2rayNodeSnapshotResponse(s *serverConfig) (*api.NodeSn
 		Host:              host,
 		EnableVless:       c.EnableVless,
 		VlessFlow:         s.VlessFlow,
+		VlessDecryption:   s.VlessDecryption,
 		ServiceName:       s.NetworkSettings.ServiceName,
 		Header:            header,
 		EnableREALITY:     enableREALITY,

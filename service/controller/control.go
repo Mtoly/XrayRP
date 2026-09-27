@@ -313,18 +313,32 @@ func (c *Controller) resetTraffic(upCounterList *[]stats.Counter, downCounterLis
 }
 
 func (c *Controller) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalDeviceLimitConfig *limiter.GlobalDeviceLimitConfig) error {
-	err := c.dispatcher.Limiter.AddInboundLimiter(tag, nodeSpeedLimit, userList, globalDeviceLimitConfig)
+	err := c.dispatcher.Limiter.AddInboundLimiter(tag, nodeSpeedLimit, c.runtimeLimiterUsers(tag, userList), globalDeviceLimitConfig)
 	return err
 }
 
 func (c *Controller) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserInfo) error {
-	err := c.dispatcher.Limiter.UpdateInboundLimiter(tag, updatedUserList)
+	err := c.dispatcher.Limiter.UpdateInboundLimiter(tag, c.runtimeLimiterUsers(tag, updatedUserList))
 	return err
 }
 
 func (c *Controller) replaceInboundLimiterUsers(tag string, userList *[]api.UserInfo) error {
-	err := c.dispatcher.Limiter.ReplaceInboundUsers(tag, userList)
+	err := c.dispatcher.Limiter.ReplaceInboundUsers(tag, c.runtimeLimiterUsers(tag, userList))
 	return err
+}
+
+// runtimeLimiterUsers returns an owned view whose keys match the opaque user
+// tags installed in Xray. Panel emails can contain UUIDs, passwords, or other
+// credentials and must never become runtime identifiers or loggable stats keys.
+func (c *Controller) runtimeLimiterUsers(tag string, users *[]api.UserInfo) *[]api.UserInfo {
+	if users == nil {
+		return nil
+	}
+	result := cloneSlice(*users)
+	for index := range result {
+		result[index].Email = c.buildUserTagFrom(result[index], tag)
+	}
+	return &result
 }
 
 func (c *Controller) DeleteInboundLimiter(tag string) error {

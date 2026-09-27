@@ -128,6 +128,8 @@ Managed-node handoff also fails closed when the target handler is missing, has a
 
 The Xboard adapter supports VLESS TLS/REALITY, Trojan TLS, and the tested XHTTP/splithttp fields, including mode, raw `extra`, padding/placement options, uplink chunk size, and header toggles.
 
+For VLESS, Xboard exposes `protocol_settings.encryption.decryption` as the top-level `decryption` field in the per-node `/api/v2/server/config` response when encryption is enabled. XrayRP passes this server-side value to the Xray-core inbound; a missing, null, or blank value remains `none`. Client-side `encryption` is not used for the inbound. The pinned Xray-core does not allow encrypted VLESS decryption together with inbound fallbacks; disable fallbacks for encrypted nodes. Unencrypted VLESS fallbacks continue to work.
+
 Trojan REALITY is not currently materialized by the `newV2board` adapter. Advanced uTLS/xmux fields are also not guaranteed to map from every Xboard payload shape.
 
 Start with a minimal panel-side XHTTP object:

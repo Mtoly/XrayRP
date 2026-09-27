@@ -168,7 +168,7 @@ func TestBuildRemovedUserKeysUsesCurrentUsers(t *testing.T) {
 
 	got := buildRemovedUserKeys("V2ray_1", &currentUsers, targets)
 
-	if len(got) != 1 || got[0] != "V2ray_1|user@example.com|1" {
+	if len(got) != 1 || got[0] != "V2ray_1|1" {
 		t.Fatalf("expected removal key from current user identity, got %#v", got)
 	}
 }

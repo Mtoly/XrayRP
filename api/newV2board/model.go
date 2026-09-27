@@ -80,6 +80,7 @@ type v2ray struct {
 		Header      *json.RawMessage `json:"header"`
 	} `json:"network_settings"`
 	VlessFlow        string `json:"flow"`
+	VlessDecryption  string `json:"decryption"`
 	VlessTlsSettings struct {
 		ServerPort string `json:"server_port"`
 		Dest       string `json:"dest"`

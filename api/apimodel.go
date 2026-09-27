@@ -125,6 +125,7 @@ type NodeInfo struct {
 	RouteOnly           bool
 	EnableVless         bool
 	VlessFlow           string
+	VlessDecryption     string
 	CypherMethod        string
 	ServerKey           string
 	ServiceName         string

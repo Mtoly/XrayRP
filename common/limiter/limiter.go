@@ -26,6 +26,14 @@ type UserInfo struct {
 
 type userPolicy = UserInfo
 
+func inboundUserKey(tag string, user api.UserInfo) string {
+	runtimeKey := fmt.Sprintf("%s|%d", tag, user.UID)
+	if user.Email == runtimeKey {
+		return runtimeKey
+	}
+	return fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+}
+
 type InboundLimiterStateSnapshot struct {
 	UserInfo map[string]UserInfo
 	Buckets  map[string]bucketStateSnapshot
@@ -700,7 +708,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 
 	userMap := new(sync.Map)
 	for _, u := range *userList {
-		userKey := fmt.Sprintf("%s|%s|%d", tag, u.Email, u.UID)
+		userKey := inboundUserKey(tag, u)
 		userMap.Store(userKey, userPolicy{
 			UID:         u.UID,
 			SpeedLimit:  u.SpeedLimit,
@@ -737,7 +745,7 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 
 	if updatedUserList != nil {
 		for _, user := range *updatedUserList {
-			userKey := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+			userKey := inboundUserKey(tag, user)
 			inboundInfo.UserInfo.Store(userKey, userPolicy{
 				UID:         user.UID,
 				SpeedLimit:  user.SpeedLimit,
@@ -1207,7 +1215,7 @@ func (l *Limiter) ReplaceInboundUsers(tag string, userList *[]api.UserInfo) erro
 	userOnlineIP := new(sync.Map)
 	if userList != nil {
 		for _, user := range *userList {
-			userKey := fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+			userKey := inboundUserKey(tag, user)
 			userInfo.Store(userKey, userPolicy{
 				UID:         user.UID,
 				SpeedLimit:  user.SpeedLimit,

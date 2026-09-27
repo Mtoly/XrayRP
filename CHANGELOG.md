@@ -11,9 +11,11 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Security
 
 - Temporarily allowlisted `GO-2026-5288` only when it is the sole reachable finding, Hysteria core and extras remain at least v2.8.2, and the request-sniffing mitigation test passes; every other reachable vulnerability remains release-blocking.
+- Prevented panel user identifiers and credentials from entering Xray runtime user tags and debug-visible traffic counter names; authentication UUIDs remain confined to protocol account settings.
 
 ### Fixed
 
+- Passed Xboard/NewV2board VLESS server decryption through Machine and static node snapshots to Xray-core inbounds, retaining `none` for unencrypted nodes and redacting decryption validation errors.
 - Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.
 - Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
 

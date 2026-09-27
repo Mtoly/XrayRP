@@ -37,7 +37,7 @@ func (c *Controller) buildVmessUser(userInfo *[]api.UserInfo, tag string) (users
 		}
 		users[i] = &protocol.User{
 			Level:   0,
-			Email:   c.buildUserTagFrom(user, tag), // Email: InboundTag|email|uid
+			Email:   c.buildUserTagFrom(user, tag), // Email: InboundTag|uid; never include panel credentials
 			Account: serial.ToTypedMessage(vmessAccount.Build()),
 		}
 	}
@@ -165,7 +165,11 @@ func (c *Controller) buildUserTag(user *api.UserInfo) string {
 }
 
 func (c *Controller) buildUserTagFrom(user api.UserInfo, tag string) string {
-	return fmt.Sprintf("%s|%s|%d", tag, user.Email, user.UID)
+	return buildRuntimeUserTag(user, tag)
+}
+
+func buildRuntimeUserTag(user api.UserInfo, tag string) string {
+	return fmt.Sprintf("%s|%d", tag, user.UID)
 }
 
 func auditUIDFromUserTag(tag, userTag string) (int, bool) {
@@ -174,6 +178,9 @@ func auditUIDFromUserTag(tag, userTag string) (int, bool) {
 		return 0, false
 	}
 	identity := strings.TrimPrefix(userTag, prefix)
+	if uid, err := strconv.Atoi(identity); err == nil {
+		return uid, true
+	}
 	lastSeparator := strings.LastIndexByte(identity, '|')
 	if lastSeparator < 0 || lastSeparator == len(identity)-1 {
 		return 0, false

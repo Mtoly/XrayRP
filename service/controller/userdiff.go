@@ -1,10 +1,6 @@
 package controller
 
-import (
-	"fmt"
-
-	"github.com/Mtoly/XrayRP/api"
-)
+import "github.com/Mtoly/XrayRP/api"
 
 type userListDiff struct {
 	Deleted        []api.UserInfo
@@ -88,7 +84,7 @@ func buildRemovedUserKeys(tag string, currentUsers *[]api.UserInfo, targets []ap
 		if _, exists := targetKeys[key]; !exists {
 			continue
 		}
-		removed = append(removed, fmt.Sprintf("%s|%s|%d", tag, current.Email, current.UID))
+		removed = append(removed, buildRuntimeUserTag(current, tag))
 	}
 	return removed
 }

@@ -78,13 +78,14 @@ type inboundTransportView struct {
 }
 
 type inboundNodeView struct {
-	listener      inboundListenerView
-	enableVless   bool
-	cypherMethod  string
-	serverKey     string
-	enableReality bool
-	reality       inboundRealityView
-	transport     inboundTransportView
+	listener        inboundListenerView
+	enableVless     bool
+	vlessDecryption string
+	cypherMethod    string
+	serverKey       string
+	enableReality   bool
+	reality         inboundRealityView
+	transport       inboundTransportView
 }
 
 type outboundNodeView struct {
@@ -134,10 +135,11 @@ func inboundViewFromSnapshot(snapshot *api.NodeSnapshot) inboundNodeView {
 			port:      snapshot.Port,
 			enableTLS: snapshot.EnableTLS,
 		},
-		enableVless:   snapshot.EnableVless,
-		cypherMethod:  snapshot.CypherMethod,
-		serverKey:     snapshot.ServerKey,
-		enableReality: snapshot.EnableREALITY,
+		enableVless:     snapshot.EnableVless,
+		vlessDecryption: snapshot.VlessDecryption,
+		cypherMethod:    snapshot.CypherMethod,
+		serverKey:       snapshot.ServerKey,
+		enableReality:   snapshot.EnableREALITY,
 		transport: inboundTransportView{
 			protocol:             snapshot.TransportProtocol,
 			acceptProxyProtocol:  snapshot.AcceptProxyProtocol,
