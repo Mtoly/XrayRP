@@ -230,7 +230,11 @@ func userViewFromSnapshot(snapshot *api.NodeSnapshot) userNodeView {
 	}
 
 	flow := strings.TrimSpace(snapshot.VlessFlow)
-	if flow != "" {
+	if flow != "" && !vlessServerDecryptionEnabled(snapshot) {
+		// Legacy unencrypted VLESS keeps the historical restriction: XTLS Vision
+		// only works with direct TCP TLS/REALITY without a header. Server-side
+		// VLESS Encryption lifts it, so the panel-provided flow must survive for
+		// transports such as XHTTP.
 		transport := strings.ToLower(strings.TrimSpace(snapshot.TransportProtocol))
 		if transport != "tcp" || (!snapshot.EnableTLS && !snapshot.EnableREALITY) || snapshot.Header != nil {
 			flow = ""
@@ -242,6 +246,18 @@ func userViewFromSnapshot(snapshot *api.NodeSnapshot) userNodeView {
 		cypherMethod: snapshot.CypherMethod,
 		vless:        vlessUserNodeView{effectiveFlow: flow},
 	}
+}
+
+// vlessServerDecryptionEnabled reports whether the node enables server-side
+// VLESS Encryption. Missing, null, and blank values mean "none".
+func vlessServerDecryptionEnabled(snapshot *api.NodeSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	// Match the inbound builder and Xray-core, which treat a trimmed blank value
+	// and the exact sentinel "none" as unencrypted VLESS.
+	decryption := strings.TrimSpace(snapshot.VlessDecryption)
+	return decryption != "" && decryption != "none"
 }
 
 func (value nodeValue) shadowsocksPluginViews() shadowsocksPluginNodeViews {

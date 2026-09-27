@@ -188,6 +188,7 @@ func TestRoutingPolicyValuePreservesUnsetAndNonNilEmpty(t *testing.T) {
 
 func TestUserNodeViewComputesEffectiveVlessFlow(t *testing.T) {
 	const vision = "xtls-rprx-vision"
+	const decryption = "test-vless-decryption"
 	tests := []struct {
 		name      string
 		node      api.NodeInfo
@@ -227,6 +228,41 @@ func TestUserNodeViewComputesEffectiveVlessFlow(t *testing.T) {
 			name:     "non nil empty header clears Vision",
 			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "tcp", EnableTLS: true, Header: make(json.RawMessage, 0)},
 			wantFlow: "",
+		},
+		{
+			name:     "XHTTP without VLESS encryption clears Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "xhttp", EnableTLS: true},
+			wantFlow: "",
+		},
+		{
+			name:     "XHTTP with VLESS encryption keeps Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "xhttp", EnableTLS: true, VlessDecryption: decryption},
+			wantFlow: vision,
+		},
+		{
+			name:     "WS with VLESS encryption keeps Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "ws", EnableTLS: true, VlessDecryption: decryption},
+			wantFlow: vision,
+		},
+		{
+			name:     "gRPC with VLESS encryption keeps Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "grpc", EnableTLS: true, VlessDecryption: decryption},
+			wantFlow: vision,
+		},
+		{
+			name:     "empty decryption with XHTTP clears Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "xhttp", EnableTLS: true, VlessDecryption: "  "},
+			wantFlow: "",
+		},
+		{
+			name:     "none decryption with XHTTP clears Vision",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "xhttp", EnableTLS: true, VlessDecryption: "none"},
+			wantFlow: "",
+		},
+		{
+			name:     "VLESS encryption keeps Vision without outer security",
+			node:     api.NodeInfo{VlessFlow: vision, TransportProtocol: "xhttp", VlessDecryption: " test-vless-decryption "},
+			wantFlow: vision,
 		},
 	}
 
