@@ -9,18 +9,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func TestControllerRecordSyncExecutionResult_OmitsErrorDetailsByDefault(t *testing.T) {
+func TestControllerLogSyncExecutionResult_OmitsErrorDetailsByDefault(t *testing.T) {
 	var output bytes.Buffer
 	logger := log.New()
 	logger.SetOutput(&output)
 	controller := &Controller{
-		config:             &Config{},
-		logger:             log.NewEntry(logger),
-		syncExecutionState: newSyncExecutionState(),
+		config: &Config{},
+		logger: log.NewEntry(logger),
 	}
 	action := newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"})
 
-	controller.recordSyncExecutionResult(action, errors.New("token=secret-value"))
+	controller.logSyncExecutionResult(action, errors.New("token=secret-value"))
 
 	logged := output.String()
 	for _, safeValue := range []string{string(action.Type), string(action.Source), action.Metadata.Trigger} {
@@ -33,17 +32,16 @@ func TestControllerRecordSyncExecutionResult_OmitsErrorDetailsByDefault(t *testi
 	}
 }
 
-func TestControllerRecordSyncExecutionResult_ShowsAllowedErrorDetails(t *testing.T) {
+func TestControllerLogSyncExecutionResult_ShowsAllowedErrorDetails(t *testing.T) {
 	var output bytes.Buffer
 	logger := log.New()
 	logger.SetOutput(&output)
 	controller := &Controller{
-		config:             &Config{ShowErrorDetails: true},
-		logger:             log.NewEntry(logger),
-		syncExecutionState: newSyncExecutionState(),
+		config: &Config{ShowErrorDetails: true},
+		logger: log.NewEntry(logger),
 	}
 
-	controller.recordSyncExecutionResult(
+	controller.logSyncExecutionResult(
 		newSyncAction(syncActionTypeSyncUsers, syncActionSourceWS, syncActionMetadata{Trigger: "users_changed"}),
 		errors.New("diagnostic detail"),
 	)
