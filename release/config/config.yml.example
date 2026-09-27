@@ -55,7 +55,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
       NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP.
       Timeout: 30 # HTTP API timeout in seconds.
       EnableVless: false # For legacy V2ray-type panels, expose this node as VLESS instead of VMess.
-      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP. Keep empty for ws/grpc/httpupgrade/splithttp/xhttp.
+      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP. Keep empty for ws/grpc/httpupgrade/splithttp/xhttp unless server-side VLESS Encryption is enabled, which allows Vision on any transport.
       SpeedLimit: 0 # Local speed limit in Mbps. 0 means use panel value or disable local override.
       DeviceLimit: 0 # Local per-user device/IP limit. 0 means use panel value or disable local override.
       RuleListPath: # Optional path to a local audit rule list file, for example /etc/XrayR/rulelist.
@@ -139,7 +139,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
 #      NodeType: V2ray # Node type: V2ray, Vmess, Vless, Shadowsocks, Trojan, Shadowsocks-Plugin, Hysteria2, Tuic, AnyTLS, Socks, HTTP.
 #      Timeout: 30 # HTTP API timeout in seconds.
 #      EnableVless: false # For legacy V2ray-type panels, expose this node as VLESS instead of VMess.
-#      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP.
+#      VlessFlow: "xtls-rprx-vision" # VLESS flow for direct TLS/REALITY over TCP, or any transport when server-side VLESS Encryption is enabled.
 #      SpeedLimit: 0 # Local speed limit in Mbps. 0 means use panel value or disable local override.
 #      DeviceLimit: 0 # Local per-user device/IP limit. 0 means use panel value or disable local override.
 #      RuleListPath: # Optional path to a local audit rule list file, for example /etc/XrayR/rulelist.

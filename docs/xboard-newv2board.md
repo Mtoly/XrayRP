@@ -142,7 +142,9 @@ Start with a minimal panel-side XHTTP object:
 }
 ```
 
-Keep `VlessFlow` empty for WS, gRPC, HTTPUpgrade, and XHTTP/splithttp. Use a flow such as `xtls-rprx-vision` only for compatible direct TCP TLS/REALITY deployments.
+For legacy unencrypted VLESS, keep `VlessFlow` empty for WS, gRPC, HTTPUpgrade, and XHTTP/splithttp. Use a flow such as `xtls-rprx-vision` only for compatible direct TCP TLS/REALITY deployments; XrayRP clears the flow for the other transports.
+
+When server-side VLESS Encryption is enabled (a non-empty `decryption` other than `none`), XTLS Vision is no longer limited by the underlying transport, so XrayRP keeps a panel-provided `xtls-rprx-vision` for transports such as XHTTP, WS, or gRPC. XrayRP never adds the flow by itself: it only stops discarding the value the panel already sent, and it still clears an unencrypted non-TCP flow.
 
 Raw `extra`, `xmux`, and `downloadSettings` shapes can vary between panel and Xray-core versions. Validate the minimal transport first, then add only fields supported by the exact deployed panel, adapter, and Xray-core versions.
 

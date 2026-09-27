@@ -16,6 +16,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Fixed
 
 - Passed Xboard/NewV2board VLESS server decryption through Machine and static node snapshots to Xray-core inbounds, retaining `none` for unencrypted nodes and redacting decryption validation errors.
+- Kept a panel-provided `xtls-rprx-vision` flow for VLESS nodes with server-side VLESS Encryption enabled instead of clearing it for non-TCP transports such as XHTTP; unencrypted VLESS keeps the existing transport restriction.
 - Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.
 - Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
 
