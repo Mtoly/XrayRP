@@ -8,12 +8,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (c *Controller) recordSyncExecutionResult(action syncAction, err error) {
+func (c *Controller) recordSyncHealthResult(err error) {
 	if c == nil {
 		return
-	}
-	if c.syncExecutionState != nil {
-		c.syncExecutionState.Record(action, err)
 	}
 	if err != nil {
 		c.health.RecordFailure(service.FailureStageSync, time.Now())
@@ -21,7 +18,6 @@ func (c *Controller) recordSyncExecutionResult(action syncAction, err error) {
 		c.health.RecordSuccessfulSync(time.Now())
 		c.refreshCertificateExpiry()
 	}
-	c.logSyncExecutionResult(action, err)
 }
 
 func (c *Controller) logSyncExecutionResult(action syncAction, err error) {

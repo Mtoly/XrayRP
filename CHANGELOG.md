@@ -15,6 +15,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Refreshed controller sync health after successful synchronization so an active runtime does not become `sync_stale` in `/readyz` while syncs continue.
 - Passed Xboard/NewV2board VLESS server decryption through Machine and static node snapshots to Xray-core inbounds, retaining `none` for unencrypted nodes and redacting decryption validation errors.
 - Kept a panel-provided `xtls-rprx-vision` flow for VLESS nodes with server-side VLESS Encryption enabled instead of clearing it for non-TCP transports such as XHTTP; unencrypted VLESS keeps the existing transport restriction.
 - Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.

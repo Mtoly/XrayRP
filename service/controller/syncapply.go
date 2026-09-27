@@ -211,7 +211,9 @@ func newNodeRuntimeStateApplyModule(controller *Controller, contexts ...context.
 }
 
 func (c *Controller) ExecuteSyncAction(ctx context.Context, action syncAction) error {
-	return newNodeRuntimeStateApplyModule(c, ctx).Apply(ctx, action)
+	err := newNodeRuntimeStateApplyModule(c, ctx).Apply(ctx, action)
+	c.recordSyncHealthResult(err)
+	return err
 }
 
 func (a nodeRuntimeStateApplyModule) Apply(ctx context.Context, action syncAction) error {
