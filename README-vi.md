@@ -14,7 +14,7 @@ A Xray backend framework that can easily support many panels.
 
 ## Phiên bản hiện tại
 
-Phiên bản hiện tại: `0.9.2`
+Phiên bản hiện tại: `0.9.3`
 
 Xem các thay đổi chính của phiên bản này trong [CHANGELOG.md](./CHANGELOG.md).
 

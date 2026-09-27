@@ -4,13 +4,14 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+## 0.9.3 - 2026-09-27
+
 ### Added
 
 - Docker releases explicitly publish the original release tag and `latest`, including legacy non-SemVer release tags, so `ghcr.io/mtoly/xrayrp:latest` always follows the most recently published release.
 
 ### Security
 
-- Temporarily allowlisted `GO-2026-5288` only when it is the sole reachable finding, Hysteria core and extras remain at least v2.8.2, and the request-sniffing mitigation test passes; every other reachable vulnerability remains release-blocking.
 - Prevented panel user identifiers and credentials from entering Xray runtime user tags and debug-visible traffic counter names; authentication UUIDs remain confined to protocol account settings.
 
 ### Fixed
@@ -18,15 +19,13 @@ Notable user-facing, compatibility, security, performance, and operational chang
 - Refreshed controller sync health after successful synchronization so an active runtime does not become `sync_stale` in `/readyz` while syncs continue.
 - Passed Xboard/NewV2board VLESS server decryption through Machine and static node snapshots to Xray-core inbounds, retaining `none` for unencrypted nodes and redacting decryption validation errors.
 - Kept a panel-provided `xtls-rprx-vision` flow for VLESS nodes with server-side VLESS Encryption enabled instead of clearing it for non-TCP transports such as XHTTP; unencrypted VLESS keeps the existing transport restriction.
-- Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.
-- Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
 
 ## 0.9.2 - 2026-09-12
 
 ### Security
 
 - Releases publish platform archives with one signed SHA256 index; per-platform SPDX SBOMs, source mappings, keyless signatures, and GitHub provenance attestations remain generated as workflow evidence.
-- `govulncheck` now fails closed on every reachable vulnerability; the expired `GO-2026-5288` allowance has been removed.
+- `govulncheck` fails closed on reachable vulnerabilities except for a temporary `GO-2026-5288` allowance when it is the sole reachable finding, Hysteria core and extras are at least v2.8.2, and the request-sniffing mitigation test passes.
 - Runtime configuration now rejects plaintext HTTP for remote panel API hosts before publishing a candidate; HTTP remains available for loopback development endpoints.
 - Panel adapter parsing errors no longer serialize node or user responses that may contain passwords, UUIDs, protocol keys, or certificate material.
 
@@ -42,7 +41,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 - Updated the CI vulnerability scanner to govulncheck v1.8.0 so the security gate can analyze the Go 1.27 codebase.
 - Upgraded supported Go, Redis, Hysteria core/extras to v2.12.0, sing, sing-box, artifact, container, stale-issue, and signing dependencies; GitHub Actions remain pinned to full commit SHAs.
 - Updated the Go toolchain to 1.26.6, Hysteria core/extras to v2.12.1, sing to v0.8.13, sing-box to v1.13.18, and refreshed the pinned Alpine and CodeQL maintenance inputs.
-- Updated Hysteria core/extras to v2.12.2 as the latest available patch release; reachable vulnerability findings remain release-blocking until a fixed dependency version is available.
+- Updated Hysteria core/extras to v2.12.2; the vulnerability gate follows the temporary exception described above.
 - Docker builds now pin both the Go builder and Alpine runtime images by readable version and multi-platform manifest digest.
 - Controller and machine runtimes now share one Applied node value deep-clone module, preserving nil/empty collection and custom address compatibility semantics.
 - Initial startup and hot reload now use the same mode-specific runtime configuration validation: static mode requires at least one `Nodes` entry, while enabled `MachineConfig` is valid with no static `Nodes`.
@@ -63,6 +62,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Restored Android/arm64 release builds under Go 1.23 and later by enabling the linker compatibility flag required by the Android network-interface dependency.
+- Updated the pinned Docker builder image to Go 1.27.1 so release container builds satisfy the Go 1.27 module requirement.
 - Preserved explicit XHTTP transport settings when advanced `extra` options are present under Xray-core v26, instead of silently replacing headers, padding, placement, and uplink fields with upstream defaults.
 - Restored release-page artifact builds and uploads for published GitHub Releases, including the repository's historical SemVer tags without a leading `v`; release commands now identify the repository explicitly, and tag pushes no longer start a duplicate artifact workflow.
 - Removed the deleted `tools` source root from the panel adapter isolation check so required test, race, and coverage jobs pass in clean checkouts.
