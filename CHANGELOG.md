@@ -4,6 +4,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Added
+
+- Docker releases explicitly publish `latest` alongside the release tag, so `ghcr.io/mtoly/xrayrp:latest` always follows the most recently published release.
+
 ### Security
 
 - Temporarily allowlisted `GO-2026-5288` only when it is the sole reachable finding, Hysteria core and extras remain at least v2.8.2, and the request-sniffing mitigation test passes; every other reachable vulnerability remains release-blocking.
