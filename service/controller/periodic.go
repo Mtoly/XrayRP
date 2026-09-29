@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -310,7 +311,17 @@ func (c *Controller) launchPeriodicTaskContext(ctx context.Context, tag string, 
 	}
 	if _, ok := periodic.(interface{ startAsynchronously() }); ok {
 		startCtx, cancel := service.WithDefaultTimeout(context.WithoutCancel(ctx), service.DefaultStartTimeout)
+		// Register the asynchronous launch while holding the periodic registry
+		// lock, so a shutdown request that already owns the producer cannot race
+		// this increment past the close wait.
+		c.periodicMu.Lock()
+		if c.periodicShutdownRequested {
+			c.periodicMu.Unlock()
+			cancel()
+			return nil, true
+		}
 		c.periodicJoinWG.Add(1)
+		c.periodicMu.Unlock()
 		go func() {
 			defer cancel()
 			launchDone := false
@@ -329,7 +340,7 @@ func (c *Controller) launchPeriodicTaskContext(ctx context.Context, tag string, 
 			launchDone = true
 			c.logPeriodicTaskError(tag, err)
 			c.periodicMu.Lock()
-			shouldLogStart := !c.periodicClosed
+			shouldLogStart := !c.periodicShutdownRequested
 			c.periodicMu.Unlock()
 			if shouldLogStart && c.logger != nil {
 				c.logger.Printf("Start %s periodic task", tag)
@@ -344,7 +355,7 @@ func (c *Controller) recordPeriodicReplacementError(err error) error {
 		return nil
 	}
 	c.periodicMu.Lock()
-	if c.periodicClosed {
+	if c.periodicShutdownRequested {
 		c.periodicAsyncErrs = append(c.periodicAsyncErrs, err)
 	}
 	c.periodicMu.Unlock()
@@ -355,6 +366,8 @@ func (c *Controller) launchPeriodicCleanup(cleanup func() error) {
 	if cleanup == nil {
 		return
 	}
+	// Register under periodicMu so the increment can never race the shutdown
+	// flag check that decides whether closePeriodicTasks will wait on it.
 	c.periodicMu.Lock()
 	c.periodicJoinWG.Add(1)
 	c.periodicMu.Unlock()
@@ -392,7 +405,7 @@ func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag 
 	}
 
 	c.periodicMu.Lock()
-	if c.periodicClosed {
+	if c.periodicShutdownRequested {
 		c.periodicMu.Unlock()
 		return nil
 	}
@@ -436,7 +449,7 @@ func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag 
 	}
 
 	c.periodicMu.Lock()
-	if c.periodicClosed {
+	if c.periodicShutdownRequested {
 		c.periodicMu.Unlock()
 		return c.recordPeriodicReplacementError(closePeriodicRunnerContext(ctx, periodic))
 	}
@@ -466,7 +479,7 @@ func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag 
 
 	releaseReplacementOwnership := func() bool {
 		c.periodicMu.Lock()
-		closed := c.periodicClosed
+		closed := c.periodicShutdownRequested
 		if !closed && old != nil {
 			c.stateMu.Lock()
 			for i := range c.tasks {
@@ -500,7 +513,7 @@ func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag 
 	}
 
 	c.periodicMu.Lock()
-	if c.periodicClosed {
+	if c.periodicShutdownRequested {
 		c.periodicMu.Unlock()
 		if stoppedOld != nil {
 			c.launchPeriodicCleanup(stoppedOld.Wait)
@@ -618,7 +631,7 @@ func (c *Controller) joinAndLaunchPeriodicReplacement(
 	if waitErr != nil {
 		c.periodicAsyncErrs = append(c.periodicAsyncErrs, waitErr)
 	}
-	shouldStart := !c.periodicClosed
+	shouldStart := !c.periodicShutdownRequested
 	if shouldStart {
 		c.stateMu.RLock()
 		shouldStart = false
@@ -655,79 +668,320 @@ func (c *Controller) closePeriodicTasks() error {
 	return c.closePeriodicTasksContext(ctx)
 }
 
+// periodicShutdownTarget tracks one producer across shutdown attempts. Stop is
+// signalled at most once, and joins stay registered so a Close that returns on
+// its deadline can be retried against the real runner later.
+type periodicShutdownTarget struct {
+	tag    string
+	runner periodicRunner
+
+	stopStarted bool
+	stopDone    chan struct{}
+	stopErr     error
+
+	joinStarted bool
+	joinDone    chan struct{}
+	joinErr     error
+}
+
+// periodicShutdownError reports a periodic shutdown attempt that could not join
+// every producer before its deadline. PendingTags names the periodic tasks that
+// were still running when the attempt gave up.
+type periodicShutdownError struct {
+	pending []string
+	err     error
+}
+
+func (e *periodicShutdownError) Error() string {
+	if e == nil {
+		return ""
+	}
+	tags := "periodic tasks"
+	if len(e.pending) > 0 {
+		tags = "periodic tasks " + strings.Join(e.pending, ", ")
+	}
+	if e.err == nil {
+		return "periodic shutdown incomplete: " + tags
+	}
+	return "periodic shutdown incomplete: " + tags + ": " + e.err.Error()
+}
+
+func (e *periodicShutdownError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+// PendingTags returns the periodic task tags that had not exited when the
+// shutdown attempt hit its deadline.
+func (e *periodicShutdownError) PendingTags() []string {
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.pending...)
+}
+
+type periodicCloseFailure struct {
+	tag string
+	err error
+}
+
+// periodicShutdownCompleted reports whether every periodic producer has exited
+// and all outstanding asynchronous periodic work has been joined.
+func (c *Controller) periodicShutdownCompleted() bool {
+	c.periodicMu.Lock()
+	defer c.periodicMu.Unlock()
+	return c.periodicShutdownDone
+}
+
 func (c *Controller) closePeriodicTasksContext(ctx context.Context) error {
-	c.periodicMu.Lock()
-	if c.periodicClosed {
-		done := c.periodicCloseDone
-		c.periodicMu.Unlock()
-		if done != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-done:
-			}
-		}
-		c.periodicMu.Lock()
-		err := c.periodicCloseErr
-		c.periodicMu.Unlock()
-		return err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	c.periodicClosed = true
-	done := make(chan struct{})
-	c.periodicCloseDone = done
+	// One shutdown attempt at a time: concurrent Close calls must not stop or
+	// join the same producer twice. The lock is released before failures are
+	// logged so a logging hook can safely reenter Close.
+	c.periodicShutdownMu.Lock()
+	attemptErr, failures := c.runPeriodicShutdownAttempt(ctx)
+	c.periodicShutdownMu.Unlock()
 
-	c.stateMu.Lock()
-	tasks := make([]periodicTask, 0, len(c.tasks))
-	for i := range c.tasks {
-		if c.tasks[i].replacementOwnsPeriodic {
-			continue
-		}
-		tasks = append(tasks, c.tasks[i])
-	}
-	c.tasks = nil
-	c.stateMu.Unlock()
-	c.periodicMu.Unlock()
-
-	type closeFailure struct {
-		tag string
-		err error
-	}
-	var errs []error
-	var closeFailures []closeFailure
-	for i := range tasks {
-		if tasks[i].Periodic == nil {
-			continue
-		}
-		if err := closePeriodicRunnerContext(ctx, tasks[i].Periodic); err != nil {
-			errs = append(errs, err)
-			closeFailures = append(closeFailures, closeFailure{tag: tasks[i].tag, err: err})
-		}
-	}
-
-	joinDone := make(chan struct{})
-	go func() {
-		c.periodicJoinWG.Wait()
-		close(joinDone)
-	}()
-	select {
-	case <-ctx.Done():
-		errs = append(errs, ctx.Err())
-	case <-joinDone:
-	}
-
-	c.periodicMu.Lock()
-	errs = append(errs, c.periodicAsyncErrs...)
-	c.periodicAsyncErrs = nil
-	closeErr := errors.Join(errs...)
-	c.periodicCloseErr = closeErr
-	close(done)
-	c.periodicMu.Unlock()
 	if c.logger != nil {
-		for _, failure := range closeFailures {
+		for _, failure := range failures {
 			c.logger.Errorf("%s periodic task close failed: %s", failure.tag, failure.err)
 		}
 	}
-	return closeErr
+	return attemptErr
+}
+
+func (c *Controller) runPeriodicShutdownAttempt(ctx context.Context) (error, []periodicCloseFailure) {
+	c.periodicMu.Lock()
+	if c.periodicShutdownDone {
+		err := c.periodicShutdownErr
+		c.periodicMu.Unlock()
+		return err, nil
+	}
+	if !c.periodicShutdownRequested {
+		// First request: atomically block new periodic tasks and replacements,
+		// then capture the producers that must be stopped.
+		c.periodicShutdownRequested = true
+		targets := make([]*periodicShutdownTarget, 0, len(c.tasks))
+		c.stateMu.Lock()
+		for i := range c.tasks {
+			if c.tasks[i].replacementOwnsPeriodic || c.tasks[i].Periodic == nil {
+				continue
+			}
+			targets = append(targets, &periodicShutdownTarget{
+				tag:    c.tasks[i].tag,
+				runner: c.tasks[i].Periodic,
+			})
+		}
+		c.tasks = nil
+		c.stateMu.Unlock()
+		c.periodicShutdownTargets = targets
+	}
+	targets := append([]*periodicShutdownTarget(nil), c.periodicShutdownTargets...)
+	c.periodicMu.Unlock()
+
+	// Deliver every stop signal before joining any producer, so one slow
+	// producer cannot delay stopping or joining the others.
+	c.issuePeriodicShutdownStops(targets)
+	if err := c.joinPeriodicShutdownTargets(ctx, targets); err != nil {
+		return c.periodicShutdownAttemptFailure(err, targets), nil
+	}
+	if err := c.waitPeriodicJoinGroup(ctx); err != nil {
+		return c.periodicShutdownAttemptFailure(err, targets), nil
+	}
+
+	failures := c.periodicShutdownFailures(targets)
+	errs := make([]error, 0, len(failures)+1)
+	for _, failure := range failures {
+		errs = append(errs, failure.err)
+	}
+	c.periodicMu.Lock()
+	errs = append(errs, c.periodicAsyncErrs...)
+	c.periodicAsyncErrs = nil
+	terminalErr := errors.Join(errs...)
+	c.periodicShutdownErr = terminalErr
+	c.periodicShutdownDone = true
+	c.periodicMu.Unlock()
+	return terminalErr, failures
+}
+
+// issuePeriodicShutdownStops starts at most one stop per producer. Stops are
+// detached from the attempt context so a retry never re-signals a producer that
+// is still shutting down.
+func (c *Controller) issuePeriodicShutdownStops(targets []*periodicShutdownTarget) {
+	var toStart []*periodicShutdownTarget
+	c.periodicMu.Lock()
+	for _, target := range targets {
+		if target.stopStarted {
+			continue
+		}
+		target.stopStarted = true
+		target.stopDone = make(chan struct{})
+		toStart = append(toStart, target)
+	}
+	c.periodicMu.Unlock()
+
+	for _, target := range toStart {
+		go func(target *periodicShutdownTarget) {
+			// The stop signal is deliberately detached from the attempt
+			// context: a shutdown attempt may give up on its deadline, but the
+			// signal it already delivered must stay delivered exactly once.
+			err := stopOrClosePeriodicRunner(context.Background(), target.runner)
+			c.periodicMu.Lock()
+			target.stopErr = err
+			close(target.stopDone)
+			c.periodicMu.Unlock()
+		}(target)
+	}
+}
+
+// stopOrClosePeriodicRunner signals one producer. Runners with a separate
+// Stop/Wait lifecycle are only stopped here; runners that expose nothing but
+// Close have no separate join, so Close is their single ownership hand-off.
+func stopOrClosePeriodicRunner(ctx context.Context, runner periodicRunner) error {
+	switch runner.(type) {
+	case contextStopPeriodicRunner, joinablePeriodicRunner:
+		return stopPeriodicRunnerContext(ctx, runner)
+	default:
+		return closePeriodicRunnerContext(ctx, runner)
+	}
+}
+
+// joinPeriodicShutdownTargets joins every producer. Each join first waits for
+// that producer's stop signal to be acknowledged, then waits for the producer
+// itself. The underlying join is not bounded by the attempt context, so a retry
+// observes the real exit instead of a cached deadline error.
+func (c *Controller) joinPeriodicShutdownTargets(ctx context.Context, targets []*periodicShutdownTarget) error {
+	if err := c.waitPeriodicShutdownStops(ctx, targets); err != nil {
+		return err
+	}
+	c.issuePeriodicShutdownJoins(targets)
+	return c.waitPeriodicShutdownJoins(ctx, targets)
+}
+
+func (c *Controller) waitPeriodicShutdownStops(ctx context.Context, targets []*periodicShutdownTarget) error {
+	for _, target := range targets {
+		c.periodicMu.Lock()
+		done := target.stopDone
+		c.periodicMu.Unlock()
+		if done == nil {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+	}
+	return nil
+}
+
+func (c *Controller) issuePeriodicShutdownJoins(targets []*periodicShutdownTarget) {
+	var toStart []*periodicShutdownTarget
+	c.periodicMu.Lock()
+	for _, target := range targets {
+		if target.joinStarted {
+			continue
+		}
+		target.joinStarted = true
+		target.joinDone = make(chan struct{})
+		toStart = append(toStart, target)
+	}
+	c.periodicMu.Unlock()
+
+	for _, target := range toStart {
+		go func(target *periodicShutdownTarget) {
+			err := waitPeriodicRunnerContext(context.Background(), target.runner)
+			c.periodicMu.Lock()
+			target.joinErr = err
+			close(target.joinDone)
+			c.periodicMu.Unlock()
+		}(target)
+	}
+}
+
+func (c *Controller) waitPeriodicShutdownJoins(ctx context.Context, targets []*periodicShutdownTarget) error {
+	for _, target := range targets {
+		c.periodicMu.Lock()
+		done := target.joinDone
+		c.periodicMu.Unlock()
+		if done == nil {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+	}
+	return nil
+}
+
+// waitPeriodicJoinGroup waits for every outstanding asynchronous periodic
+// operation (launches and replacement cleanups) with a deadline.
+func (c *Controller) waitPeriodicJoinGroup(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		c.periodicJoinWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
+}
+
+// periodicShutdownFailures reports producer-level stop and join errors. An
+// error that only reflects the attempt's own deadline is reported by the
+// attempt instead.
+func (c *Controller) periodicShutdownFailures(targets []*periodicShutdownTarget) []periodicCloseFailure {
+	c.periodicMu.Lock()
+	defer c.periodicMu.Unlock()
+	var failures []periodicCloseFailure
+	for _, target := range targets {
+		if target.joinErr != nil && !errors.Is(target.joinErr, context.Canceled) {
+			failures = append(failures, periodicCloseFailure{tag: target.tag, err: target.joinErr})
+			continue
+		}
+		if target.stopErr != nil {
+			failures = append(failures, periodicCloseFailure{tag: target.tag, err: target.stopErr})
+		}
+	}
+	return failures
+}
+
+// periodicShutdownAttemptFailure builds the typed error for a shutdown attempt
+// that did not finish, naming the producers that had not exited.
+func (c *Controller) periodicShutdownAttemptFailure(err error, targets []*periodicShutdownTarget) error {
+	c.periodicMu.Lock()
+	pending := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target.joinDone == nil || !channelClosed(target.joinDone) {
+			pending = append(pending, target.tag)
+		}
+	}
+	c.periodicMu.Unlock()
+	if len(pending) == 0 {
+		return err
+	}
+	return &periodicShutdownError{pending: pending, err: err}
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 func (c *Controller) startControllerPeriodicTasks(nodeInfo *api.NodeInfo) error {
 	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)

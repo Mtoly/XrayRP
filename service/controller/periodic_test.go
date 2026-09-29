@@ -1471,6 +1471,8 @@ func TestControllerCloseContinuesAfterPeriodicFailure(t *testing.T) {
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("Close() error = %v, want %v", err, closeErr)
 	}
+	// The producer exited, so its dependencies are safe to tear down even
+	// though its Close reported an error.
 	if !ws.stopped || !coordinator.stopped {
 		t.Fatalf("Close() skipped owned runtimes after periodic failure: ws=%v coordinator=%v", ws.stopped, coordinator.stopped)
 	}

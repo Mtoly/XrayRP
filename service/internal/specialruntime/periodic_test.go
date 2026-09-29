@@ -155,6 +155,35 @@ func TestManagedPeriodicCloseCancelsCallbackContextAndJoinsIt(t *testing.T) {
 	}
 }
 
+func TestManagedPeriodicCloseCancelsInitialCallbackContext(t *testing.T) {
+	callbackEntered := make(chan struct{})
+	callbackCanceled := make(chan struct{})
+	task := NewPeriodicContext(time.Hour, func(ctx context.Context) error {
+		close(callbackEntered)
+		<-ctx.Done()
+		close(callbackCanceled)
+		return ctx.Err()
+	})
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- task.Start() }()
+	<-callbackEntered
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- task.CloseContext(context.Background()) }()
+	select {
+	case <-callbackCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseContext() did not cancel the initial periodic iteration")
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("CloseContext() error = %v", err)
+	}
+	if err := <-startDone; err != nil {
+		t.Fatalf("Start() error = %v, want a clean shutdown for a canceled initial iteration", err)
+	}
+}
+
 func TestManagedPeriodicCapsEveryCallbackWithSyncDeadline(t *testing.T) {
 	timer := newManualManagedPeriodicTimer()
 	deadlines := make(chan time.Duration, 2)

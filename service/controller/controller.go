@@ -57,12 +57,14 @@ type Controller struct {
 	lifecycleErr                   error
 	ownedRuntime                   controllerRuntimeOwnership
 	periodicMu                     sync.Mutex
+	periodicShutdownMu             sync.Mutex
 	periodicJoinWG                 sync.WaitGroup
 	periodicGeneration             uint64
 	periodicAsyncErrs              []error
-	periodicClosed                 bool
-	periodicCloseDone              chan struct{}
-	periodicCloseErr               error
+	periodicShutdownRequested      bool
+	periodicShutdownDone           bool
+	periodicShutdownErr            error
+	periodicShutdownTargets        []*periodicShutdownTarget
 	stateMu                        sync.RWMutex
 	runtimeState                   nodeRuntimeState
 	syncApplyHooks                 syncApplyHooks

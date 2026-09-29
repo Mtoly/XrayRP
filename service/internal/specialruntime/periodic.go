@@ -104,16 +104,27 @@ func (p *managedPeriodic) StartContext(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
-	if err := p.executeOnce(ctx); err != nil {
-		cancel()
+	// The initial iteration runs against the lifecycle context rather than the
+	// caller's context, so a Close that arrives while the first iteration is
+	// still running can cancel it the same way it cancels later iterations.
+	if err := p.executeOnce(runContext); err != nil {
 		p.mu.Lock()
-		p.running = false
-		p.started = false
-		p.terminal = true
-		p.cancel = nil
+		stopped := !p.running
 		p.mu.Unlock()
-		close(done)
-		return err
+		if !stopped || !errors.Is(err, context.Canceled) {
+			cancel()
+			p.mu.Lock()
+			p.running = false
+			p.started = false
+			p.terminal = true
+			p.cancel = nil
+			p.mu.Unlock()
+			close(done)
+			return err
+		}
+		// A lifecycle stop canceled the initial iteration. That is a clean
+		// shutdown rather than a start failure, matching how later iterations
+		// treat cancellation caused by Stop.
 	}
 
 	p.mu.Lock()
