@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +25,25 @@ var (
 	errPanelReloadEmptyNodes   = errors.New("panel reload candidate contains no nodes")
 	errPanelReloadClosed       = errors.New("panel reload module is closed")
 	errPanelReloadFailedOwned  = errors.New("panel reload cleanup ownership remains")
+	// errPanelReloadCandidateInvalid marks a candidate that failed runtime
+	// validation so the reload keeps its historical warning classification while
+	// the wrapped error still carries the specific reason.
+	errPanelReloadCandidateInvalid = errors.New("panel reload candidate is invalid")
+	// errPanelReloadUnstableCandidate reports that the configuration file never
+	// stayed readable and unchanged long enough to be classified. The applied
+	// configuration is kept and the next change event retries.
+	errPanelReloadUnstableCandidate = errors.New("config file is still being modified")
+)
+
+const (
+	// panelReloadCandidateObservations bounds how many snapshots of the
+	// configuration file are inspected before a candidate is classified. With
+	// panelReloadCandidateObservationDelay this bounds the added reload latency;
+	// the reload context deadline remains the hard upper bound.
+	panelReloadCandidateObservations = 5
+	// panelReloadCandidateObservationDelay separates snapshots so a writer that
+	// truncates and rewrites the file has time to finish.
+	panelReloadCandidateObservationDelay = 50 * time.Millisecond
 )
 
 type panelRuntime interface {
@@ -88,10 +110,14 @@ type panelReloadState struct {
 }
 
 type panelReloadOptions struct {
-	configFile         string
-	lastAppliedAt      time.Time
-	debounce           time.Duration
-	loadCandidate      func(eventName, configuredFile string) (*panel.Config, error)
+	configFile    string
+	lastAppliedAt time.Time
+	debounce      time.Duration
+	loadCandidate func(eventName, configuredFile string) (*panel.Config, error)
+	// readCandidateFile and waitCandidate are the deterministic seams for the
+	// bounded candidate observation loop. Both default to production behaviour.
+	readCandidateFile  func(string) ([]byte, error)
+	waitCandidate      func(context.Context, time.Duration) error
 	validateCandidate  func(current, candidate *panel.Config) error
 	buildRuntime       func(*panel.Config) panelRuntime
 	applyProcessConfig func(*panel.Config)
@@ -108,30 +134,35 @@ type panelReloadObservation struct {
 }
 
 type panelReloadModule struct {
-	operationMu   operation.Gate
-	stateMu       sync.RWMutex
-	reloadMu      sync.RWMutex
-	applied       panelReloadState
-	configFile    string
-	lastAppliedAt time.Time
-	debounce      time.Duration
-	loadCandidate func(eventName, configuredFile string) (*panel.Config, error)
-	validate      func(current, candidate *panel.Config) error
-	buildRuntime  func(*panel.Config) panelRuntime
-	applyProcess  func(*panel.Config)
-	collect       func()
-	now           func() time.Time
-	reloadClock   func() time.Time
-	observeOp     func(panelReloadOperation, panelReloadOperationPhase)
-	reload        panelReloadObservation
+	operationMu       operation.Gate
+	stateMu           sync.RWMutex
+	reloadMu          sync.RWMutex
+	applied           panelReloadState
+	configFile        string
+	lastAppliedAt     time.Time
+	debounce          time.Duration
+	loadCandidate     func(eventName, configuredFile string) (*panel.Config, error)
+	readCandidateFile func(string) ([]byte, error)
+	waitCandidate     func(context.Context, time.Duration) error
+	validate          func(current, candidate *panel.Config) error
+	buildRuntime      func(*panel.Config) panelRuntime
+	applyProcess      func(*panel.Config)
+	collect           func()
+	now               func() time.Time
+	reloadClock       func() time.Time
+	observeOp         func(panelReloadOperation, panelReloadOperationPhase)
+	reload            panelReloadObservation
 }
 
 func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRuntime, options panelReloadOptions) *panelReloadModule {
 	if options.debounce == 0 {
 		options.debounce = 3 * time.Second
 	}
-	if options.loadCandidate == nil {
-		options.loadCandidate = loadPanelReloadCandidate
+	if options.readCandidateFile == nil {
+		options.readCandidateFile = os.ReadFile
+	}
+	if options.waitCandidate == nil {
+		options.waitCandidate = waitForPanelReloadObservation
 	}
 	if options.validateCandidate == nil {
 		options.validateCandidate = validatePanelReloadCandidate
@@ -166,17 +197,19 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		reload: panelReloadObservation{
 			snapshot: service.ReloadSnapshot{Phase: service.ReloadPhaseNone},
 		},
-		configFile:    options.configFile,
-		lastAppliedAt: options.lastAppliedAt,
-		debounce:      options.debounce,
-		loadCandidate: options.loadCandidate,
-		validate:      options.validateCandidate,
-		buildRuntime:  options.buildRuntime,
-		applyProcess:  options.applyProcessConfig,
-		collect:       options.collectGarbage,
-		now:           options.now,
-		reloadClock:   options.reloadClock,
-		observeOp:     options.observeOperation,
+		configFile:        options.configFile,
+		lastAppliedAt:     options.lastAppliedAt,
+		debounce:          options.debounce,
+		loadCandidate:     options.loadCandidate,
+		readCandidateFile: options.readCandidateFile,
+		waitCandidate:     options.waitCandidate,
+		validate:          options.validateCandidate,
+		buildRuntime:      options.buildRuntime,
+		applyProcess:      options.applyProcessConfig,
+		collect:           options.collectGarbage,
+		now:               options.now,
+		reloadClock:       options.reloadClock,
+		observeOp:         options.observeOperation,
 	}
 }
 
@@ -212,21 +245,21 @@ func (m *panelReloadModule) ReloadContext(parent context.Context, eventName stri
 		m.finishReloadObservation(reloadSucceeded)
 	}()
 
-	candidateConfig, err := m.loadCandidate(eventName, m.configFile)
+	candidateConfig, err := m.observeCandidate(ctx, eventName, current.config)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
 	if err != nil {
-		log.Errorf("Hot reload: %v; keeping existing configuration", err)
+		if errors.Is(err, errPanelReloadCandidateInvalid) {
+			log.Warnf("Hot reload: candidate config validation failed; keeping existing configuration")
+		} else {
+			log.Errorf("Hot reload: %v; keeping existing configuration", err)
+		}
 		return err
 	}
 	if candidateConfig == nil {
 		log.Errorf("Hot reload: %v; keeping existing configuration", errPanelReloadNilCandidate)
 		return errPanelReloadNilCandidate
-	}
-	if err := m.validate(current.config, candidateConfig); err != nil {
-		log.Warnf("Hot reload: candidate config validation failed; keeping existing configuration")
-		return err
 	}
 
 	m.publishState(panelReloadState{
@@ -595,6 +628,140 @@ func loadPanelReloadCandidate(eventName, configuredFile string) (*panel.Config, 
 		return nil, fmt.Errorf("failed to parse new config file %s: %w", eventName, err)
 	}
 	return candidateConfig, nil
+}
+
+// observeCandidate loads the candidate within the caller's deadline instead of
+// trusting a single read of the configuration file.
+//
+// Two matching consecutive snapshots are a stability signal, not proof that the
+// writer finished: a writer can pause mid-write. A stable snapshot that fails
+// validation therefore does not end the observation by itself. Bounded outcomes:
+//
+//   - a snapshot that decodes and validates is accepted immediately (a healthy
+//     reload adds no latency);
+//   - a snapshot that stays unchanged for the whole window but never validates
+//     returns its original read/parse/validation error (LKG preserved);
+//   - a file that never stays readable and unchanged returns
+//     errPanelReloadUnstableCandidate.
+//
+// This is best-effort resilience against transient non-atomic writes, not an
+// integrity guarantee. Writing the file atomically (write a temporary file,
+// fsync where appropriate, then rename/replace) remains the strong
+// operator-side guarantee.
+func (m *panelReloadModule) observeCandidate(ctx context.Context, eventName string, current *panel.Config) (*panel.Config, error) {
+	path := strings.TrimSpace(eventName)
+	if path == "" {
+		path = strings.TrimSpace(m.configFile)
+	}
+	// An injected loader keeps its historical single-read contract, and a run
+	// with no explicit path keeps the historical viper discovery behaviour.
+	if m.loadCandidate != nil {
+		candidate, err := m.loadCandidate(eventName, m.configFile)
+		return candidate, m.classifySingle(current, candidate, err)
+	}
+	if path == "" {
+		candidate, err := loadPanelReloadCandidate(eventName, m.configFile)
+		return candidate, m.classifySingle(current, candidate, err)
+	}
+
+	var (
+		previous  []byte
+		havePrev  bool
+		sawBytes  bool
+		lastRead  error
+		lastIssue error
+	)
+	for observation := 0; observation < panelReloadCandidateObservations; observation++ {
+		if observation > 0 {
+			if err := m.waitCandidate(ctx, panelReloadCandidateObservationDelay); err != nil {
+				return nil, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		snapshot, readErr := m.readCandidateFile(path)
+		if readErr != nil {
+			// A rename-based writer can briefly remove the file; keep observing
+			// within the deadline instead of failing the reload outright.
+			lastRead = fmt.Errorf("failed to read new config file %s: %w", path, readErr)
+			previous, havePrev, lastIssue = nil, false, nil
+			continue
+		}
+		sawBytes = true
+		if candidate, classifyErr := m.decodeCandidate(snapshot, path, current); classifyErr == nil {
+			return candidate, nil
+		} else if havePrev && bytes.Equal(previous, snapshot) {
+			// Unchanged but still unusable: remember why and keep observing so a
+			// writer that finishes later in the window can still be accepted.
+			lastIssue = classifyErr
+		} else {
+			// The pair no longer matches, so an earlier "stable but invalid"
+			// verdict is stale: only a repeat at the end of the window may be
+			// reported as a genuine invalid candidate.
+			lastIssue = nil
+		}
+		previous, havePrev = snapshot, true
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if lastIssue != nil {
+		return nil, lastIssue
+	}
+	if !sawBytes && lastRead != nil {
+		return nil, lastRead
+	}
+	return nil, fmt.Errorf("%w: %s", errPanelReloadUnstableCandidate, path)
+}
+
+// classifySingle applies validation to a single-read candidate and marks a
+// validation failure so the caller keeps the historical reload log wording.
+func (m *panelReloadModule) classifySingle(current, candidate *panel.Config, err error) error {
+	if err != nil || candidate == nil {
+		return err
+	}
+	if err := m.validate(current, candidate); err != nil {
+		return errors.Join(errPanelReloadCandidateInvalid, err)
+	}
+	return nil
+}
+
+// decodeCandidate decodes one snapshot and validates it against the applied
+// configuration without publishing anything. Candidate contents never appear in
+// returned errors.
+func (m *panelReloadModule) decodeCandidate(snapshot []byte, path string, current *panel.Config) (*panel.Config, error) {
+	candidateViper := viper.New()
+	// SetConfigFile reuses viper's own extension-based type inference and its
+	// unsupported-extension error; no discovery logic is duplicated here.
+	candidateViper.SetConfigFile(path)
+	if err := candidateViper.ReadConfig(bytes.NewReader(snapshot)); err != nil {
+		// ReadConfig mirrors the historical ReadInConfig classification: a
+		// read/decode failure is reported as a read failure.
+		return nil, fmt.Errorf("failed to read new config file %s: %w", path, err)
+	}
+	candidate := &panel.Config{}
+	if err := candidateViper.Unmarshal(candidate); err != nil {
+		return nil, fmt.Errorf("failed to parse new config file %s: %w", path, err)
+	}
+	if err := m.validate(current, candidate); err != nil {
+		return nil, errors.Join(errPanelReloadCandidateInvalid, err)
+	}
+	return candidate, nil
+}
+
+func waitForPanelReloadObservation(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func applyPanelProcessConfig(config *panel.Config) {

@@ -4,6 +4,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Fixed
+
+- Hot reload now tolerates transient non-atomic configuration writes: a candidate is accepted as soon as a snapshot parses and validates, while a snapshot that stops changing but still fails validation is only reported as invalid after a bounded observation window (at most 5 snapshots, 50 ms apart, capped by the reload deadline). Matching snapshots are a stability signal, not proof that the writer finished, so writing the configuration atomically (temporary file, fsync where appropriate, then rename/replace) remains the strong operator-side guarantee. A stable invalid candidate and a runtime-mode change are still rejected, the last-known-good configuration is preserved, and configuration contents are never logged.
+
 ## 0.9.3 - 2026-09-27
 
 ### Added
