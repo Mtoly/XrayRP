@@ -6,7 +6,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
-- Hot reload now tolerates transient non-atomic configuration writes: a candidate is accepted as soon as a snapshot parses and validates, while a snapshot that stops changing but still fails validation is only reported as invalid after a bounded observation window (at most 5 snapshots, 50 ms apart, capped by the reload deadline). Matching snapshots are a stability signal, not proof that the writer finished, so writing the configuration atomically (temporary file, fsync where appropriate, then rename/replace) remains the strong operator-side guarantee. A stable invalid candidate and a runtime-mode change are still rejected, the last-known-good configuration is preserved, and configuration contents are never logged.
+- Hot reload now tolerates transient non-atomic configuration writes by observing a short bounded window before committing a file-based candidate, so a valid-but-incomplete intermediate snapshot is no longer applied as the writer's final state. The window is at most 5 snapshots, 50 ms apart, capped by the reload deadline; the candidate is classified from the tail of that window (stable and valid is accepted, stable and invalid returns the original validation error, and a file that never quiesces is reported as still being modified). Matching snapshots are a best-effort quiescence signal, not proof that the writer finished, so writing the configuration atomically (temporary file, fsync where appropriate, then rename/replace) remains the strong operator-side guarantee. Runtime-mode changes are still rejected, the last-known-good configuration is preserved, and configuration contents are never logged.
 
 ## 0.9.3 - 2026-09-27
 

@@ -633,16 +633,21 @@ func loadPanelReloadCandidate(eventName, configuredFile string) (*panel.Config, 
 // observeCandidate loads the candidate within the caller's deadline instead of
 // trusting a single read of the configuration file.
 //
-// Two matching consecutive snapshots are a stability signal, not proof that the
-// writer finished: a writer can pause mid-write. A stable snapshot that fails
-// validation therefore does not end the observation by itself. Bounded outcomes:
+// The candidate is classified from the tail of a bounded observation window
+// rather than from any single snapshot. A snapshot that already validates can
+// still be an intermediate state of a non-atomic rewrite, so accepting the
+// first valid snapshot would commit a partially written file; the window is
+// therefore always observed in full. Bounded outcomes:
 //
-//   - a snapshot that decodes and validates is accepted immediately (a healthy
-//     reload adds no latency);
-//   - a snapshot that stays unchanged for the whole window but never validates
-//     returns its original read/parse/validation error (LKG preserved);
-//   - a file that never stays readable and unchanged returns
-//     errPanelReloadUnstableCandidate.
+//   - the final two snapshots match and validate -> that candidate is accepted;
+//   - the final two snapshots match but fail validation -> the original
+//     read/parse/validation error is returned (LKG preserved);
+//   - no two consecutive snapshots at the end of the window match -> the file
+//     never quiesced, so errPanelReloadUnstableCandidate is returned.
+//
+// Two matching snapshots remain a best-effort quiescence signal, not proof that
+// the writer finished: a writer can pause mid-write, which is exactly why a
+// stable-but-invalid tail is reported as invalid only after the whole window.
 //
 // This is best-effort resilience against transient non-atomic writes, not an
 // integrity guarantee. Writing the file atomically (write a temporary file,
@@ -665,11 +670,13 @@ func (m *panelReloadModule) observeCandidate(ctx context.Context, eventName stri
 	}
 
 	var (
-		previous  []byte
-		havePrev  bool
-		sawBytes  bool
-		lastRead  error
-		lastIssue error
+		previous        []byte
+		havePrev        bool
+		sawBytes        bool
+		lastRead        error
+		lastCandidate   *panel.Config
+		lastIssue       error
+		lastPairMatched bool
 	)
 	for observation := 0; observation < panelReloadCandidateObservations; observation++ {
 		if observation > 0 {
@@ -685,28 +692,22 @@ func (m *panelReloadModule) observeCandidate(ctx context.Context, eventName stri
 			// A rename-based writer can briefly remove the file; keep observing
 			// within the deadline instead of failing the reload outright.
 			lastRead = fmt.Errorf("failed to read new config file %s: %w", path, readErr)
-			previous, havePrev, lastIssue = nil, false, nil
+			previous, havePrev, lastPairMatched = nil, false, false
+			lastCandidate, lastIssue = nil, nil
 			continue
 		}
 		sawBytes = true
-		if candidate, classifyErr := m.decodeCandidate(snapshot, path, current); classifyErr == nil {
-			return candidate, nil
-		} else if havePrev && bytes.Equal(previous, snapshot) {
-			// Unchanged but still unusable: remember why and keep observing so a
-			// writer that finishes later in the window can still be accepted.
-			lastIssue = classifyErr
-		} else {
-			// The pair no longer matches, so an earlier "stable but invalid"
-			// verdict is stale: only a repeat at the end of the window may be
-			// reported as a genuine invalid candidate.
-			lastIssue = nil
-		}
+		lastCandidate, lastIssue = m.decodeCandidate(snapshot, path, current)
+		lastPairMatched = havePrev && bytes.Equal(previous, snapshot)
 		previous, havePrev = snapshot, true
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if lastIssue != nil {
+	if lastPairMatched {
+		if lastCandidate != nil {
+			return lastCandidate, nil
+		}
 		return nil, lastIssue
 	}
 	if !sawBytes && lastRead != nil {
