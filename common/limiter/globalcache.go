@@ -122,6 +122,12 @@ func newLocalTTLCache(defaultExpiration, cleanupInterval time.Duration) *localTT
 	}
 }
 
+// localTTLCache is passed to goCacheStore.NewGoCache, so it must satisfy the
+// client interface that store expects. Keep this compile-time assertion in
+// place: an upstream interface change then fails the build here instead of
+// surfacing as an inference error at the NewGoCache call site.
+var _ goCacheStore.GoCacheClientInterface = (*localTTLCache)(nil)
+
 func (c *localTTLCache) Get(key string) (any, bool) {
 	c.deleteExpiredIfDue()
 	return c.cache.Get(key)
@@ -135,6 +141,14 @@ func (c *localTTLCache) GetWithExpiration(key string) (any, time.Time, bool) {
 func (c *localTTLCache) Set(key string, value any, expiration time.Duration) {
 	c.deleteExpiredIfDue()
 	c.cache.Set(key, value, expiration)
+}
+
+// Add stores the value only when the key is absent or already expired, leaving
+// an existing live entry untouched and reporting that case as an error. The
+// underlying go-cache client owns the atomicity of that check.
+func (c *localTTLCache) Add(key string, value any, expiration time.Duration) error {
+	c.deleteExpiredIfDue()
+	return c.cache.Add(key, value, expiration)
 }
 
 func (c *localTTLCache) Delete(key string) {
