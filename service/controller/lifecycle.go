@@ -299,6 +299,22 @@ func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, owne
 	}
 	var cleanupErrs []error
 
+	// Periodic producers run against the shared sync pipeline, the WebSocket
+	// runtime, the rule manager, the limiter, and the node runtime. They must
+	// stop before any of those dependencies is torn down, and a producer that
+	// has not exited keeps the whole dependency set owned so a later Close can
+	// finish the shutdown instead of leaving a live producer writing into
+	// freed resources.
+	if ownership.periodic {
+		if err := c.closePeriodicTasksContext(ctx); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("close controller periodic tasks: %w", err))
+		}
+		if c.periodicShutdownCompleted() {
+			ownership.periodic = false
+		} else {
+			return errors.Join(cleanupErrs...)
+		}
+	}
 	if ownership.websocket {
 		wsRuntime := c.currentWSRuntime()
 		if wsRuntime == nil {
@@ -308,13 +324,6 @@ func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, owne
 		} else {
 			c.setWSRuntime(nil)
 			ownership.websocket = false
-		}
-	}
-	if ownership.periodic {
-		if err := c.closePeriodicTasksContext(ctx); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("close controller periodic tasks: %w", err))
-		} else {
-			ownership.periodic = false
 		}
 	}
 	if ownership.syncCoordinator {

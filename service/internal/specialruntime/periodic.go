@@ -104,16 +104,37 @@ func (p *managedPeriodic) StartContext(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
-	if err := p.executeOnce(ctx); err != nil {
-		cancel()
+	// The initial iteration is owned by both the StartContext caller and the
+	// periodic lifecycle: either one canceling must cancel it. The caller is the
+	// parent so its cancellation and deadline classification (context.Canceled
+	// or context.DeadlineExceeded) is preserved; the lifecycle is bridged in as
+	// an additional cancellation source. Later iterations run against the
+	// lifecycle runContext alone, so a caller that returns after a successful
+	// startup cannot stop the periodic loop.
+	initialContext, cancelInitial := context.WithCancel(ctx)
+	stopLifecycleWatch := context.AfterFunc(runContext, cancelInitial)
+	initialErr := p.executeOnce(initialContext)
+	stopLifecycleWatch()
+	cancelInitial()
+
+	if err := initialErr; err != nil {
 		p.mu.Lock()
-		p.running = false
-		p.started = false
-		p.terminal = true
-		p.cancel = nil
+		stopped := !p.running
 		p.mu.Unlock()
-		close(done)
-		return err
+		if !stopped || !errors.Is(err, context.Canceled) {
+			cancel()
+			p.mu.Lock()
+			p.running = false
+			p.started = false
+			p.terminal = true
+			p.cancel = nil
+			p.mu.Unlock()
+			close(done)
+			return err
+		}
+		// A lifecycle stop canceled the initial iteration. That is a clean
+		// shutdown rather than a start failure, matching how later iterations
+		// treat cancellation caused by Stop.
 	}
 
 	p.mu.Lock()

@@ -6,6 +6,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Fixed
 
+- Controller shutdown now delivers stop signals to every periodic producer before joining any of them, keeps a producer that has not exited owned instead of tearing down the sync coordinator, rules, limiter, or node runtime underneath it, and lets a later close retry the join against the real runner instead of replaying the first deadline error. A periodic runner's first iteration now responds to both startup-context and lifecycle cancellation, preserving the caller's cancellation/deadline classification while still letting close stop it, and later iterations remain owned only by the lifecycle context.
+
 - Hot reload now tolerates transient non-atomic configuration writes by observing a short bounded window before committing a file-based candidate, so a valid-but-incomplete intermediate snapshot is no longer applied as the writer's final state. The window is at most 5 snapshots, 50 ms apart, capped by the reload deadline; the candidate is classified from the tail of that window (stable and valid is accepted, stable and invalid returns the original validation error, and a file that never quiesces is reported as still being modified). Matching snapshots are a best-effort quiescence signal, not proof that the writer finished, so writing the configuration atomically (temporary file, fsync where appropriate, then rename/replace) remains the strong operator-side guarantee. Runtime-mode changes are still rejected, the last-known-good configuration is preserved, and configuration contents are never logged.
 
 ## 0.9.3 - 2026-09-27
