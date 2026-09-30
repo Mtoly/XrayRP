@@ -42,7 +42,11 @@ Observability: # Optional local health, readiness, and Prometheus metrics server
 #     UpdatePeriodic: 60 # Fallback per-node interval; panel pull_interval has a 30s minimum and push_interval has a 5s minimum.
 #     WebSocketConfig: # Shared machine WebSocket control-plane settings.
 #       Enable: true # Enable shared machine WebSocket for sync.nodes, per-node mailbox routing, and node.status reports.
-#       Endpoint: # Optional override; machine mode otherwise uses <ApiHost>/api/v1/server/UniProxy/ws with machine_id + token.
+#       # Machine mode does not use handshake discovery. Set this to the WebSocket URL the Xboard
+#       # standalone ws-server is published on, usually /ws behind the panel reverse proxy.
+#       # XrayRP appends machine_id + token itself. When left empty, machine mode falls back to the
+#       # legacy <ApiHost>/api/v1/server/UniProxy/ws path, which current Xboard does not serve.
+#       Endpoint: "wss://panel.example.com/ws"
 #       HeartbeatInterval: 30 # WebSocket heartbeat interval in seconds.
 #       ReconnectBackoff: 5 # Delay in seconds before reconnecting after a WebSocket disconnect.
 #       ResyncOnReconnect: true # Submit a full node rediscovery/resync after WebSocket reconnects.

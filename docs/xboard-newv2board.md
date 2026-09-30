@@ -67,7 +67,7 @@ If handshake discovery is unavailable, static-node mode falls back to the legacy
 - Device reports are sent only when the snapshot changes, including the final empty snapshot after all devices disconnect.
 - Tokens and other credential-bearing diagnostics are redacted by default.
 
-Enable dual-active synchronization with:
+Enable dual-active synchronization for a static node with:
 
 ```yaml
 ControllerConfig:
@@ -80,6 +80,98 @@ ControllerConfig:
 ```
 
 `HeartbeatInterval: 0` disables runtime keepalive ticks. Disabling `WebSocketConfig.Enable` leaves the node polling-only.
+
+## Xboard deployment: machine-mode shared WebSocket
+
+Current Xboard splits the control plane into separate services:
+
+- `web` serves the panel HTTP API (PHP Octane or PHP-FPM), usually on `:7001`.
+- `ws-server` is a standalone Workerman WebSocket server (`php artisan ws-server start`), usually on `:8076`. The public path is decided by the reverse proxy; Xboard's own guides use `/ws` or `/ws/`.
+- `horizon` is the queue worker and never accepts WebSocket connections.
+
+The PHP web service does not terminate the WebSocket upgrade. When Xboard runs the split or multi-container topology, the public reverse proxy must forward the upgrade request to the `ws-server` port.
+
+### Required machine-mode configuration
+
+Static-node mode can discover the WebSocket URL through Xboard `/api/v2/server/handshake` (`websocket.ws_url`). Machine mode does not use handshake discovery, so `Endpoint` must be set explicitly to the URL your Xboard deployment advertises:
+
+```yaml
+MachineConfig:
+  Enable: true
+  PanelType: "NewV2board"
+  ApiHost: "https://panel.example.com"
+  MachineID: 1
+  Token: "machine-token"
+  ControllerConfig:
+    WebSocketConfig:
+      Enable: true
+      Endpoint: "wss://panel.example.com/ws"
+      HeartbeatInterval: 30
+      ReconnectBackoff: 5
+      ResyncOnReconnect: true
+```
+
+XrayRP appends the `machine_id` and `token` query parameters itself, so the endpoint must not contain them. Explicit endpoints are operator-controlled, unlike handshake-discovered ones, so XrayRP does not enforce same-origin or downgrade protection here: point it at the panel origin, and use `wss://` whenever the panel itself is HTTPS.
+
+### Reverse proxy for the Xboard ws-server
+
+For an nginx or aaPanel site that terminates TLS in front of the panel, add a WebSocket location before the site's catch-all location:
+
+```nginx
+location /ws {
+    proxy_pass http://127.0.0.1:8076;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 300s;
+}
+```
+
+Replace `127.0.0.1:8076` when the ws-server runs on another host or port, including the Docker service name when the proxy itself runs in a container network. TLS can terminate on nginx even though the upstream is plain `http://`; clients still connect with `wss://`.
+
+Two details decide whether the upgrade reaches the ws-server: keep the location prefix aligned with the path in `Endpoint` (`location /ws` matches the default `/ws`; a `location /ws/` block would not), and keep `proxy_pass` without a trailing slash so the `/ws` path is forwarded unchanged instead of being rewritten to `/`.
+
+`proxy_read_timeout` must stay above `WebSocketConfig.HeartbeatInterval`, and above any CDN idle timeout in the path, or the proxy drops an idle connection between heartbeats. If Xboard runs as the all-in-one Docker image, the container's internal Caddy already routes `/ws` to its ws-server, so an external proxy only needs to forward the upgrade to the single published port.
+
+### `/ws` versus the legacy fallback
+
+When `Endpoint` is empty, machine mode falls back to `<ApiHost>/api/v1/server/UniProxy/ws`. That is the legacy UniProxy WebSocket endpoint this client historically used. Current Xboard does not register it as an HTTP route: Xboard exposes the standalone ws-server, and its handshake advertises `/ws` (or an admin-configured URL).
+
+The practical difference:
+
+- Static-node mode with an empty `Endpoint` first asks `/api/v2/server/handshake` and uses the advertised `/ws` URL, so it works with current Xboard as long as the reverse proxy forwards the upgrade.
+- Machine mode with an empty `Endpoint` dials the legacy UniProxy path directly. Unless the reverse proxy maps that exact path to the ws-server, the connection never establishes, the `websocket` label stays `degraded` (or `disconnected` before the first successful dial), and machine-mode synchronization silently continues on polling only.
+
+Setting `Endpoint` to the same `/ws` URL that Xboard advertises is the supported machine-mode configuration for current Xboard.
+
+### Acceptance and troubleshooting
+
+Start by enabling the local observability server in `config.yml` and restarting XrayRP:
+
+```yaml
+Observability:
+  Enable: true
+  Listen: "127.0.0.1:10085"
+```
+
+Then confirm both the machine runtime and its node controllers report a connected shared WebSocket:
+
+```bash
+curl -fsS http://127.0.0.1:10085/readyz
+curl -fsS http://127.0.0.1:10085/metrics | grep 'xrayrp_runtime_state'
+```
+
+`/readyz` returns HTTP 200 while the process is running; its body reports `ready`, or `degraded` when only the WebSocket (or report backlog) is unhealthy. A lost WebSocket connection therefore degrades readiness instead of failing it, which is intended: polling keeps node configuration converging. In the metrics output, `kind="machine"` must show `websocket="connected"`. Ordinary Xray nodes appear as `kind="controller"` rows and mirror the shared connection state, so they must also show `websocket="connected"`. AnyTLS, TUIC, and Hysteria2 nodes appear under their own `kind` and keep `websocket="disabled"` because they receive node-scoped triggers through the shared machine connection without owning it; judge their latency behavior from the `kind="machine"` row instead. A machine without discovered nodes has no node rows yet; that is expected.
+
+If `websocket` is not `connected`:
+
+- `/ws` returns panel HTML or a 404: the reverse proxy is sending the upgrade to the PHP web service instead of the ws-server port.
+- The upgrade fails immediately: the location is missing `proxy_http_version 1.1`, `Upgrade $http_upgrade`, or `Connection "upgrade"`. A CDN in front of nginx must also allow WebSocket upgrades.
+- The connection drops on a fixed interval: `proxy_read_timeout` or a CDN idle timeout is shorter than `HeartbeatInterval`.
+- Xboard logs `invalid machine credentials` or the client receives an `error` event right after the upgrade: `MachineID` or `Token` does not match the machine entry in the panel.
+
+In all of these cases XrayRP keeps polling, so node configuration still converges; WebSocket only reduces synchronization latency.
 
 ## `base_config` scheduling
 
