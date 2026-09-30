@@ -101,8 +101,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-mac
   --machine-id 1 \
   --token "machine-token" \
   --panel-type NewV2board \
-  --enable-ws
+  --enable-ws \
+  --ws-endpoint "wss://panel.example.com/ws"
 ```
+
+`--enable-ws` only turns on the machine WebSocket. Machine mode does not use handshake discovery, so pass `--ws-endpoint` with the URL your Xboard `ws-server` is published on (usually `/ws`; see the [compatibility guide](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket)). When it is omitted, XrayRP falls back to the legacy `<ApiHost>/api/v1/server/UniProxy/ws` path, which current Xboard no longer serves.
 
 If `/etc/XrayR/config.yml` already exists, the script will not overwrite it by default. Add `--force` only when you want to overwrite the existing config.
 

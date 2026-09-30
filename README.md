@@ -106,8 +106,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-mac
   --machine-id 1 \
   --token "machine-token" \
   --panel-type NewV2board \
-  --enable-ws
+  --enable-ws \
+  --ws-endpoint "wss://panel.example.com/ws"
 ```
+
+`--enable-ws` 只打开 machine WebSocket；XrayRP machine 模式不走 handshake 自动发现，因此请用 `--ws-endpoint` 显式填写 Xboard `ws-server` 对外暴露的地址（通常为 `/ws`，见[兼容性文档](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket)）。省略时回退到旧版 `<ApiHost>/api/v1/server/UniProxy/ws` 路径，当前 Xboard 不再提供该路由。
 
 如果 `/etc/XrayR/config.yml` 已存在，脚本默认不会覆盖；确认要覆盖时添加 `--force`。
 
