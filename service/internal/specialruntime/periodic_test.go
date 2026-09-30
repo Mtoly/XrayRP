@@ -305,6 +305,95 @@ func TestManagedPeriodicPostStartLoopIgnoresCallerCancellation(t *testing.T) {
 	}
 }
 
+// controlledDeadlineContext is a test-only Context whose cancellation is
+// triggered explicitly and whose Err reports context.DeadlineExceeded. It lets
+// tests distinguish a caller deadline from a caller cancellation without
+// relying on wall-clock timing or an arbitrary sleep.
+type controlledDeadlineContext struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newControlledDeadlineContext() *controlledDeadlineContext {
+	return &controlledDeadlineContext{done: make(chan struct{})}
+}
+
+func (*controlledDeadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *controlledDeadlineContext) Done() <-chan struct{}     { return c.done }
+func (*controlledDeadlineContext) Value(any) any               { return nil }
+func (c *controlledDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *controlledDeadlineContext) expire() {
+	c.once.Do(func() { close(c.done) })
+}
+
+// TestManagedPeriodicInitialCallbackPreservesCallerDeadlineExceeded pins the
+// error classification of the initial iteration: when the StartContext caller's
+// deadline expires, the caller must observe context.DeadlineExceeded rather
+// than a softened context.Canceled, and no periodic loop may outlive the failed
+// startup.
+func TestManagedPeriodicInitialCallbackPreservesCallerDeadlineExceeded(t *testing.T) {
+	timer := newManualManagedPeriodicTimer()
+	callbackEntered := make(chan struct{})
+	laterIteration := make(chan struct{})
+	var calls atomic.Int32
+
+	task := NewPeriodicContext(time.Hour, func(ctx context.Context) error {
+		if calls.Add(1) > 1 {
+			close(laterIteration)
+			return nil
+		}
+		close(callbackEntered)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	task.newTimer = func(time.Duration) managedPeriodicTimer { return timer }
+
+	caller := newControlledDeadlineContext()
+	startDone := make(chan error, 1)
+	go func() { startDone <- task.StartContext(caller) }()
+
+	<-callbackEntered
+	caller.expire()
+
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("StartContext() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartContext() did not return after the caller deadline expired")
+	}
+
+	// The expired startup must not leave a live periodic lifecycle behind.
+	task.mu.Lock()
+	started := task.started
+	running := task.running
+	terminal := task.terminal
+	task.mu.Unlock()
+	if started || running || !terminal {
+		t.Fatalf("periodic lifecycle after expired startup = started:%v running:%v terminal:%v, want terminal and idle",
+			started, running, terminal)
+	}
+	select {
+	case <-timer.observed:
+		t.Fatal("an expired startup scheduled a follow-up periodic iteration")
+	case <-laterIteration:
+		t.Fatal("an expired startup executed a follow-up periodic iteration")
+	default:
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("callback calls = %d, want only the initial iteration", got)
+	}
+}
+
 func TestManagedPeriodicCapsEveryCallbackWithSyncDeadline(t *testing.T) {
 	timer := newManualManagedPeriodicTimer()
 	deadlines := make(chan time.Duration, 2)
