@@ -8,6 +8,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Documented the Xboard machine-mode shared WebSocket operator path: the standalone `ws-server` runs separately from the panel HTTP service, machine mode requires an explicit `Endpoint` because it does not use handshake discovery, the reverse proxy must forward the WebSocket upgrade to the ws-server port, and `/readyz` plus `xrayrp_runtime_state` metrics are the acceptance checks. The machine-mode installer examples now pass `--ws-endpoint` so they point at the path current Xboard actually serves instead of the legacy `UniProxy/ws` fallback.
 
+### Security
+
+- Updated OpenTelemetry dependencies to a patched version to address a low-severity dependency advisory.
+
 ### Fixed
 
 - Controller shutdown now delivers stop signals to every periodic producer before joining any of them, keeps a producer that has not exited owned instead of tearing down the sync coordinator, rules, limiter, or node runtime underneath it, and lets a later close retry the join against the real runner instead of replaying the first deadline error. A periodic runner's first iteration now responds to both startup-context and lifecycle cancellation, preserving the caller's cancellation/deadline classification while still letting close stop it, and later iterations remain owned only by the lifecycle context.
