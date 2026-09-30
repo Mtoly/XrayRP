@@ -184,6 +184,127 @@ func TestManagedPeriodicCloseCancelsInitialCallbackContext(t *testing.T) {
 	}
 }
 
+// TestManagedPeriodicInitialCallbackHonorsStartContextCancellation pins the
+// contract that the initial iteration is owned by BOTH the StartContext caller
+// and the periodic lifecycle: either source canceling must cancel it. A caller
+// that cancels before the first iteration finishes must observe its own
+// cancellation and must not leave a running periodic loop behind.
+func TestManagedPeriodicInitialCallbackHonorsStartContextCancellation(t *testing.T) {
+	timer := newManualManagedPeriodicTimer()
+	callbackEntered := make(chan struct{})
+	callbackCanceled := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	laterIteration := make(chan struct{})
+	var calls atomic.Int32
+
+	task := NewPeriodicContext(time.Hour, func(ctx context.Context) error {
+		if calls.Add(1) == 1 {
+			close(callbackEntered)
+			<-releaseCallback
+			select {
+			case <-ctx.Done():
+				close(callbackCanceled)
+			default:
+			}
+			close(callbackReturned)
+			return nil
+		}
+		close(laterIteration)
+		return nil
+	})
+	task.newTimer = func(time.Duration) managedPeriodicTimer { return timer }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan error, 1)
+	go func() { startDone <- task.StartContext(ctx) }()
+
+	<-callbackEntered
+	cancel()
+	close(releaseCallback)
+	<-callbackReturned
+
+	select {
+	case err := <-startDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("StartContext() error = %v, want context.Canceled for a canceled startup", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartContext() did not return after the startup caller was canceled")
+	}
+
+	// The canceled startup must not leave a live periodic lifecycle behind: the
+	// task must be terminal and must never schedule another iteration.
+	task.mu.Lock()
+	started := task.started
+	running := task.running
+	terminal := task.terminal
+	task.mu.Unlock()
+	if started || running || !terminal {
+		t.Fatalf("periodic lifecycle after canceled startup = started:%v running:%v terminal:%v, want terminal and idle",
+			started, running, terminal)
+	}
+	select {
+	case <-timer.observed:
+		t.Fatal("a canceled startup scheduled a follow-up periodic iteration")
+	case <-laterIteration:
+		t.Fatal("a canceled startup executed a follow-up periodic iteration")
+	default:
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("callback calls = %d, want only the initial iteration", got)
+	}
+}
+
+// TestManagedPeriodicPostStartLoopIgnoresCallerCancellation pins the other half
+// of the context contract: once startup succeeds, the periodic loop belongs to
+// the lifecycle runContext only. Canceling (or returning from) the original
+// StartContext caller must not stop the loop.
+func TestManagedPeriodicPostStartLoopIgnoresCallerCancellation(t *testing.T) {
+	timer := newManualManagedPeriodicTimer()
+	laterIteration := make(chan struct{})
+	var calls atomic.Int32
+
+	task := NewPeriodicContext(time.Hour, func(context.Context) error {
+		if calls.Add(1) > 1 {
+			close(laterIteration)
+		}
+		return nil
+	})
+	task.newTimer = func(time.Duration) managedPeriodicTimer { return timer }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := task.StartContext(ctx); err != nil {
+		t.Fatalf("StartContext() error = %v", err)
+	}
+
+	// The caller goes away after a successful startup.
+	cancel()
+
+	task.mu.Lock()
+	running := task.running
+	runContext := task.runContext
+	task.mu.Unlock()
+	if !running {
+		t.Fatal("periodic loop stopped when the startup caller was canceled")
+	}
+	if runContext == nil || runContext.Err() != nil {
+		t.Fatalf("lifecycle runContext was canceled by the startup caller: %v", runContext.Err())
+	}
+
+	// A later interval must still fire and execute.
+	timer.waitObserved(t)
+	timer.fire()
+	select {
+	case <-laterIteration:
+	case <-time.After(5 * time.Second):
+		t.Fatal("periodic loop did not run a later iteration after caller cancellation")
+	}
+	if err := task.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestManagedPeriodicCapsEveryCallbackWithSyncDeadline(t *testing.T) {
 	timer := newManualManagedPeriodicTimer()
 	deadlines := make(chan time.Duration, 2)

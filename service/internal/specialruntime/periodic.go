@@ -104,10 +104,23 @@ func (p *managedPeriodic) StartContext(ctx context.Context) error {
 	}
 	p.mu.Unlock()
 
-	// The initial iteration runs against the lifecycle context rather than the
-	// caller's context, so a Close that arrives while the first iteration is
-	// still running can cancel it the same way it cancels later iterations.
-	if err := p.executeOnce(runContext); err != nil {
+	// The initial iteration is owned by both the StartContext caller and the
+	// periodic lifecycle: either one canceling must cancel it. Later iterations
+	// run against the lifecycle runContext alone, so a caller that returns after
+	// a successful startup cannot stop the periodic loop.
+	initialContext, cancelInitial := context.WithCancel(runContext)
+	stopCallerWatch := context.AfterFunc(ctx, cancelInitial)
+	initialErr := p.executeOnce(initialContext)
+	stopCallerWatch()
+	cancelInitial()
+	if initialErr == nil {
+		// The caller may have canceled while the initial iteration was still
+		// running. The cancellation hook is asynchronous, so observe the caller
+		// context directly before deciding whether this startup succeeded.
+		initialErr = ctx.Err()
+	}
+
+	if err := initialErr; err != nil {
 		p.mu.Lock()
 		stopped := !p.running
 		p.mu.Unlock()
