@@ -2,7 +2,7 @@
 
 A **panel-managed Xray runtime framework**: the panel delivers node and user configuration, XrayRP converges it into running Xray instances locally, and reports runtime observations back to the panel.
 
-Current release: `0.9.3` (see [CHANGELOG.md](./CHANGELOG.md))
+Current release: `0.9.4` (see [CHANGELOG.md](./CHANGELOG.md))
 
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)

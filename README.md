@@ -2,7 +2,7 @@
 
 一个 **panel-managed Xray runtime framework**：面板下发节点与用户配置，XrayRP 在本地收敛为运行中的 Xray 实例，并把运行观测回传给面板。
 
-当前版本：`0.9.3`（见 [CHANGELOG.md](./CHANGELOG.md)）
+当前版本：`0.9.4`（见 [CHANGELOG.md](./CHANGELOG.md)）
 
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)

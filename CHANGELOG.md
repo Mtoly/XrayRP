@@ -4,6 +4,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+## 0.9.4 - 2026-10-01
+
 ### Added
 
 - Documented the Xboard machine-mode shared WebSocket operator path: the standalone `ws-server` runs separately from the panel HTTP service, machine mode requires an explicit `Endpoint` because it does not use handshake discovery, the reverse proxy must forward the WebSocket upgrade to the ws-server port, and `/readyz` plus `xrayrp_runtime_state` metrics are the acceptance checks. The machine-mode installer examples now pass `--ws-endpoint` so they point at the path current Xboard actually serves instead of the legacy `UniProxy/ws` fallback.

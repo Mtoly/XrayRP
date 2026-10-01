@@ -2,7 +2,7 @@
 
 یک **چارچوب زمان اجرای Xray با مدیریت پنل**: پنل پیکربندی گره‌ها و کاربران را ارسال می‌کند، XrayRP آن را به‌صورت محلی به نمونه‌های در حال اجرای Xray تبدیل می‌کند و مشاهدات زمان اجرا را به پنل گزارش می‌دهد.
 
-نسخه فعلی: `0.9.3` (به [CHANGELOG.md](./CHANGELOG.md) مراجعه کنید)
+نسخه فعلی: `0.9.4` (به [CHANGELOG.md](./CHANGELOG.md) مراجعه کنید)
 
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
