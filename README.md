@@ -59,8 +59,8 @@
 - CodeQL 静态分析（`codeql-analysis.yml`，push / PR / 每周计划）。
 - govulncheck 可达漏洞扫描，仅允许已被记录并有版本下限约束的例外（`test.yml`）。
 - Dependabot 依赖与基础镜像更新。
-- 签名发布产物：归档、`SHA256SUMS` 与发布清单带 Sigstore 签名，并生成 GitHub provenance attestation。
-- SPDX SBOM 与发布追溯清单随每个平台产物发布。
+- 签名发布产物：发布页提供各平台归档与 `SHA256SUMS`，并附带 `SHA256SUMS.sigstore.json` Sigstore 签名。
+- SPDX SBOM、发布清单与 provenance attestation 由发布工作流生成，并作为 workflow evidence 保留。
 - Docker PR 验证：改动 `Dockerfile` 或 docker workflow 的 PR 会构建镜像并执行 `version` 冒烟测试（`docker-test.yml`）。
 
 ## Architecture
