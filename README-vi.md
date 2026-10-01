@@ -1,120 +1,160 @@
 # XrayRP
 
-[![](https://img.shields.io/badge/TgChat-@XrayR讨论-blue.svg)](https://t.me/XrayR_project)
-[![](https://img.shields.io/badge/Channel-@XrayR通知-blue.svg)](https://t.me/XrayR_channel)
-![](https://img.shields.io/github/stars/Mtoly/XrayRP)
-![](https://img.shields.io/github/forks/Mtoly/XrayRP)
-![](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)
-![](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)
-[![Github All Releases](https://img.shields.io/github/downloads/Mtoly/XrayRP/total.svg)]()
+Một **framework runtime Xray được quản lý bởi panel**: panel gửi cấu hình node và người dùng, XrayRP hội tụ cấu hình đó thành các instance Xray đang chạy cục bộ và báo cáo quan sát runtime trở lại panel.
 
-[Iranian(farsi) README](https://github.com/Mtoly/XrayRP/blob/master/README_Fa.md), [Vietnamese(vi) README](https://github.com/Mtoly/XrayRP/blob/master/README-vi.md), [English(en) README](https://github.com/Mtoly/XrayRP/blob/master/README-en.md)
+Phiên bản hiện tại: `0.9.3` (xem [CHANGELOG.md](./CHANGELOG.md))
 
-A Xray backend framework that can easily support many panels.
+[![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
+[![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
+[![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
+[![License](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](./LICENSE)
 
-## Phiên bản hiện tại
+[中文](./README.md) | [English](./README-en.md) | [فارسی](./README_Fa.md)
 
-Phiên bản hiện tại: `0.9.3`
+- Người vận hành panel: các panel như Xboard / NewV2board, sspanel-uim, v2board gửi cấu hình; XrayRP chịu trách nhiệm về vòng đời node và báo cáo.
+- Người duy trì node tự dựng: một instance phục vụ nhiều panel và nhiều node; chọn chế độ `Nodes` tĩnh hoặc chế độ máy tùy nhu cầu.
+- Người đóng góp và người đánh giá: các thành phần phát hành, cổng CI và khả năng quan sát runtime đều truy cập được từ tệp này và các tài liệu liên kết.
 
-Xem các thay đổi chính của phiên bản này trong [CHANGELOG.md](./CHANGELOG.md).
+Xem [tài liệu kiến trúc](./docs/architecture.md) và [tài liệu tương thích Xboard / NewV2board](./docs/xboard-newv2board.md) để biết chi tiết.
 
-Trong chế độ máy của Xboard / NewV2board, XrayRP tự động báo cáo CPU, bộ nhớ, Swap, ổ đĩa và tốc độ mạng của toàn máy lên trang quản lý máy chủ theo `base_config.push_interval` do bảng điều khiển cung cấp; không cần cấu hình cục bộ bổ sung.
+## Tính năng
 
-Khung trở lại dựa trên XRay hỗ trợ các giao thức V2Ray, Trojan, Shadowsocks, dễ dàng mở rộng và hỗ trợ kết nối nhiều người.
+### Panel và mặt phẳng điều khiển
 
-Nếu bạn thích dự án này, bạn có thể nhấp vào Star+Watch ở góc trên bên phải để tiếp tục chú ý đến tiến trình của dự án này.
+- Xboard / NewV2board: tích hợp Xboard và NewV2board qua adapter `NewV2board`.
+- Chế độ máy: `MachineConfig` xác thực bằng `MachineID` + `Token`; một instance tự khám phá các node gắn với máy này và khởi động, dừng chúng một cách linh hoạt.
+- Khám phá node: ở chế độ máy, node được khám phá định kỳ theo `base_config.pull_interval` do panel gửi xuống (tối thiểu 30 giây; dùng `DiscoveryInterval` khi không có giá trị này).
+- Đồng bộ WebSocket: chế độ máy dùng chung một kết nối WebSocket cho `sync.nodes` và định tuyến thông điệp theo `node_id`; sau khi mất kết nối, nó kết nối lại theo `ReconnectBackoff`, và `ResyncOnReconnect` kích hoạt đồng bộ lại toàn bộ. Các node Xray thông thường báo cáo với `kind="controller"`, còn AnyTLS / TUIC / Hysteria2 dùng `kind` riêng với `websocket="disabled"`, vì chúng nhận kích hoạt theo phạm vi node mà không sở hữu kết nối.
+- Ngữ nghĩa hội tụ: polling, WebSocket, kết nối lại và kích hoạt thủ công đều hội tụ vào cùng một đường đồng bộ và apply; cấu hình ứng viên chỉ trở thành giá trị Applied sau khi apply runtime thành công.
 
-## Tài liệu
-Sử dụng hướng dẫn: [Hướng dẫn chi tiết](https://xrayr-project.github.io/XrayR-doc/) ( Tiếng Trung )
+### Giao thức và truyền tải
 
-Tài liệu về khả năng tương thích Xboard / NewV2board, WebSocket, chế độ máy và cấu hình: [Hướng dẫn tương thích](./docs/xboard-newv2board.md).
+- VLESS (bao gồm REALITY / XHTTP / WS / gRPC / HTTPUpgrade)
+- VMess
+- Trojan
+- Shadowsocks (bao gồm Shadowsocks-Plugin)
+- AnyTLS (runtime chuyên biệt, dùng `padding_scheme` do panel gửi xuống)
+- TUIC (runtime chuyên biệt, cần cấu hình chứng chỉ cục bộ)
+- Hysteria2 (runtime chuyên biệt, cần cấu hình chứng chỉ cục bộ)
 
-## Sơ đồ kiến trúc
+Danh sách đầy đủ các loại node và các truyền tải khác (bao gồm Socks và HTTP) nằm trong chú thích `NodeType` của [config.yml.example](./release/config/config.yml.example).
 
-Xem [sơ đồ kiến trúc đầy đủ](./docs/architecture.md).
+### VLESS nâng cao
 
-## Tuyên bố miễn trừ
+- Mã hóa VLESS: Xboard gửi khóa phía máy chủ trong trường cấp cao nhất `decryption` của `/api/v2/server/config`, và XrayRP chuyển nguyên trạng cho inbound của Xray-core; giá trị thiếu, `null` hoặc rỗng vẫn giữ là `none`. Khi bật giải mã mã hóa, Xray-core không cho phép fallback inbound, nên cần tắt fallback.
+- XTLS Vision: khi panel gửi `xtls-rprx-vision`, VLESS chưa mã hóa chỉ áp dụng nó cho TCP TLS / REALITY trực tiếp, và nó bị xóa với các truyền tải khác.
+- XHTTP / WS / gRPC: khi mã hóa VLESS phía máy chủ đang hiệu lực (`decryption` khác rỗng và không phải `none`), XrayRP không còn xóa `xtls-rprx-vision` theo truyền tải mà giữ giá trị do panel gửi. XrayRP không tự thêm flow này.
 
+### Vận hành
 
+- Thống kê lưu lượng người dùng và báo cáo trạng thái node; chuỗi dự phòng endpoint báo cáo được ghi trong tài liệu tương thích.
+- Giới hạn IP trực tuyến, giới hạn người dùng trực tuyến, giới hạn tốc độ theo cổng node và theo từng người dùng; bộ đệm thiết bị toàn cục bằng Redis (tùy chọn) phối hợp nhiều instance.
+- Cấp và gia hạn chứng chỉ tự động (`common/mylego`, hỗ trợ ACME DNS/HTTP/TLS và tệp tùy chỉnh).
+- DNS, định tuyến và quy tắc kiểm toán tùy chỉnh (`DnsConfigPath`, `RouteConfigPath`, `RuleListPath`).
+- Khả năng quan sát: các endpoint cục bộ tùy chọn `/livez`, `/readyz` và `/metrics` (cấu hình `Observability`, mặc định tắt và chỉ cho phép địa chỉ loopback hoặc riêng tư) cung cấp các chỉ số như `xrayrp_runtime_state`.
+- Tải lại nóng: thay đổi cấu hình sẽ tải cấu hình ứng viên và chỉ thay thế instance đang chạy sau khi xác thực và apply thành công.
 
-## Đặt điểm nổi bật
+### Phát hành và bảo mật
 
-* Nguồn mở vĩnh viễn và miễn phí.
-* Hỗ trợ V2Ray, Trojan, Shadowsocks nhiều giao thức.
-* Hỗ trợ các tính năng mới như Vless và XTL.
-* Hỗ trợ trường hợp đơn lẻ kết nối Multi -Panel và Multi -Node, không cần phải bắt đầu nhiều lần.
-* Hỗ trợ hạn chế IP trực tuyến
-* Hỗ trợ cấp cổng nút và giới hạn tốc độ cấp người dùng.
-* Cấu hình đơn giản và rõ ràng.
-* Sửa đổi phiên bản khởi động lại tự động.
-* Dễ dàng biên dịch và nâng cấp, bạn có thể nhanh chóng cập nhật phiên bản cốt lõi và hỗ trợ các tính năng mới của Xray-Core.
+- Phân tích tĩnh CodeQL (`codeql-analysis.yml`, khi push / PR / theo lịch hàng tuần).
+- Quét lỗ hổng có thể truy cập bằng govulncheck, chỉ có một ngoại lệ đã được ghi nhận kèm mức sàn phiên bản (`test.yml`).
+- Dependabot cập nhật phụ thuộc và image nền.
+- Thành phần phát hành đã ký: trang phát hành cung cấp các gói lưu trữ theo nền tảng và `SHA256SUMS`, kèm chữ ký Sigstore trong `SHA256SUMS.sigstore.json`.
+- SBOM SPDX, manifest phát hành và provenance attestation do workflow phát hành tạo ra và được giữ lại dưới dạng bằng chứng workflow.
+- Kiểm tra Docker trên PR: các PR thay đổi `Dockerfile` hoặc workflow docker sẽ build image và chạy smoke test `version` (`docker-test.yml`).
 
-## Chức năng
+## Kiến trúc
 
-| Chức năng        | v2ray | trojan | shadowsocks |
-|-----------|-------|--------|-------------|
-| Nhận thông tin Node    | √     | √      | √           |
-| Nhận thông tin người dùng    | √     | √      | √           |
-| Thống kê lưu lượng người dùng    | √     | √      | √           |
-| Báo cáo thông tin máy chủ   | √     | √      | √           |
-| Tự động đăng ký chứng chỉ TLS | √     | √      | √           |
-| Chứng chỉ TLS gia hạn tự động | √     | √      | √           |
-| Số người trực tuyến    | √     | √      | √           |
-| Hạn chế người dùng trực tuyến    | √     | √      | √           |
-| Quy tắc kiểm toán      | √     | √      | √           |
-| Giới hạn tốc độ cổng nút    | √     | √      | √           |
-| Theo giới hạn tốc độ người dùng    | √     | √      | √           |
-| DNS tùy chỉnh    | √     | √      | √           |
-
-## Hỗ trợ Panel 
-
-| Panel                                                     | v2ray | trojan | shadowsocks             |
-|--------------------------------------------------------|-------|--------|-------------------------|
-| sspanel-uim                                            | √     | √      | √ (Nhiều người dùng cuối và v2ray-plugin) |
-| v2board                                                | √     | √      | √                       |
-| [PMPanel](https://github.com/ByteInternetHK/PMPanel)   | √     | √      | √                       |
-| [ProxyPanel](https://github.com/ProxyPanel/ProxyPanel) | √     | √      | √                       |
-| [WHMCS (V2RaySocks)](https://v2raysocks.doxtex.com/)   | √     | √      | √                       |
-| [GoV2Panel](https://github.com/pingProMax/gov2panel)   | √     | √      | √                       |
-| [BunPanel](https://github.com/pennyMorant/bunpanel-release)   | √     | √      | √                       |
-
-## Cài đặt phần mềm
-
-### Một cài đặt chính
-
-```
-wget -N https://raw.githubusercontent.com/Mtoly/XrayRP-release/master/install.sh && bash install.sh
+```mermaid
+flowchart TD
+    P[Panel<br/>Xboard / NewV2board / sspanel-uim / v2board] -->|node / user snapshot| G[XrayRP]
+    G -->|apply| C[Xray Core<br/>inbound / outbound / routing]
+    C -->|runtime state| G
+    G -->|status / traffic / online data| P
 ```
 
-### Sử dụng phần mềm triển khai Docker
+- Panel: gửi node, người dùng, định tuyến và quy tắc kiểm toán, đồng thời nhận báo cáo.
+- XrayRP: hội tụ ảnh chụp panel thành trạng thái runtime cục bộ; sở hữu vòng đời runtime (khởi động, sẵn sàng, dừng và thu hồi, thay thế, trạng thái lỗi), thực thi giới hạn và quy tắc, quản lý chứng chỉ và báo cáo.
+- Xray Core: nơi thực sự mang giao thức và truyền tải; XrayRP tương tác qua `app/`.
 
-[Hướng dẫn cài đặt thông qua Docker](https://xrayr-project.github.io/XrayR-doc/xrayr-xia-zai-he-an-zhuang/install/docker)
+Vị trí mã nguồn và các bất biến nằm trong [tài liệu kiến trúc](./docs/architecture.md).
 
-### Hướng dẫn cài đặt
+## Cài đặt
 
-[Hướng dẫn cài đặt thủ công](https://xrayr-project.github.io/XrayR-doc/xrayr-xia-zai-he-an-zhuang/install/manual)
+### Script cài đặt một lần nhấp
 
-## Tệp cấu hình và hướng dẫn sử dụng chi tiết
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
+```
 
-[Hướng dẫn chi tiết](https://xrayr-project.github.io/XrayR-doc/)
+### Cài đặt chế độ máy Xboard
 
-## Thanks
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
+  --api-host https://panel.example.com \
+  --machine-id 1 \
+  --token "machine-token" \
+  --panel-type NewV2board \
+  --ws-endpoint "wss://panel.example.com/ws"
+```
 
-* [Project X](https://github.com/XTLS/)
-* [V2Fly](https://github.com/v2fly)
-* [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray)
-* [Air-Universe](https://github.com/crossfw/Air-Universe)
+- Script chỉ ghi `MachineConfig` và cài đặt / khởi động dịch vụ. Nó không tạo hay đăng ký máy trong Xboard, nên hãy tạo và gắn máy trong Xboard trước.
+- `MachineConfig` và `Nodes` tĩnh loại trừ lẫn nhau; bật chế độ máy sẽ không tạo `Nodes` tĩnh.
+- Chế độ máy không dùng khám phá handshake. Đặt `--ws-endpoint` thành địa chỉ mà `ws-server` của Xboard được công bố (thường là `/ws`). Khi bỏ trống, đường dẫn cũ `<ApiHost>/api/v1/server/UniProxy/ws` được dùng, mà Xboard hiện tại không còn cung cấp.
+- Nếu `/etc/XrayR/config.yml` đã tồn tại, script mặc định không ghi đè; thêm `--force` để ghi đè.
 
-## Licence
+### Docker (GHCR)
 
-[Mozilla Public License Version 2.0](https://github.com/Mtoly/XrayRP/blob/master/LICENSE)
+Image: `ghcr.io/mtoly/xrayrp`, được phát hành với cả thẻ phát hành gốc và `latest`.
+
+```bash
+mkdir -p /etc/XrayR
+cp release/config/config.yml.example /etc/XrayR/config.yml
+# edit /etc/XrayR/config.yml, then start
+docker run -d --name xrayrp --restart unless-stopped \
+  --network host \
+  -v /etc/XrayR:/etc/XrayR \
+  ghcr.io/mtoly/xrayrp:latest
+```
+
+Entrypoint của container là `XrayR --config /etc/XrayR/config.yml`. Địa chỉ lắng nghe trong container lấy từ `ListenIP` trong `config.yml`; `Observability.Listen` mặc định là `127.0.0.1`, nên hãy đổi thành một địa chỉ riêng tư truy cập được trong container và ánh xạ cổng khi cần truy cập từ bên ngoài.
+
+## Cấu hình
+
+Tham chiếu có chú thích: [release/config/config.yml.example](./release/config/config.yml.example), bao gồm `Log`, `DnsConfigPath`, `RouteConfigPath`, `ConnectionConfig`, `Observability`, `MachineConfig` và `Nodes`.
+
+- Địa chỉ panel từ xa (`ApiHost`) phải dùng HTTPS; chỉ địa chỉ phát triển loopback mới được dùng HTTP.
+- `MachineConfig` và `Nodes` tĩnh là hai lựa chọn thay thế; không bật cả hai.
+- Chi tiết nằm trong [tài liệu tương thích Xboard / NewV2board](./docs/xboard-newv2board.md).
+
+## Phát triển
+
+Phiên bản Go yêu cầu là chỉ thị `go` trong [go.mod](./go.mod) (hiện tại `1.27`).
+
+```bash
+git clone https://github.com/Mtoly/XrayRP.git
+cd XrayRP
+
+go build ./...
+go test ./...
+go vet ./...
+
+# build matching the release artifacts (includes QUIC support)
+CGO_ENABLED=0 go build -tags with_quic -o XrayR .
+```
+
+## Giấy phép
+
+[Mozilla Public License Version 2.0](./LICENSE)
+
+## Cảm ơn
+
+- [Project X](https://github.com/XTLS/)
+- [V2Fly](https://github.com/v2fly)
+- [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray)
+- [Air-Universe](https://github.com/crossfw/Air-Universe)
 
 ## Telegram
 
-[Xrayr Back-end Thảo luận](https://t.me/XrayR_project)
-
-[Thông báo Xrayr](https://t.me/XrayR_channel)
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/Mtoly/XrayRP.svg)](https://starchart.cc/Mtoly/XrayRP)
+- [Nhóm thảo luận XrayR](https://t.me/XrayR_project)
+- [Kênh thông báo XrayR](https://t.me/XrayR_channel)
