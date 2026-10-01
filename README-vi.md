@@ -2,7 +2,7 @@
 
 Một **framework runtime Xray được quản lý bởi panel**: panel gửi cấu hình node và người dùng, XrayRP hội tụ cấu hình đó thành các instance Xray đang chạy cục bộ và báo cáo quan sát runtime trở lại panel.
 
-Phiên bản hiện tại: `0.9.3` (xem [CHANGELOG.md](./CHANGELOG.md))
+Phiên bản hiện tại: `0.9.4` (xem [CHANGELOG.md](./CHANGELOG.md))
 
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
