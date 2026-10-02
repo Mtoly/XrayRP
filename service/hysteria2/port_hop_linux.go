@@ -17,7 +17,12 @@ var runPortHopCommand = func(ctx context.Context, args ...string) ([]byte, error
 }
 
 func portHopIptablesArgs(action string, r portHopRule) []string {
-	args := []string{"-t", "nat", action, "PREROUTING", "-p", "udp"}
+	// Match only destinations that are local to this host. A wildcard listen
+	// (the default 0.0.0.0) serves this host's addresses, not every destination,
+	// so an unqualified PREROUTING REDIRECT would also rewrite forwarded/transit
+	// UDP whose destination port overlaps the port-hopping range.
+	// See HyNetworks/hysteria@62d1016707af21b91e5fb6070311d9f016ff2754.
+	args := []string{"-t", "nat", action, "PREROUTING", "-m", "addrtype", "--dst-type", "LOCAL", "-p", "udp"}
 	if r.FromPortStart == r.FromPortEnd {
 		args = append(args, "--dport", fmt.Sprintf("%d", r.FromPortStart))
 	} else {
