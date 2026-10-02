@@ -14,15 +14,9 @@ Current release: `0.9.4` (see [CHANGELOG.md](./CHANGELOG.md))
 
 ## Why XrayRP
 
-The panel handles management, Xray Core handles the running, and XrayRP connects the two:
+If you run nodes on your own servers and would rather not maintain each node's configuration and process by hand, XrayRP applies the configuration in your panel to the node machine and reports runtime status and traffic back to the panel. Day-to-day node and user configuration is managed in the panel, which cuts down manual node maintenance. The underlying traffic is handled by Xray Core and the runtime for each protocol.
 
-- **The panel handles management**: nodes, users, routing, and audit rules are all maintained in the panel, so you do not edit configuration files by hand.
-- **Xray Core handles the running**: the actual protocols and transports are carried by Xray-core.
-- **XrayRP connects the two**: it pulls panel configuration, starts, updates, and stops nodes on this machine, and reports status, traffic, and online data back to the panel.
-
-**Who it is for**: people who maintain nodes on their own servers and manage users through a panel. One instance can serve multiple panels and multiple nodes.
-
-**Before you start**: you need a working panel with nodes configured, and root access on the target machine.
+Before you start, you need a panel with nodes already configured, and root access on the node machine.
 
 See the [architecture document](./docs/architecture.md) and the [Xboard / NewV2board compatibility document](./docs/xboard-newv2board.md) for details.
 
@@ -33,7 +27,7 @@ See the [architecture document](./docs/architecture.md) and the [Xboard / NewV2b
 - **Xboard / NewV2board**: integrate Xboard and NewV2board through the `NewV2board` adapter.
 - **Machine Mode**: `MachineConfig` authenticates with `MachineID` + `Token`; one instance discovers the nodes bound to this machine and starts and stops them dynamically.
 - **Automatic node sync**: polling and WebSocket triggers merge into one sync path, configuration changes take effect only after a successful runtime apply, and a dropped WebSocket reconnects on its own.
-- **Keeps the last working state**: when a new configuration fails validation or startup, the previously working configuration keeps running.
+- **Keeps the last working state**: during hot reload, a configuration that fails validation or apply does not replace the configuration currently running.
 - **Static `Nodes` mode**: nodes live in the configuration file instead of panel discovery; use it as an alternative to Machine Mode.
 
 ### Protocols & Transports

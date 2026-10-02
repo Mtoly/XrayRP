@@ -14,15 +14,9 @@ Phiên bản hiện tại: `0.9.4` (xem [CHANGELOG.md](./CHANGELOG.md))
 
 ## Vì sao chọn XrayRP
 
-Panel lo phần quản lý, Xray Core lo phần vận hành, còn XrayRP kết nối hai phần đó:
+Nếu bạn chạy node trên máy chủ của mình và không muốn tự duy trì cấu hình cùng tiến trình của từng node, XrayRP sẽ áp dụng cấu hình trong panel lên máy node và báo cáo trạng thái vận hành cùng thông tin lưu lượng về panel. Cấu hình node và người dùng hằng ngày được quản lý trong panel, giúp giảm công việc bảo trì node thủ công. Lưu lượng bên dưới do Xray Core và runtime tương ứng của từng giao thức xử lý.
 
-- **Panel lo phần quản lý**: node, người dùng, định tuyến và quy tắc kiểm toán đều được duy trì trong panel, bạn không phải sửa tệp cấu hình bằng tay.
-- **Xray Core lo phần vận hành**: giao thức và truyền tải thực tế do Xray-core đảm nhiệm.
-- **XrayRP kết nối hai phần đó**: lấy cấu hình từ panel, khởi động, cập nhật và dừng node trên máy này, rồi báo cáo trạng thái, lưu lượng và dữ liệu trực tuyến về panel.
-
-**Dành cho ai**: những người tự duy trì node trên máy chủ của mình và quản lý người dùng qua panel. Một instance có thể phục vụ nhiều panel và nhiều node.
-
-**Trước khi bắt đầu**: bạn cần một panel đang hoạt động với node đã được cấu hình, cùng quyền root trên máy đích.
+Trước khi bắt đầu, bạn cần một panel đã cấu hình node và quyền root trên máy node.
 
 Xem [tài liệu kiến trúc](./docs/architecture.md) và [tài liệu tương thích Xboard / NewV2board](./docs/xboard-newv2board.md) để biết chi tiết.
 
@@ -33,7 +27,7 @@ Xem [tài liệu kiến trúc](./docs/architecture.md) và [tài liệu tương 
 - **Xboard / NewV2board**: tích hợp Xboard và NewV2board qua adapter `NewV2board`.
 - **Chế độ máy**: `MachineConfig` xác thực bằng `MachineID` + `Token`; một instance tự khám phá các node gắn với máy này và khởi động, dừng chúng một cách linh hoạt.
 - **Đồng bộ node tự động**: polling và WebSocket gộp vào cùng một đường đồng bộ, thay đổi cấu hình chỉ có hiệu lực sau khi apply runtime thành công, và WebSocket bị ngắt sẽ tự kết nối lại.
-- **Giữ trạng thái chạy tốt nhất**: khi cấu hình mới thất bại ở bước xác thực hoặc khởi động, cấu hình đang chạy tốt trước đó vẫn tiếp tục chạy.
+- **Giữ trạng thái chạy tốt nhất**: khi tải lại nóng, cấu hình thất bại ở bước xác thực hoặc apply sẽ không thay thế cấu hình đang chạy.
 - **Chế độ `Nodes` tĩnh**: node nằm trong tệp cấu hình thay vì được khám phá từ panel; dùng thay thế cho chế độ máy.
 
 ### Giao thức và truyền tải

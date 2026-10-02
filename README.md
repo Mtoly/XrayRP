@@ -12,31 +12,25 @@
 
 [English](./README-en.md) | [فارسی](./README_Fa.md) | [Tiếng Việt](./README-vi.md)
 
-## Why XrayRP
+## 为什么用 XrayRP
 
-面板负责管理，Xray Core 负责运行，XrayRP 负责连接两者：
+如果你在自己的服务器上运行节点，又不想逐个手工维护配置和进程，XrayRP 会把面板里的配置应用到节点机，并把运行状态和流量信息回报给面板。日常的节点和用户配置由面板管理，减少手工维护节点配置的工作。底层流量由 Xray Core 和对应协议运行时处理。
 
-- **面板负责管理**：节点、用户、路由与审计规则都在面板里维护，不需要手工修改配置文件。
-- **Xray Core 负责运行**：实际的协议与传输由 Xray-core 承载。
-- **XrayRP 负责连接**：拉取面板配置，在本机启动、更新、停止节点，并把状态、流量与在线数据回报给面板。
-
-**适合谁**：在自己服务器上维护节点、用面板管理用户的人。单实例可以对接多面板、多节点。
-
-**开始之前**：需要一个可用的面板和已配置的节点，以及目标机器的 root 权限。
+开始之前，你需要一个已配置好节点的面板，以及节点机的 root 权限。
 
 详细说明见 [架构文档](./docs/architecture.md) 与 [Xboard / NewV2board 兼容性文档](./docs/xboard-newv2board.md)。
 
-## Features
+## 功能
 
-### Panels & Node Management
+### 面板与节点管理
 
 - **Xboard / NewV2board**：通过 `NewV2board` 适配器对接 Xboard 与 NewV2board。
 - **Machine Mode**：`MachineConfig` 使用 `MachineID` + `Token` 对接，单实例自动发现本机器绑定的节点并动态启停。
 - **节点自动同步**：轮询与 WebSocket 触发合并到同一条同步路径，配置变更在运行时应用成功后才会生效；WebSocket 断开后自动重连。
-- **保持上次可用状态**：新配置校验或启动失败时，继续运行上一次可用的配置。
+- **保持上次可用状态**：配置热重载时，新配置校验或应用失败不会替换当前正在运行的配置。
 - **静态 `Nodes` 模式**：节点写在配置文件里，不依赖面板发现；与 Machine Mode 二选一。
 
-### Protocols & Transports
+### 协议与传输
 
 - VLESS（含 REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption）
 - VMess
@@ -48,12 +42,12 @@
 
 节点类型清单与其他传输能力（含 Socks、HTTP）见 [config.yml.example](./release/config/config.yml.example) 中的 `NodeType` 注释。
 
-### Advanced VLESS
+### VLESS Encryption 与 Vision
 
 - **VLESS Encryption**：把 Xboard 下发的服务端密钥交给 Xray-core；加密节点需要关闭 inbound fallback。
 - **XTLS Vision**：支持面板下发的 `xtls-rprx-vision`。传输与加密组合的具体行为见[兼容性文档](./docs/xboard-newv2board.md)。
 
-### Operations
+### 运维
 
 - 用户流量统计与节点状态上报。
 - 在线 IP 限制、在线用户限制、节点端口限速、用户限速；可选 Redis 全局设备缓存用于多实例协同。
@@ -62,7 +56,7 @@
 - 可观测性：可选的本地 `/livez`、`/readyz`、`/metrics`（`Observability` 配置，默认关闭且仅允许回环或私有地址），输出 `xrayrp_runtime_state` 等指标。
 - 热重载：配置变更后重新加载候选配置，在校验与 apply 成功后才替换运行中的实例。
 
-### Release & Security
+### 发布与安全
 
 - CodeQL 静态分析（`codeql-analysis.yml`，push / PR / 每周计划）。
 - govulncheck 可达漏洞扫描，仅允许已被记录并有版本下限约束的例外（`test.yml`）。
@@ -71,7 +65,7 @@
 - SPDX SBOM、发布清单与 provenance attestation 由发布工作流生成，并作为 workflow evidence 保留。
 - Docker PR 验证：改动 `Dockerfile` 或 docker workflow 的 PR 会构建镜像并执行 `version` 冒烟测试（`docker-test.yml`）。
 
-## Architecture
+## 架构
 
 ```mermaid
 flowchart TD
@@ -87,7 +81,7 @@ flowchart TD
 
 代码位置与不变量见 [架构文档](./docs/architecture.md)。
 
-## Installation
+## 安装
 
 ### 一键安装脚本
 
@@ -127,7 +121,7 @@ docker run -d --name xrayrp --restart unless-stopped \
 
 容器入口为 `XrayR --config /etc/XrayR/config.yml`，容器内监听地址由 `config.yml` 的 `ListenIP` 决定；`Observability.Listen` 默认绑定 `127.0.0.1`，需要从容器外访问时请改为容器内可访问的私有地址并映射端口。
 
-## Configuration
+## 配置
 
 配置参考 [release/config/config.yml.example](./release/config/config.yml.example)，该文件带逐项注释，覆盖 `Log`、`DnsConfigPath`、`RouteConfigPath`、`ConnectionConfig`、`Observability`、`MachineConfig` 与 `Nodes`。
 
@@ -135,7 +129,7 @@ docker run -d --name xrayrp --restart unless-stopped \
 - `MachineConfig` 与静态 `Nodes` 二选一，不能同时启用。
 - 细节说明见 [Xboard / NewV2board 兼容性文档](./docs/xboard-newv2board.md)。
 
-## Development
+## 开发
 
 要求 Go 版本以 [go.mod](./go.mod) 中的 `go` 指令为准（当前为 `1.27`）。
 
