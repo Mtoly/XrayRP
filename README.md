@@ -1,9 +1,10 @@
 # XrayRP
 
-一个 **panel-managed Xray runtime framework**：面板下发节点与用户配置，XrayRP 在本地收敛为运行中的 Xray 实例，并把运行观测回传给面板。
+用面板管理你自己的 Xray 节点。面板负责管理节点与用户，Xray Core 负责运行，XrayRP 负责把两者连接起来：让面板下发的配置在服务器上真正跑起来，并把状态、流量和在线数据回报给面板。
 
 当前版本：`0.9.4`（见 [CHANGELOG.md](./CHANGELOG.md)）
 
+[![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
 [![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
@@ -11,46 +12,53 @@
 
 [English](./README-en.md) | [فارسی](./README_Fa.md) | [Tiếng Việt](./README-vi.md)
 
-- 面板操作者：Xboard / NewV2board、sspanel-uim、v2board 等面板下发配置，XrayRP 负责节点生命周期与上报。
-- 自建节点维护者：单实例对接多面板多节点，静态 `Nodes` 模式或机器管理模式按需选择。
-- 贡献者与审阅者：发布产物、CI 门禁与运行观测都可在本文件与文档中定位。
+## Why XrayRP
+
+面板负责管理，Xray Core 负责运行，XrayRP 负责连接两者：
+
+- **面板负责管理**：节点、用户、路由与审计规则都在面板里维护，不需要手工修改配置文件。
+- **Xray Core 负责运行**：实际的协议与传输由 Xray-core 承载。
+- **XrayRP 负责连接**：拉取面板配置，在本机启动、更新、停止节点，并把状态、流量与在线数据回报给面板。
+
+**适合谁**：在自己服务器上维护节点、用面板管理用户的人。单实例可以对接多面板、多节点。
+
+**开始之前**：需要一个可用的面板和已配置的节点，以及目标机器的 root 权限。
 
 详细说明见 [架构文档](./docs/architecture.md) 与 [Xboard / NewV2board 兼容性文档](./docs/xboard-newv2board.md)。
 
 ## Features
 
-### Panel & Control Plane
+### Panels & Node Management
 
-- Xboard / NewV2board：通过 `NewV2board` 适配器对接 Xboard 与 NewV2board。
-- Machine Mode：`MachineConfig` 使用 `MachineID` + `Token` 对接，单实例自动发现本机器绑定的节点并动态启停。
-- Node discovery：机器模式下按面板下发的 `base_config.pull_interval` 周期性发现节点（最小 30 秒，未下发时使用 `DiscoveryInterval`）。
-- WebSocket sync：机器模式共用一条 WebSocket 连接接收 `sync.nodes` 并按 `node_id` 分发；断开后按 `ReconnectBackoff` 重连，`ResyncOnReconnect` 打开时触发全量重同步。普通 Xray 节点使用 `kind="controller"` 状态，AnyTLS / TUIC / Hysteria2 使用各自的 `kind` 且 `websocket="disabled"`，它们接收节点级触发但不独占连接。
-- 收敛语义：轮询、WebSocket、重连与手动触发收敛到同一条同步与 apply 路径；候选配置只有在运行时 apply 成功后才成为 Applied 值。
+- **Xboard / NewV2board**：通过 `NewV2board` 适配器对接 Xboard 与 NewV2board。
+- **Machine Mode**：`MachineConfig` 使用 `MachineID` + `Token` 对接，单实例自动发现本机器绑定的节点并动态启停。
+- **节点自动同步**：轮询与 WebSocket 触发合并到同一条同步路径，配置变更在运行时应用成功后才会生效；WebSocket 断开后自动重连。
+- **保持上次可用状态**：新配置校验或启动失败时，继续运行上一次可用的配置。
+- **静态 `Nodes` 模式**：节点写在配置文件里，不依赖面板发现；与 Machine Mode 二选一。
 
 ### Protocols & Transports
 
-- VLESS（含 REALITY / XHTTP / WS / gRPC / HTTPUpgrade）
+- VLESS（含 REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption）
 - VMess
 - Trojan
 - Shadowsocks（含 Shadowsocks-Plugin）
-- AnyTLS（专用运行时，使用面板下发的 `padding_scheme`）
-- TUIC（专用运行时，需要本地证书配置）
-- Hysteria2（专用运行时，需要本地证书配置）
+- AnyTLS（使用面板下发的 `padding_scheme`）
+- TUIC（需要本地证书配置）
+- Hysteria2（需要本地证书配置）
 
 节点类型清单与其他传输能力（含 Socks、HTTP）见 [config.yml.example](./release/config/config.yml.example) 中的 `NodeType` 注释。
 
 ### Advanced VLESS
 
-- VLESS Encryption：Xboard 通过 `/api/v2/server/config` 的顶层 `decryption` 字段下发服务端密钥，XrayRP 原样传给 Xray-core inbound；缺失、`null` 或空值保持 `none`。启用加密解密时 Xray-core 不允许叠加 inbound fallback，需关闭 fallback。
-- XTLS Vision：面板下发 `xtls-rprx-vision` 时，未加密 VLESS 仅在直连 TCP TLS / REALITY 下生效；其他传输会被清除。
-- XHTTP / WS / gRPC：当服务端 VLESS Encryption 生效时（`decryption` 非空且不为 `none`），XrayRP 不再按传输清除 `xtls-rprx-vision`，而是保留面板下发的值。XrayRP 不会自行添加该 flow。
+- **VLESS Encryption**：把 Xboard 下发的服务端密钥交给 Xray-core；加密节点需要关闭 inbound fallback。
+- **XTLS Vision**：支持面板下发的 `xtls-rprx-vision`。传输与加密组合的具体行为见[兼容性文档](./docs/xboard-newv2board.md)。
 
 ### Operations
 
-- 用户流量统计与节点状态上报，report 端点回退链见兼容性文档。
+- 用户流量统计与节点状态上报。
 - 在线 IP 限制、在线用户限制、节点端口限速、用户限速；可选 Redis 全局设备缓存用于多实例协同。
-- 证书自动申请与续签（`common/mylego`，支持 ACME DNS/HTTP/TLS 等方式与自定义文件）。
-- 自定义 DNS、路由与审计规则（`DnsConfigPath`、`RouteConfigPath`、`RuleListPath`）。
+- 证书自动申请与续签，支持 ACME DNS/HTTP/TLS 等方式与自定义文件。
+- 自定义 DNS、路由与审计规则。
 - 可观测性：可选的本地 `/livez`、`/readyz`、`/metrics`（`Observability` 配置，默认关闭且仅允许回环或私有地址），输出 `xrayrp_runtime_state` 等指标。
 - 热重载：配置变更后重新加载候选配置，在校验与 apply 成功后才替换运行中的实例。
 

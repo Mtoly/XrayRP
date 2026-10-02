@@ -1,9 +1,10 @@
 # XrayRP
 
-A **panel-managed Xray runtime framework**: the panel delivers node and user configuration, XrayRP converges it into running Xray instances locally, and reports runtime observations back to the panel.
+Manage your own Xray nodes from a panel. The panel handles management, Xray Core handles the running, and XrayRP connects the two: it turns the configuration your panel sends into nodes that actually run on your server, then reports status, traffic, and online data back to the panel.
 
 Current release: `0.9.4` (see [CHANGELOG.md](./CHANGELOG.md))
 
+[![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
 [![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
@@ -11,46 +12,53 @@ Current release: `0.9.4` (see [CHANGELOG.md](./CHANGELOG.md))
 
 [中文](./README.md) | [فارسی](./README_Fa.md) | [Tiếng Việt](./README-vi.md)
 
-- Panel operators: Xboard / NewV2board, sspanel-uim, v2board and similar panels deliver configuration; XrayRP owns node lifecycle and reporting.
-- Self-hosted node maintainers: one instance serves multiple panels and nodes; choose static `Nodes` mode or machine mode as needed.
-- Contributors and reviewers: release artifacts, CI gates and runtime observability are all reachable from this file and the linked documents.
+## Why XrayRP
+
+The panel handles management, Xray Core handles the running, and XrayRP connects the two:
+
+- **The panel handles management**: nodes, users, routing, and audit rules are all maintained in the panel, so you do not edit configuration files by hand.
+- **Xray Core handles the running**: the actual protocols and transports are carried by Xray-core.
+- **XrayRP connects the two**: it pulls panel configuration, starts, updates, and stops nodes on this machine, and reports status, traffic, and online data back to the panel.
+
+**Who it is for**: people who maintain nodes on their own servers and manage users through a panel. One instance can serve multiple panels and multiple nodes.
+
+**Before you start**: you need a working panel with nodes configured, and root access on the target machine.
 
 See the [architecture document](./docs/architecture.md) and the [Xboard / NewV2board compatibility document](./docs/xboard-newv2board.md) for details.
 
 ## Features
 
-### Panel & Control Plane
+### Panels & Node Management
 
-- Xboard / NewV2board: integrate Xboard and NewV2board through the `NewV2board` adapter.
-- Machine Mode: `MachineConfig` authenticates with `MachineID` + `Token`; one instance discovers the nodes bound to this machine and starts and stops them dynamically.
-- Node discovery: in machine mode, nodes are discovered periodically from the panel-provided `base_config.pull_interval` (30-second minimum; `DiscoveryInterval` is used when it is absent).
-- WebSocket sync: machine mode shares one WebSocket connection for `sync.nodes` and routes messages by `node_id`; after a disconnect it reconnects using `ReconnectBackoff`, and `ResyncOnReconnect` triggers a full resync. Ordinary Xray nodes report as `kind="controller"`, while AnyTLS / TUIC / Hysteria2 use their own `kind` with `websocket="disabled"`, because they receive node-scoped triggers without owning the connection.
-- Convergence semantics: polling, WebSocket, reconnect and manual triggers converge on the same sync and apply path; a candidate configuration becomes the Applied value only after the runtime apply succeeds.
+- **Xboard / NewV2board**: integrate Xboard and NewV2board through the `NewV2board` adapter.
+- **Machine Mode**: `MachineConfig` authenticates with `MachineID` + `Token`; one instance discovers the nodes bound to this machine and starts and stops them dynamically.
+- **Automatic node sync**: polling and WebSocket triggers merge into one sync path, configuration changes take effect only after a successful runtime apply, and a dropped WebSocket reconnects on its own.
+- **Keeps the last working state**: when a new configuration fails validation or startup, the previously working configuration keeps running.
+- **Static `Nodes` mode**: nodes live in the configuration file instead of panel discovery; use it as an alternative to Machine Mode.
 
 ### Protocols & Transports
 
-- VLESS (including REALITY / XHTTP / WS / gRPC / HTTPUpgrade)
+- VLESS (including REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption)
 - VMess
 - Trojan
 - Shadowsocks (including Shadowsocks-Plugin)
-- AnyTLS (specialized runtime, uses the panel-provided `padding_scheme`)
-- TUIC (specialized runtime, requires local certificate configuration)
-- Hysteria2 (specialized runtime, requires local certificate configuration)
+- AnyTLS (uses the panel-provided `padding_scheme`)
+- TUIC (requires local certificate configuration)
+- Hysteria2 (requires local certificate configuration)
 
 The full node type list and the other transports (including Socks and HTTP) are documented in the `NodeType` comment of [config.yml.example](./release/config/config.yml.example).
 
 ### Advanced VLESS
 
-- VLESS Encryption: Xboard delivers the server-side key in the top-level `decryption` field of `/api/v2/server/config`, and XrayRP passes it through to the Xray-core inbound unchanged; a missing, `null` or blank value stays `none`. While encrypted decryption is enabled, Xray-core does not allow inbound fallbacks, so they must be disabled.
-- XTLS Vision: when the panel sends `xtls-rprx-vision`, unencrypted VLESS only honors it for direct TCP TLS / REALITY, and it is cleared for other transports.
-- XHTTP / WS / gRPC: when server-side VLESS Encryption is in effect (`decryption` non-empty and not `none`), XrayRP no longer clears `xtls-rprx-vision` per transport and keeps the panel-provided value. XrayRP never adds the flow by itself.
+- **VLESS Encryption**: passes the server-side key delivered by Xboard to Xray-core; encrypted nodes must disable inbound fallbacks.
+- **XTLS Vision**: supports the panel-provided `xtls-rprx-vision`. See the [compatibility document](./docs/xboard-newv2board.md) for how transports and encryption interact.
 
 ### Operations
 
-- User traffic statistics and node status reporting; the report endpoint fallback chain is documented in the compatibility guide.
+- User traffic statistics and node status reporting.
 - Online IP limits, online user limits, node port speed limits and per-user speed limits; an optional Redis global device cache coordinates multiple instances.
-- Automatic certificate issuance and renewal (`common/mylego`, supporting ACME DNS/HTTP/TLS and custom files).
-- Custom DNS, routing and audit rules (`DnsConfigPath`, `RouteConfigPath`, `RuleListPath`).
+- Automatic certificate issuance and renewal, supporting ACME DNS/HTTP/TLS and custom files.
+- Custom DNS, routing and audit rules.
 - Observability: optional local `/livez`, `/readyz` and `/metrics` (the `Observability` configuration, disabled by default and restricted to loopback or private addresses) exposing metrics such as `xrayrp_runtime_state`.
 - Hot reload: configuration changes reload a candidate configuration and replace the running instance only after validation and apply succeed.
 
