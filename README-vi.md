@@ -1,9 +1,10 @@
 # XrayRP
 
-Một **framework runtime Xray được quản lý bởi panel**: panel gửi cấu hình node và người dùng, XrayRP hội tụ cấu hình đó thành các instance Xray đang chạy cục bộ và báo cáo quan sát runtime trở lại panel.
+Quản lý các node Xray của bạn từ panel. Panel lo phần quản lý, Xray Core lo phần vận hành, còn XrayRP kết nối hai phần đó: biến cấu hình panel gửi xuống thành các node chạy thật trên máy chủ của bạn, rồi báo cáo trạng thái, lưu lượng và dữ liệu trực tuyến về panel.
 
 Phiên bản hiện tại: `0.9.4` (xem [CHANGELOG.md](./CHANGELOG.md))
 
+[![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
 [![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
 [![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
@@ -11,46 +12,47 @@ Phiên bản hiện tại: `0.9.4` (xem [CHANGELOG.md](./CHANGELOG.md))
 
 [中文](./README.md) | [English](./README-en.md) | [فارسی](./README_Fa.md)
 
-- Người vận hành panel: các panel như Xboard / NewV2board, sspanel-uim, v2board gửi cấu hình; XrayRP chịu trách nhiệm về vòng đời node và báo cáo.
-- Người duy trì node tự dựng: một instance phục vụ nhiều panel và nhiều node; chọn chế độ `Nodes` tĩnh hoặc chế độ máy tùy nhu cầu.
-- Người đóng góp và người đánh giá: các thành phần phát hành, cổng CI và khả năng quan sát runtime đều truy cập được từ tệp này và các tài liệu liên kết.
+## Vì sao chọn XrayRP
+
+Nếu bạn chạy node trên máy chủ của mình và không muốn tự duy trì cấu hình cùng tiến trình của từng node, XrayRP sẽ áp dụng cấu hình trong panel lên máy node và báo cáo trạng thái vận hành cùng thông tin lưu lượng về panel. Cấu hình node và người dùng hằng ngày được quản lý trong panel, giúp giảm công việc bảo trì node thủ công. Lưu lượng bên dưới do Xray Core và runtime tương ứng của từng giao thức xử lý.
+
+Trước khi bắt đầu, bạn cần một panel đã cấu hình node và quyền root trên máy node.
 
 Xem [tài liệu kiến trúc](./docs/architecture.md) và [tài liệu tương thích Xboard / NewV2board](./docs/xboard-newv2board.md) để biết chi tiết.
 
 ## Tính năng
 
-### Panel và mặt phẳng điều khiển
+### Panel và quản lý node
 
-- Xboard / NewV2board: tích hợp Xboard và NewV2board qua adapter `NewV2board`.
-- Chế độ máy: `MachineConfig` xác thực bằng `MachineID` + `Token`; một instance tự khám phá các node gắn với máy này và khởi động, dừng chúng một cách linh hoạt.
-- Khám phá node: ở chế độ máy, node được khám phá định kỳ theo `base_config.pull_interval` do panel gửi xuống (tối thiểu 30 giây; dùng `DiscoveryInterval` khi không có giá trị này).
-- Đồng bộ WebSocket: chế độ máy dùng chung một kết nối WebSocket cho `sync.nodes` và định tuyến thông điệp theo `node_id`; sau khi mất kết nối, nó kết nối lại theo `ReconnectBackoff`, và `ResyncOnReconnect` kích hoạt đồng bộ lại toàn bộ. Các node Xray thông thường báo cáo với `kind="controller"`, còn AnyTLS / TUIC / Hysteria2 dùng `kind` riêng với `websocket="disabled"`, vì chúng nhận kích hoạt theo phạm vi node mà không sở hữu kết nối.
-- Ngữ nghĩa hội tụ: polling, WebSocket, kết nối lại và kích hoạt thủ công đều hội tụ vào cùng một đường đồng bộ và apply; cấu hình ứng viên chỉ trở thành giá trị Applied sau khi apply runtime thành công.
+- **Xboard / NewV2board**: tích hợp Xboard và NewV2board qua adapter `NewV2board`.
+- **Chế độ máy**: `MachineConfig` xác thực bằng `MachineID` + `Token`; một instance tự khám phá các node gắn với máy này và khởi động, dừng chúng một cách linh hoạt.
+- **Đồng bộ node tự động**: polling và WebSocket gộp vào cùng một đường đồng bộ, thay đổi cấu hình chỉ có hiệu lực sau khi apply runtime thành công, và WebSocket bị ngắt sẽ tự kết nối lại.
+- **Giữ trạng thái chạy tốt nhất**: khi tải lại nóng, cấu hình thất bại ở bước xác thực hoặc apply sẽ không thay thế cấu hình đang chạy.
+- **Chế độ `Nodes` tĩnh**: node nằm trong tệp cấu hình thay vì được khám phá từ panel; dùng thay thế cho chế độ máy.
 
 ### Giao thức và truyền tải
 
-- VLESS (bao gồm REALITY / XHTTP / WS / gRPC / HTTPUpgrade)
+- VLESS (bao gồm REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption)
 - VMess
 - Trojan
 - Shadowsocks (bao gồm Shadowsocks-Plugin)
-- AnyTLS (runtime chuyên biệt, dùng `padding_scheme` do panel gửi xuống)
-- TUIC (runtime chuyên biệt, cần cấu hình chứng chỉ cục bộ)
-- Hysteria2 (runtime chuyên biệt, cần cấu hình chứng chỉ cục bộ)
+- AnyTLS (dùng `padding_scheme` do panel gửi xuống)
+- TUIC (cần cấu hình chứng chỉ cục bộ)
+- Hysteria2 (cần cấu hình chứng chỉ cục bộ)
 
 Danh sách đầy đủ các loại node và các truyền tải khác (bao gồm Socks và HTTP) nằm trong chú thích `NodeType` của [config.yml.example](./release/config/config.yml.example).
 
 ### VLESS nâng cao
 
-- Mã hóa VLESS: Xboard gửi khóa phía máy chủ trong trường cấp cao nhất `decryption` của `/api/v2/server/config`, và XrayRP chuyển nguyên trạng cho inbound của Xray-core; giá trị thiếu, `null` hoặc rỗng vẫn giữ là `none`. Khi bật giải mã mã hóa, Xray-core không cho phép fallback inbound, nên cần tắt fallback.
-- XTLS Vision: khi panel gửi `xtls-rprx-vision`, VLESS chưa mã hóa chỉ áp dụng nó cho TCP TLS / REALITY trực tiếp, và nó bị xóa với các truyền tải khác.
-- XHTTP / WS / gRPC: khi mã hóa VLESS phía máy chủ đang hiệu lực (`decryption` khác rỗng và không phải `none`), XrayRP không còn xóa `xtls-rprx-vision` theo truyền tải mà giữ giá trị do panel gửi. XrayRP không tự thêm flow này.
+- **Mã hóa VLESS**: chuyển khóa phía máy chủ do Xboard gửi xuống cho Xray-core; node được mã hóa cần tắt fallback inbound.
+- **XTLS Vision**: hỗ trợ `xtls-rprx-vision` do panel gửi xuống. Xem [tài liệu tương thích](./docs/xboard-newv2board.md) để biết cách truyền tải và mã hóa tương tác với nhau.
 
 ### Vận hành
 
-- Thống kê lưu lượng người dùng và báo cáo trạng thái node; chuỗi dự phòng endpoint báo cáo được ghi trong tài liệu tương thích.
+- Thống kê lưu lượng người dùng và báo cáo trạng thái node.
 - Giới hạn IP trực tuyến, giới hạn người dùng trực tuyến, giới hạn tốc độ theo cổng node và theo từng người dùng; bộ đệm thiết bị toàn cục bằng Redis (tùy chọn) phối hợp nhiều instance.
-- Cấp và gia hạn chứng chỉ tự động (`common/mylego`, hỗ trợ ACME DNS/HTTP/TLS và tệp tùy chỉnh).
-- DNS, định tuyến và quy tắc kiểm toán tùy chỉnh (`DnsConfigPath`, `RouteConfigPath`, `RuleListPath`).
+- Cấp và gia hạn chứng chỉ tự động, hỗ trợ ACME DNS/HTTP/TLS và tệp tùy chỉnh.
+- DNS, định tuyến và quy tắc kiểm toán tùy chỉnh.
 - Khả năng quan sát: các endpoint cục bộ tùy chọn `/livez`, `/readyz` và `/metrics` (cấu hình `Observability`, mặc định tắt và chỉ cho phép địa chỉ loopback hoặc riêng tư) cung cấp các chỉ số như `xrayrp_runtime_state`.
 - Tải lại nóng: thay đổi cấu hình sẽ tải cấu hình ứng viên và chỉ thay thế instance đang chạy sau khi xác thực và apply thành công.
 
