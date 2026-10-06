@@ -2075,8 +2075,8 @@ github.com/xdg-go/stringprep v1.0.4/go.mod h1:mPGuuIYwz7CmR2bT9j4GbQqutWS1zV24gi
 github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2/go.mod h1:UETIi67q53MR2AWcXfiuqkDkRtnGDLqkBTpCHuJHxtU=
 github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0 h1:rb+fKQFhz+5I2PPuQsNYxI5mUU840XWYtRF0ZBjvkws=
 github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0/go.mod h1:DsJblcWDGt76+FVqBVwbwRhxyyNJsGV48gJLch0OOWI=
-github.com/xtls/xray-core v1.260327.1-0.20260930074004-b26a91de4f32 h1:Bxo6+07IvdWlqxugsn2/sQrFbR7hjrxRRDMjbOInRho=
-github.com/xtls/xray-core v1.260327.1-0.20260930074004-b26a91de4f32/go.mod h1:FAjlDAzHXXyki7R1BxruCHFx19B3i8TvQGEy+wsqZWU=
+github.com/xtls/xray-core v1.260327.1-0.20261005012612-9d9a7a1c00d1 h1:+LAGc4jKvGObImGjnGrZNrDkUHXtsM4DlvrW6w9yHNM=
+github.com/xtls/xray-core v1.260327.1-0.20261005012612-9d9a7a1c00d1/go.mod h1:FAjlDAzHXXyki7R1BxruCHFx19B3i8TvQGEy+wsqZWU=
 github.com/yandex-cloud/go-genproto v0.73.0 h1:skB6cTUqgjFULeNWVfwVG9XjnxfgevEIn9PAa7aT5bQ=
 github.com/yandex-cloud/go-genproto v0.73.0/go.mod h1:0LDD/IZLIUIV4iPH+YcF+jysO3jkSvADFGm4dCAuwQo=
 github.com/yandex-cloud/go-sdk/services/dns v0.0.54 h1:I6Y/cTuGgXtfXarHLuHFcIQ4OQcZ0d0tB9jARBEeCjs=
