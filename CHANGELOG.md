@@ -2,7 +2,7 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
-## Unreleased
+## 0.9.5 - 2026-10-07
 
 ### Changed
 
