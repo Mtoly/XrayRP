@@ -210,4 +210,4 @@ See [Xboard / NewV2board Compatibility](./docs/xboard-newv2board.md) for the cur
 
 An older `0.9.8` tag/release used a version number outside the current release sequence. Its GitHub Release and active remote and primary local tag references were intentionally retired in October 2026, while the underlying commits and Git history remain preserved.
 
-The maintained release sequence continues from `0.9.4` toward the planned `0.9.5` release.
+The maintained release sequence continues from `0.9.4` to `0.9.5`.
