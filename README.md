@@ -2,7 +2,7 @@
 
 用面板管理你自己的 Xray 节点。面板负责管理节点与用户，Xray Core 负责运行，XrayRP 负责把两者连接起来：让面板下发的配置在服务器上真正跑起来，并把状态、流量和在线数据回报给面板。
 
-当前版本：`0.9.4`（见 [CHANGELOG.md](./CHANGELOG.md)）
+当前版本：`0.9.5`（见 [CHANGELOG.md](./CHANGELOG.md)）
 
 [![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
