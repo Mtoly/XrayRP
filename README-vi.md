@@ -2,7 +2,7 @@
 
 Quản lý các node Xray của bạn từ panel. Panel lo phần quản lý, Xray Core lo phần vận hành, còn XrayRP kết nối hai phần đó: biến cấu hình panel gửi xuống thành các node chạy thật trên máy chủ của bạn, rồi báo cáo trạng thái, lưu lượng và dữ liệu trực tuyến về panel.
 
-Phiên bản hiện tại: `0.9.4` (xem [CHANGELOG.md](./CHANGELOG.md))
+Phiên bản hiện tại: `0.9.5` (xem [CHANGELOG.md](./CHANGELOG.md))
 
 [![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)

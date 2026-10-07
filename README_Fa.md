@@ -2,7 +2,7 @@
 
 گره‌های Xray خود را از طریق پنل مدیریت کنید. پنل مدیریت را انجام می‌دهد، Xray Core اجرا را انجام می‌دهد و XrayRP این دو را به هم متصل می‌کند: پیکربندی ارسالی پنل را روی سرور شما به گره‌های در حال اجرا تبدیل می‌کند و وضعیت، ترافیک و داده‌های آنلاین را به پنل گزارش می‌دهد.
 
-نسخه فعلی: `0.9.4` (به [CHANGELOG.md](./CHANGELOG.md) مراجعه کنید)
+نسخه فعلی: `0.9.5` (به [CHANGELOG.md](./CHANGELOG.md) مراجعه کنید)
 
 [![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)

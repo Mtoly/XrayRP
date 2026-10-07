@@ -2,7 +2,7 @@
 
 Manage your own Xray nodes from a panel. The panel handles management, Xray Core handles the running, and XrayRP connects the two: it turns the configuration your panel sends into nodes that actually run on your server, then reports status, traffic, and online data back to the panel.
 
-Current release: `0.9.4` (see [CHANGELOG.md](./CHANGELOG.md))
+Current release: `0.9.5` (see [CHANGELOG.md](./CHANGELOG.md))
 
 [![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
 [![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
