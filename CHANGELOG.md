@@ -4,6 +4,22 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Changed
+
+- Advanced Xray-core to `v1.260327.1-0.20261005035322-5121c28b855c` and adapted XrayRP to the upstream error API changes.
+- Updated sing-box from `v1.14.0` to `v1.14.2` with its dependency graph.
+- Updated Hysteria core and extras from `v2.12.2` to `v2.12.3`.
+
+### Security
+
+- Pinned gRPC to `v1.85.0-dev.0.20260825072537-93e31b48545e` to retain the fix for `GO-2026-6443` across the Xray-core dependency update.
+
+### Fixed
+
+- Restricted Linux Hysteria2 port-hopping redirects to local destinations, preventing forwarded UDP traffic with overlapping destination ports from being redirected to the local listener.
+- Preserved custom gRPC outbound reconnection after remote restarts by including the upstream reconnect fix in the Xray-core update.
+- Corrected QUIC sniffing of fragmented Initial ClientHello packets with zero-filled datagram tails, allowing SNI recovery instead of premature `not initial packet` failures.
+
 ## 0.9.4 - 2026-10-01
 
 ### Added
@@ -190,6 +206,8 @@ Covers tags `0.9-alpha` through `0.9-alpha-10`.
 
 See [Xboard / NewV2board Compatibility](./docs/xboard-newv2board.md) for the current compatibility contract.
 
-## 0.9.8 - 2026-02-11
+## Historical numbering note
 
-This tag predates the current changelog structure. Consult the Git history for detailed changes before the `0.9-alpha` series.
+An older `0.9.8` tag/release used a version number outside the current release sequence. Its GitHub Release and active remote and primary local tag references were intentionally retired in October 2026, while the underlying commits and Git history remain preserved.
+
+The maintained release sequence continues from `0.9.4` toward the planned `0.9.5` release.
