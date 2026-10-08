@@ -1,98 +1,54 @@
-# XrayRP
+<h1 align="center">XrayRP</h1>
 
-用面板管理你自己的 Xray 节点。面板负责管理节点与用户，Xray Core 负责运行，XrayRP 负责把两者连接起来：让面板下发的配置在服务器上真正跑起来，并把状态、流量和在线数据回报给面板。
+<p align="center">面板管理的代理节点运行时</p>
 
-当前版本：`0.9.5`（见 [CHANGELOG.md](./CHANGELOG.md)）
+<div align="center">
 
-[![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
-[![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
-[![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
-[![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
-[![License](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/Mtoly/XrayRP?style=flat-square)](https://github.com/Mtoly/XrayRP/releases/latest) [![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml) [![License](https://img.shields.io/badge/license-MPL--2.0-blue?style=flat-square)](./LICENSE)
 
-[English](./README-en.md) | [فارسی](./README_Fa.md) | [Tiếng Việt](./README-vi.md)
+**简体中文** · [English](./README-en.md) · [Tiếng Việt](./README-vi.md) · [فارسی](./README_Fa.md)
 
-## 为什么用 XrayRP
+[Quick Start](#quick-start) · [Documentation](#documentation) · [Releases](https://github.com/Mtoly/XrayRP/releases) · [Docker](#docker)
 
-如果你在自己的服务器上运行节点，又不想逐个手工维护配置和进程，XrayRP 会把面板里的配置应用到节点机，并把运行状态和流量信息回报给面板。日常的节点和用户配置由面板管理，减少手工维护节点配置的工作。底层流量由 Xray Core 和对应协议运行时处理。
+</div>
 
-开始之前，你需要一个已配置好节点的面板，以及节点机的 root 权限。
+## 概览
 
-详细说明见 [架构文档](./docs/architecture.md) 与 [Xboard / NewV2board 兼容性文档](./docs/xboard-newv2board.md)。
+XrayRP 在节点机上应用面板下发的节点、用户和规则配置，并回报运行状态、流量与在线数据，减少逐节点维护配置的工作。
 
-## 功能
+面板负责节点与用户管理，XrayRP 负责同步和运行时生命周期。Xray-core 承载主要代理协议与传输；AnyTLS、TUIC 使用内嵌 sing-box，Hysteria2 使用 Hysteria core/extras。
 
-### 面板与节点管理
+## 核心能力
 
-- **Xboard / NewV2board**：通过 `NewV2board` 适配器对接 Xboard 与 NewV2board。
-- **Machine Mode**：`MachineConfig` 使用 `MachineID` + `Token` 对接，单实例自动发现本机器绑定的节点并动态启停。
-- **节点自动同步**：轮询与 WebSocket 触发合并到同一条同步路径，配置变更在运行时应用成功后才会生效；WebSocket 断开后自动重连。
-- **保持上次可用状态**：配置热重载时，新配置校验或应用失败不会替换当前正在运行的配置。
-- **静态 `Nodes` 模式**：节点写在配置文件里，不依赖面板发现；与 Machine Mode 二选一。
+- **面板对接**：Xboard / NewV2board 使用 `NewV2board` 适配器；其他面板与配置名称见[配置示例](./release/config/config.yml.example)。
+- **协议支持**：VLESS、VMess、Trojan、Shadowsocks（含 Plugin）、AnyTLS、TUIC、Hysteria2；完整 `NodeType` 清单见配置示例。具体支持取决于面板、适配器和运行时版本。
+- **自动同步**：Xboard / NewV2board 支持轮询与 WebSocket 双活，配置与用户事件通过共享的 REST 快照同步路径处理；连接中断后轮询继续工作。
+- **运维与可靠性**：流量与在线统计、限速、证书申请与续签、自定义 DNS、路由和审计规则；可选 Redis 设备缓存、健康检查与 Prometheus 指标。配置热重载失败时保留上次可用状态。
 
-### 协议与传输
+Xboard 的 VLESS Encryption 使用面板下发的服务端 `decryption`，须关闭 inbound fallback。VLESS 的 REALITY、XHTTP 与 XTLS Vision 组合及字段映射见[兼容文档](./docs/xboard-newv2board.md#vless-trojan-reality-and-xhttp)。
 
-- VLESS（含 REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption）
-- VMess
-- Trojan
-- Shadowsocks（含 Shadowsocks-Plugin）
-- AnyTLS（使用面板下发的 `padding_scheme`）
-- TUIC（需要本地证书配置）
-- Hysteria2（需要本地证书配置）
+AnyTLS、TUIC、Hysteria2 需配置证书；AnyTLS 使用面板下发的 `padding_scheme`。健康检查与指标仅面向回环或私有地址。
 
-节点类型清单与其他传输能力（含 Socks、HTTP）见 [config.yml.example](./release/config/config.yml.example) 中的 `NodeType` 注释。
+<a name="quick-start"></a>
 
-### VLESS Encryption 与 Vision
+## 快速开始
 
-- **VLESS Encryption**：把 Xboard 下发的服务端密钥交给 Xray-core；加密节点需要关闭 inbound fallback。
-- **XTLS Vision**：支持面板下发的 `xtls-rprx-vision`。传输与加密组合的具体行为见[兼容性文档](./docs/xboard-newv2board.md)。
+当前脚本安装要求 Linux、root 权限和 systemd。先在面板配置节点或绑定机器；远程 `ApiHost` 必须使用 HTTPS，HTTP 仅用于回环开发地址。
 
-### 运维
-
-- 用户流量统计与节点状态上报。
-- 在线 IP 限制、在线用户限制、节点端口限速、用户限速；可选 Redis 全局设备缓存用于多实例协同。
-- 证书自动申请与续签，支持 ACME DNS/HTTP/TLS 等方式与自定义文件。
-- 自定义 DNS、路由与审计规则。
-- 可观测性：可选的本地 `/livez`、`/readyz`、`/metrics`（`Observability` 配置，默认关闭且仅允许回环或私有地址），输出 `xrayrp_runtime_state` 等指标。
-- 热重载：配置变更后重新加载候选配置，在校验与 apply 成功后才替换运行中的实例。
-
-### 发布与安全
-
-- CodeQL 静态分析（`codeql-analysis.yml`，push / PR / 每周计划）。
-- govulncheck 可达漏洞扫描，仅允许已被记录并有版本下限约束的例外（`test.yml`）。
-- Dependabot 依赖与基础镜像更新。
-- 签名发布产物：发布页提供各平台归档与 `SHA256SUMS`，并附带 `SHA256SUMS.sigstore.json` Sigstore 签名。
-- SPDX SBOM、发布清单与 provenance attestation 由发布工作流生成，并作为 workflow evidence 保留。
-- Docker PR 验证：改动 `Dockerfile` 或 docker workflow 的 PR 会构建镜像并执行 `version` 冒烟测试（`docker-test.yml`）。
-
-## 架构
-
-```mermaid
-flowchart TD
-    P[Panel<br/>Xboard / NewV2board / sspanel-uim / v2board] -->|节点与用户快照| G[XrayRP]
-    G -->|apply| C[Xray Core<br/>inbound / outbound / routing]
-    C -->|运行状态| G
-    G -->|状态、流量、在线数据上报| P
-```
-
-- Panel：下发节点、用户、路由与审计规则，并接收上报。
-- XrayRP：把面板快照收敛为本地运行状态，负责运行时生命周期（启动、就绪、停止与回收、替换、失败状态）、限速与规则执行、证书管理，以及上报。
-- Xray Core：实际承载协议与传输，XrayRP 通过 `app/` 与其交互。
-
-代码位置与不变量见 [架构文档](./docs/architecture.md)。
-
-## 安装
-
-### 一键安装脚本
+### 一键安装
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
 ```
 
-### Xboard Machine Mode 安装
+安装后编辑 `/etc/XrayR/config.yml`，填写面板与节点信息，再运行 `XrayR start`。配置字段见[配置示例](./release/config/config.yml.example)。
+
+### Xboard Machine Mode
+
+先在 Xboard 创建并绑定机器，取得 `MachineID` 和 `Token`。以下示例需替换为实际值；脚本用于安装与配置，机器注册在面板中完成。
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
   --api-host https://panel.example.com \
   --machine-id 1 \
   --token "machine-token" \
@@ -100,63 +56,47 @@ bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-mac
   --ws-endpoint "wss://panel.example.com/ws"
 ```
 
-- 该脚本只生成 `MachineConfig` 并安装 / 启动服务，不会在 Xboard 中创建或注册机器，请先在 Xboard 创建 / 绑定机器。
-- `MachineConfig` 与静态 `Nodes` 互斥；启用机器模式时不会生成静态 `Nodes`。
-- 机器模式不使用 handshake 自动发现，请用 `--ws-endpoint` 显式填写 Xboard `ws-server` 对外地址（通常为 `/ws`）；省略时回退到旧版 `<ApiHost>/api/v1/server/UniProxy/ws`，当前 Xboard 不再提供该路由。
-- 已有 `/etc/XrayR/config.yml` 时脚本默认不覆盖，确认覆盖再加 `--force`。
+Machine Mode 不使用 handshake 自动发现：请明确配置 `--ws-endpoint`，指向本部署实际公开的 `ws-server` 地址，通常为 `/ws`，HTTPS 面板应使用 `wss://`。部署与兼容细节见[部署说明](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket)。
 
-### Docker（GHCR）
+`MachineConfig` 与静态 `Nodes` 互斥；静态模式仍从面板同步节点配置与用户。已有配置默认保留，确认覆盖时才加 `--force`。
 
-镜像：`ghcr.io/mtoly/xrayrp`，发布时同时打上原始 release tag 与 `latest`。
+<a name="docker"></a>
+
+### Docker
+
+先将[配置示例](./release/config/config.yml.example)保存为 `/etc/XrayR/config.yml` 并填写实际配置；已有配置可直接使用。然后在 Linux 节点机运行：
 
 ```bash
-mkdir -p /etc/XrayR
-cp release/config/config.yml.example /etc/XrayR/config.yml
-# 编辑 /etc/XrayR/config.yml 后启动
 docker run -d --name xrayrp --restart unless-stopped \
   --network host \
   -v /etc/XrayR:/etc/XrayR \
   ghcr.io/mtoly/xrayrp:latest
 ```
 
-容器入口为 `XrayR --config /etc/XrayR/config.yml`，容器内监听地址由 `config.yml` 的 `ListenIP` 决定；`Observability.Listen` 默认绑定 `127.0.0.1`，需要从容器外访问时请改为容器内可访问的私有地址并映射端口。
+镜像发布原始 Release 标签与 `latest`；`latest` 随每次发布更新，包括预发布，升级时需重新拉取镜像并重建容器。生产部署可固定正式 Release 标签。
 
-## 配置
+<a name="documentation"></a>
 
-配置参考 [release/config/config.yml.example](./release/config/config.yml.example)，该文件带逐项注释，覆盖 `Log`、`DnsConfigPath`、`RouteConfigPath`、`ConnectionConfig`、`Observability`、`MachineConfig` 与 `Nodes`。
+## 文档
 
-- 远程面板地址（`ApiHost`）必须使用 HTTPS；仅回环开发地址可以使用 HTTP。
-- `MachineConfig` 与静态 `Nodes` 二选一，不能同时启用。
-- 细节说明见 [Xboard / NewV2board 兼容性文档](./docs/xboard-newv2board.md)。
+| 入口 | 内容 |
+| --- | --- |
+| [配置示例](./release/config/config.yml.example) | 面板、节点类型、证书、限速与观测配置 |
+| [Xboard / NewV2board](./docs/xboard-newv2board.md) | Machine Mode、WebSocket 部署、协议与字段兼容边界 |
+| [架构说明](./docs/architecture.md) | 模块职责、运行时边界与状态约束 |
+| [Releases](https://github.com/Mtoly/XrayRP/releases) · [Changelog](./CHANGELOG.md) | 下载、版本变化与发布校验文件 |
+| [go.mod](./go.mod) · [CI](./.github/workflows/test.yml) · [发布构建](./.github/workflows/release.yml) | Go 版本要求、测试与构建入口 |
 
-## 开发
+源码构建遵循 `go.mod` 的 Go 版本要求；包含 QUIC 支持的构建命令为 `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`。
 
-要求 Go 版本以 [go.mod](./go.mod) 中的 `go` 指令为准（当前为 `1.27`）。
+手动下载时使用同一 Release 的 `SHA256SUMS` 校验归档；签名包为 `SHA256SUMS.sigstore.json`。SBOM 与 provenance 记录保存在发布工作流产物中。
 
-```bash
-git clone https://github.com/Mtoly/XrayRP.git
-cd XrayRP
+## 社区与许可
 
-go build ./...
-go test ./...
-go vet ./...
+问题与改进建议请提交至 [GitHub Issues](https://github.com/Mtoly/XrayRP/issues)。
 
-# 与发布产物一致的构建（包含 QUIC 支持）
-CGO_ENABLED=0 go build -tags with_quic -o XrayR .
-```
+采用 [Mozilla Public License 2.0](./LICENSE)。
 
-## License
+项目历史与上游：[XrayR](https://github.com/XrayR-project/XrayR)。工具命名和配置路径沿用 `XrayR`。
 
-[Mozilla Public License Version 2.0](./LICENSE)
-
-## Thanks
-
-- [Project X](https://github.com/XTLS/)
-- [V2Fly](https://github.com/v2fly)
-- [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray)
-- [Air-Universe](https://github.com/crossfw/Air-Universe)
-
-## Telegram
-
-- [XrayR 讨论群](https://t.me/XrayR_project)
-- [XrayR 通知频道](https://t.me/XrayR_channel)
+感谢 [Project X](https://github.com/XTLS/)、[V2Fly](https://github.com/v2fly)、[VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray) 与 [Air-Universe](https://github.com/crossfw/Air-Universe)。
