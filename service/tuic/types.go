@@ -21,6 +21,7 @@ import (
 type runtimeInstance interface {
 	Start() error
 	Close() error
+	UpdateUsers([]option.TUICUser) error
 }
 
 type runtimeFactory func(*TuicService, runtimeBuildSpec) (runtimeInstance, string, error)

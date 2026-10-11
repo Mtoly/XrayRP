@@ -2,6 +2,7 @@ package anytls
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -15,7 +16,16 @@ import (
 	"github.com/Mtoly/XrayRP/service/internal/singboxregistry"
 )
 
-func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
+type singBoxRuntime struct {
+	*box.Box
+	inbound *singboxregistry.AnyTLSInbound
+}
+
+func (r singBoxRuntime) UpdateUsers(users []option.AnyTLSUser) error {
+	return r.inbound.UpdateUsers(users)
+}
+
+func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -87,11 +97,16 @@ func (s *AnyTLSService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string
 	if err != nil {
 		return nil, "", err
 	}
+	registered, _ := boxInstance.Inbound().Get(spec.inboundTag)
+	inbound, ok := registered.(*singboxregistry.AnyTLSInbound)
+	if !ok {
+		return nil, "", errors.Join(fmt.Errorf("AnyTLS inbound %q does not support user updates", spec.inboundTag), boxInstance.Close())
+	}
 
 	tracker := &anyTLSTracker{svc: s}
 	boxInstance.Router().AppendTracker(tracker)
 
-	return boxInstance, spec.inboundTag, nil
+	return singBoxRuntime{Box: boxInstance, inbound: inbound}, spec.inboundTag, nil
 }
 
 func buildInboundTLSOptions(spec runtimeBuildSpec) (*option.InboundTLSOptions, error) {

@@ -2,6 +2,7 @@ package tuic
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
@@ -15,15 +16,24 @@ import (
 	"github.com/Mtoly/XrayRP/service/internal/trafficstats"
 )
 
-func (s *TuicService) syncUsers(userInfo *[]api.UserInfo) {
+// syncUsers installs a user snapshot in the published runtime before changing
+// in-memory user state. Callers hold reloadMu so the runtime cannot be
+// replaced concurrently.
+func (s *TuicService) syncUsers(userInfo *[]api.UserInfo) error {
 	if userInfo == nil {
-		return
+		return nil
 	}
 
 	nodeInfo, _, _ := s.appliedStateSnapshot()
 	var nodeLimit uint64
 	if nodeInfo != nil {
 		nodeLimit = nodeInfo.SpeedLimit
+	}
+	s.lifecycleMu.Lock()
+	runtime := s.box
+	s.lifecycleMu.Unlock()
+	if runtime == nil {
+		return errors.New("no published TUIC runtime")
 	}
 
 	s.mu.Lock()
@@ -34,10 +44,14 @@ func (s *TuicService) syncUsers(userInfo *[]api.UserInfo) {
 		ipLastActive: s.ipLastActive,
 		rateLimiters: s.rateLimiters,
 	})
+	if err := runtime.UpdateUsers(state.authUsers); err != nil {
+		return err
+	}
 	s.applyUserStateLocked(state)
 	if s.logger != nil {
 		s.logger.Infof("TUIC user sync complete: %d auth users configured", len(state.authUsers))
 	}
+	return nil
 }
 
 func (s *TuicService) buildCandidateUserState(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo) userState {

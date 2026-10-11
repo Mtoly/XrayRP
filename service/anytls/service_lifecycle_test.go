@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,11 +34,12 @@ func (e *lifecycleEvents) snapshot() []string {
 }
 
 type fakeRuntimeInstance struct {
-	events     *lifecycleEvents
-	startErr   error
-	closeErr   error
-	startBlock <-chan struct{}
-	started    chan<- struct{}
+	events         *lifecycleEvents
+	startErr       error
+	closeErr       error
+	updateUsersErr error
+	startBlock     <-chan struct{}
+	started        chan<- struct{}
 }
 
 func (f *fakeRuntimeInstance) Start() error {
@@ -58,6 +60,15 @@ func (f *fakeRuntimeInstance) Close() error {
 	f.events.add("stop")
 	f.events.add("close")
 	return f.closeErr
+}
+
+func (f *fakeRuntimeInstance) UpdateUsers(users []option.AnyTLSUser) error {
+	names := make([]string, 0, len(users))
+	for _, user := range users {
+		names = append(names, user.Name)
+	}
+	f.events.add("update-users:" + strings.Join(names, ","))
+	return f.updateUsersErr
 }
 
 func TestRuntimeLifecycleSeamCompiles(t *testing.T) {

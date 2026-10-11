@@ -2,6 +2,8 @@ package tuic
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,8 +20,10 @@ func TestTUICSnapshotUserTriggerAppliesAuthoritativeUsersWithoutReload(t *testin
 		users:    []api.UserInfo{{UID: 1, UUID: "user-1", Email: "user@example.test"}},
 	}
 	runtime := New(client, &controller.Config{})
+	events := &lifecycleEvents{}
 	runtime.lifecycleMu.Lock()
 	runtime.nodeInfo = cloneNodeInfo(client.nodeInfo)
+	runtime.box = &fakeRuntimeInstance{events: events}
 	runtime.state = stateRunning
 	runtime.lifecycleMu.Unlock()
 
@@ -40,11 +44,40 @@ func TestTUICSnapshotUserTriggerAppliesAuthoritativeUsersWithoutReload(t *testin
 	})
 
 	waitForTUICUser(t, runtime, "user-1")
+	if got, want := events.snapshot(), []string{"update-users:user-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime events = %v, want %v", got, want)
+	}
 	if client.userListCalls != 1 {
 		t.Fatalf("GetUserList calls = %d, want 1", client.userListCalls)
 	}
 	if client.nodeInfoCalls != 0 {
 		t.Fatalf("GetNodeInfo calls = %d, want 0 for user-only trigger", client.nodeInfoCalls)
+	}
+}
+
+func TestTUICUserSyncKeepsAppliedUsersWhenRuntimeRejectsUpdate(t *testing.T) {
+	runtime := New(&configurablePanelClient{}, &controller.Config{})
+	fake := &fakeRuntimeInstance{events: &lifecycleEvents{}}
+	runtime.lifecycleMu.Lock()
+	runtime.box = fake
+	runtime.lifecycleMu.Unlock()
+	applied := []api.UserInfo{{UID: 1, UUID: "applied-user"}}
+	if err := runtime.syncUsers(&applied); err != nil {
+		t.Fatalf("syncUsers(applied) error = %v", err)
+	}
+
+	fake.updateUsersErr = errors.New("runtime rejected users")
+	next := []api.UserInfo{{UID: 2, UUID: "next-user"}}
+	if err := runtime.syncUsers(&next); !errors.Is(err, fake.updateUsersErr) {
+		t.Fatalf("syncUsers(next) error = %v, want %v", err, fake.updateUsersErr)
+	}
+
+	runtime.mu.RLock()
+	_, keptApplied := runtime.users["applied-user"]
+	_, appliedNext := runtime.users["next-user"]
+	runtime.mu.RUnlock()
+	if !keptApplied || appliedNext {
+		t.Fatalf("users after rejected update: kept applied=%v applied next=%v", keptApplied, appliedNext)
 	}
 }
 
