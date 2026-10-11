@@ -1,5 +1,9 @@
 # XrayRP Dependency Review — 2026-08-17
 
+> This is a dated review. Current dependency pins are in `go.mod` and
+> `Dockerfile`; the current vulnerability gate is defined in
+> `.github/workflows/test.yml`.
+
 ## Scope
 
 This review covers the current working tree against `b1fa359f`, the Go module
@@ -109,3 +113,12 @@ was superseded by the 2026-09-11 follow-up below.
   OpenVEX status `affected`; `GO-2026-5288` therefore remains release-blocking.
 - The independent `RequestHook: nil` regression test remains in CI as
   defense-in-depth evidence, but it no longer permits an affected result to pass.
+
+## Policy follow-up — 2026-09-12
+
+- PR #214 superseded the 2026-09-11 fail-closed policy with a temporary
+  `GO-2026-5288` allowance, recorded in the 0.9.2 changelog.
+- `govulncheck` still fails on every other reachable vulnerability.
+  `GO-2026-5288` passes only when it is the sole reachable finding, Hysteria
+  core and extras are both at least `v2.8.2`, and the `RequestHook: nil`
+  regression test passes; CI then emits a warning instead of failing.
