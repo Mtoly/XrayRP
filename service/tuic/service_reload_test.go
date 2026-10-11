@@ -22,8 +22,9 @@ import (
 
 type reloadRuntime struct{ name string }
 
-func (*reloadRuntime) Start() error { return nil }
-func (*reloadRuntime) Close() error { return nil }
+func (*reloadRuntime) Start() error                        { return nil }
+func (*reloadRuntime) Close() error                        { return nil }
+func (*reloadRuntime) UpdateUsers([]option.TUICUser) error { return nil }
 
 type fakePreparedRenewal struct {
 	renewed       bool

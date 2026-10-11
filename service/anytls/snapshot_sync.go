@@ -55,7 +55,13 @@ func (s *AnyTLSService) syncUserSnapshotContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.syncUsers(users)
+	if err := s.reloadMu.Lock(ctx); err != nil {
+		return err
+	}
+	defer s.reloadMu.Unlock()
+	if err := s.syncUsers(users); err != nil {
+		return fmt.Errorf("apply AnyTLS users: %w", err)
+	}
 	service.RecordSnapshotSyncApplied(s.apiClient, service.SnapshotSyncUsers)
 	return nil
 }

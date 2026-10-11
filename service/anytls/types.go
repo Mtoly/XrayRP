@@ -21,6 +21,7 @@ import (
 type runtimeInstance interface {
 	Start() error
 	Close() error
+	UpdateUsers([]option.AnyTLSUser) error
 }
 
 type runtimeFactory func(*AnyTLSService, runtimeBuildSpec) (runtimeInstance, string, error)

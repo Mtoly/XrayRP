@@ -12,6 +12,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Fixed
 
 - Kept Xray node user traffic that arrives while a traffic report is in flight; a successful report now subtracts only the reported bytes instead of zeroing the counters.
+- Applied panel user changes to running AnyTLS and TUIC listeners. Added users and changed credentials previously failed authentication until the node was rebuilt by a configuration change, certificate renewal, or restart; user updates now take effect without dropping established connections. The listeners are derived from the sing-box `v1.14.2` AnyTLS and TUIC inbounds.
 
 ## 0.9.5 - 2026-10-07
 
