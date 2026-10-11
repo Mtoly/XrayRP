@@ -303,12 +303,16 @@ func (c *Controller) getTraffic(email string) (up int64, down int64, upCounter s
 	return
 }
 
-func (c *Controller) resetTraffic(upCounterList *[]stats.Counter, downCounterList *[]stats.Counter) {
-	for _, upCounter := range *upCounterList {
-		upCounter.Set(0)
-	}
-	for _, downCounter := range *downCounterList {
-		downCounter.Set(0)
+type reportedCounter struct {
+	counter stats.Counter
+	value   int64
+}
+
+// subtractReportedTraffic removes only the reported amount. Traffic added while
+// the report request was in flight stays in the counter for the next report.
+func subtractReportedTraffic(counters []reportedCounter) {
+	for _, reported := range counters {
+		reported.counter.Add(-reported.value)
 	}
 }
 

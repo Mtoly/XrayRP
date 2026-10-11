@@ -9,7 +9,6 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/serverstatus"
 	"github.com/Mtoly/XrayRP/service"
-	"github.com/xtls/xray-core/features/stats"
 )
 
 type controllerDeviceReporter interface {
@@ -244,8 +243,7 @@ func (c *Controller) userInfoMonitorContext(ctx context.Context) (err error) {
 	// Get User traffic — optimized: pre-allocate and batch
 	userCount := len(*currentUserList)
 	userTraffic := make([]api.UserTraffic, 0, userCount/10) // typically ~10% have traffic
-	upCounterList := make([]stats.Counter, 0, userCount/10)
-	downCounterList := make([]stats.Counter, 0, userCount/10)
+	reportedCounters := make([]reportedCounter, 0, userCount/5)
 	AutoSpeedLimit := int64(c.config.AutoSpeedLimitConfig.Limit)
 	UpdatePeriodic := int64(c.config.UpdatePeriodic)
 	limitedUsers := make([]api.UserInfo, 0)
@@ -281,10 +279,10 @@ func (c *Controller) userInfoMonitorContext(ctx context.Context) (err error) {
 				Download: down})
 
 			if upCounter != nil {
-				upCounterList = append(upCounterList, upCounter)
+				reportedCounters = append(reportedCounters, reportedCounter{counter: upCounter, value: up})
 			}
 			if downCounter != nil {
-				downCounterList = append(downCounterList, downCounter)
+				reportedCounters = append(reportedCounters, reportedCounter{counter: downCounter, value: down})
 			}
 		} else {
 			if AutoSpeedLimit > 0 {
@@ -324,7 +322,7 @@ func (c *Controller) userInfoMonitorContext(ctx context.Context) (err error) {
 			c.logger.Print(reportErr)
 			c.health.RecordFailure(service.FailureStageReport, time.Now())
 		} else {
-			c.resetTraffic(&upCounterList, &downCounterList)
+			subtractReportedTraffic(reportedCounters)
 			c.health.SetTrafficBacklog(0)
 		}
 	} else {
