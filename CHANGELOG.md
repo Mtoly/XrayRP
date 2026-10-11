@@ -7,6 +7,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Security
 
 - Updated `golang.org/x/net` from `v0.59.0` to `v0.60.0` to fix the reachable advisories `GO-2026-6603`, `GO-2026-6610`, `GO-2026-6611`, `GO-2026-6612`, and `GO-2026-6617`.
+- Updated the Docker builder image from Go `1.27.1` to `1.27.2` so container binaries include the Go standard-library security fixes released in `1.27.2`.
 
 ## 0.9.5 - 2026-10-07
 
