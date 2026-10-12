@@ -208,7 +208,7 @@ func (e *userOnlineEntry) collectOnline(out *[]api.OnlineUser) {
 type InboundInfo struct {
 	Tag            string
 	NodeSpeedLimit uint64
-	UserInfo       *sync.Map // Key: user tag (buildUserTag) -> UserInfo
+	UserInfo       *sync.Map // Key: user tag (inboundUserKey) -> UserInfo
 	BucketHub      *sync.Map // Key: user tag -> *rate.Limiter
 	UserOnlineIP   *sync.Map // Key: user tag -> *userOnlineEntry
 	GlobalDevices  *globalDeviceState

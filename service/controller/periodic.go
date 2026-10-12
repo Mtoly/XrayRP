@@ -269,13 +269,6 @@ func (c *Controller) periodicTaskFactoryContext(interval time.Duration, execute 
 	})
 }
 
-func (c *Controller) periodicTaskFactory() periodicTaskFactory {
-	if c == nil || c.newPeriodicTask == nil {
-		return newControllerPeriodicTask
-	}
-	return c.newPeriodicTask
-}
-
 func (c *Controller) startPeriodicTask(tag string, periodic periodicRunner) error {
 	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
 	defer cancel()
@@ -297,12 +290,6 @@ func (c *Controller) logPeriodicTaskError(tag string, err error) {
 
 func (c *Controller) showErrorDetails() bool {
 	return common.ShowErrorDetails() || c != nil && c.config != nil && c.config.ShowErrorDetails
-}
-
-func (c *Controller) launchPeriodicTask(tag string, periodic periodicRunner) (error, bool) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return c.launchPeriodicTaskContext(ctx, tag, periodic)
 }
 
 func (c *Controller) launchPeriodicTaskContext(ctx context.Context, tag string, periodic periodicRunner) (error, bool) {
@@ -385,18 +372,6 @@ func (c *Controller) startOrReplacePeriodicTask(tag string, interval time.Durati
 	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
 	defer cancel()
 	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, false)
-}
-
-func (c *Controller) startInitialPeriodicTask(tag string, interval time.Duration, execute func() error) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, true)
-}
-
-func (c *Controller) startOrReplacePeriodicTaskWithMode(tag string, interval time.Duration, execute func() error, synchronous bool) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return c.startOrReplacePeriodicTaskContext(ctx, tag, interval, func(context.Context) error { return execute() }, synchronous)
 }
 
 func (c *Controller) startOrReplacePeriodicTaskContext(ctx context.Context, tag string, interval time.Duration, execute func(context.Context) error, synchronous bool) error {

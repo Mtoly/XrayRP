@@ -9,15 +9,6 @@ import (
 	"golang.org/x/net/idna"
 )
 
-// sanitizedDomain preserves the historical panic-based helper for ACME storage.
-func sanitizedDomain(domain string) string {
-	safe, err := sanitizeDomain(domain)
-	if err != nil {
-		panic(err)
-	}
-	return safe
-}
-
 func sanitizeDomain(domain string) (string, error) {
 	if domain == "" || strings.TrimSpace(domain) != domain {
 		return "", errors.New("certificate domain is empty or contains surrounding whitespace")

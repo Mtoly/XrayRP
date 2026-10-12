@@ -392,12 +392,6 @@ func (s *AnyTLSService) restoreTraffic(snapshot map[string]userTraffic) {
 	}
 }
 
-func (s *AnyTLSService) userMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.userMonitorContext(ctx)
-}
-
 func (s *AnyTLSService) userMonitorContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -462,15 +456,6 @@ func (s *AnyTLSService) userMonitorContext(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// nodeMonitor watches for AnyTLS node configuration changes from the panel
-// (port, TLS/SNI, AnyTLS-specific options, etc.) and hot-reloads the sing-box
-// instance when a change is detected.
-func (s *AnyTLSService) nodeMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.nodeMonitorContext(ctx)
 }
 
 func (s *AnyTLSService) nodeMonitorContext(ctx context.Context) error {

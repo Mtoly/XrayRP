@@ -9,8 +9,6 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/internal/panelrules"
 	"github.com/Mtoly/XrayRP/common"
-	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/infra/conf"
 )
 
 // APIClient API config
@@ -111,21 +109,6 @@ func (c *APIClient) getNodeSnapshotContext(ctx context.Context) (snapshot *api.N
 
 	return snapshot, nil
 
-}
-
-func parseDNSConfig(routes []route) (nameServerList []*conf.NameServerConfig) {
-
-	nameServerList = make([]*conf.NameServerConfig, 0)
-	for i := range routes {
-		if routes[i].Action == "dns" {
-			nameServerList = append(nameServerList, &conf.NameServerConfig{
-				Address: &conf.Address{Address: net.ParseAddress(routes[i].ActionValue)},
-				Domains: routes[i].Match,
-			})
-		}
-	}
-
-	return
 }
 
 func parseNormalizedDNSConfig(routes []route) (nameServerList []*api.NameServerSnapshot) {

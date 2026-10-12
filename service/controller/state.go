@@ -27,11 +27,6 @@ func (c *Controller) buildNodeTagFromSnapshot(snapshot *api.NodeSnapshot) string
 	return managednode.BuildTag(snapshot.NodeType, c.config.ListenIP, snapshot.Port, snapshot.NodeID)
 }
 
-func (c *Controller) buildNodeTag() string {
-	state := c.runtimeStateSnapshot()
-	return c.buildNodeTagFromSnapshot(state.node.normalizedSnapshot())
-}
-
 func cloneDetectRules(rules []api.DetectRule) []api.DetectRule {
 	if rules == nil {
 		return nil
