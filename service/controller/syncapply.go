@@ -91,37 +91,6 @@ func nodeSnapshotStateChanged(currentSnapshot, newSnapshot *api.NodeSnapshot) bo
 	return !currentSnapshot.Equal(newSnapshot)
 }
 
-func compareUserList(old, new *[]api.UserInfo) (deleted, added []api.UserInfo) {
-	// Use UID as the primary key for O(N) comparison instead of the full struct
-	// which is expensive to hash with 50k users.
-	type userKey struct {
-		UID   int
-		Email string
-	}
-
-	oldMap := make(map[userKey]api.UserInfo, len(*old))
-	for _, v := range *old {
-		oldMap[userKey{v.UID, v.Email}] = v
-	}
-
-	newMap := make(map[userKey]struct{}, len(*new))
-	for _, v := range *new {
-		k := userKey{v.UID, v.Email}
-		newMap[k] = struct{}{}
-		if _, exists := oldMap[k]; !exists {
-			added = append(added, v)
-		}
-	}
-
-	for k, v := range oldMap {
-		if _, exists := newMap[k]; !exists {
-			deleted = append(deleted, v)
-		}
-	}
-
-	return deleted, added
-}
-
 type globalDeviceApply struct {
 	Devices map[int][]string
 	Clear   bool

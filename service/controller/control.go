@@ -20,10 +20,6 @@ import (
 	"github.com/Mtoly/XrayRP/common/limiter"
 )
 
-func (c *Controller) removeInbound(tag string) error {
-	return c.removeInboundContext(context.Background(), tag)
-}
-
 func (c *Controller) removeInboundContext(ctx context.Context, tag string) error {
 	err := c.ibm.RemoveHandler(ctx, tag)
 	return err
@@ -58,18 +54,6 @@ func (w *dataPathWrapper) Tag() string {
 }
 
 func (w *dataPathWrapper) isManagedDataPathWrapper() {}
-
-func (w *dataPathWrapper) targetHostFromContext(ctx context.Context) string {
-	outs := session.OutboundsFromContext(ctx)
-	if len(outs) == 0 {
-		return ""
-	}
-	target := outs[len(outs)-1].Target
-	if !target.IsValid() || target.Address == nil {
-		return ""
-	}
-	return target.Address.String()
-}
 
 func (w *dataPathWrapper) selectDispatch(ctx context.Context) runtimeDispatchDecision {
 	return runtimeRoutingSelector{
@@ -156,17 +140,9 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 	decision.handler.Dispatch(ctx, link)
 }
 
-func (c *Controller) removeOutbound(tag string) error {
-	return c.removeOutboundContext(context.Background(), tag)
-}
-
 func (c *Controller) removeOutboundContext(ctx context.Context, tag string) error {
 	err := c.obm.RemoveHandler(ctx, tag)
 	return err
-}
-
-func (c *Controller) addInbound(config *core.InboundHandlerConfig) error {
-	return c.addInboundContext(context.Background(), config)
 }
 
 func (c *Controller) addInboundContext(ctx context.Context, config *core.InboundHandlerConfig) error {
@@ -182,10 +158,6 @@ func (c *Controller) addInboundContext(ctx context.Context, config *core.Inbound
 		return err
 	}
 	return nil
-}
-
-func (c *Controller) addOutbound(config *core.OutboundHandlerConfig, tag string, routePolicy routingPolicyValue) error {
-	return c.addOutboundContext(context.Background(), config, tag, routePolicy)
 }
 
 func (c *Controller) addOutboundContext(ctx context.Context, config *core.OutboundHandlerConfig, tag string, routePolicy routingPolicyValue) error {
@@ -213,10 +185,6 @@ func (c *Controller) addOutboundContext(ctx context.Context, config *core.Outbou
 		return err
 	}
 	return nil
-}
-
-func (c *Controller) addUsers(users []*protocol.User, tag string) error {
-	return c.addUsersContext(context.Background(), users, tag)
 }
 
 func (c *Controller) addUsersContext(ctx context.Context, users []*protocol.User, tag string) error {
@@ -253,10 +221,6 @@ func (c *Controller) addUsersContext(ctx context.Context, users []*protocol.User
 		}
 	}
 	return nil
-}
-
-func (c *Controller) removeUsers(users []string, tag string) error {
-	return c.removeUsersContext(context.Background(), users, tag)
 }
 
 func (c *Controller) removeUsersContext(ctx context.Context, users []string, tag string) error {

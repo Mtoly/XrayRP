@@ -405,12 +405,6 @@ func (m *panelReloadModule) CloseContext(parent context.Context) error {
 	})
 	return nil
 }
-func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs []error) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return m.restoreLastKnownGoodContext(ctx, previous, errs)
-}
-
 func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, previous panelReloadState, errs []error) error {
 	ctx, cancel := service.WithDefaultTimeout(context.WithoutCancel(parent), service.DefaultStartTimeout)
 	defer cancel()
@@ -526,10 +520,6 @@ func (m *panelReloadModule) runRecovery(ctx context.Context, done chan struct{})
 		}
 	}
 }
-func (m *panelReloadModule) beginOperation(operation panelReloadOperation) {
-	_ = m.beginOperationContext(context.Background(), operation)
-}
-
 func (m *panelReloadModule) beginOperationContext(ctx context.Context, operation panelReloadOperation) error {
 	if m.observeOp != nil {
 		m.observeOp(operation, panelReloadOperationAttempted)

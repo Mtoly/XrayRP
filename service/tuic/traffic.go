@@ -375,12 +375,6 @@ func (s *TuicService) restoreTraffic(snapshot map[string]userTraffic) {
 	}
 }
 
-func (s *TuicService) userMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.userMonitorContext(ctx)
-}
-
 func (s *TuicService) userMonitorContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -445,15 +439,6 @@ func (s *TuicService) userMonitorContext(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// nodeMonitor watches for TUIC node configuration changes from the panel
-// (port, TLS/SNI, TUIC-specific options, etc.) and hot-reloads the sing-box
-// instance when a change is detected.
-func (s *TuicService) nodeMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.nodeMonitorContext(ctx)
 }
 
 func (s *TuicService) nodeMonitorContext(ctx context.Context) error {

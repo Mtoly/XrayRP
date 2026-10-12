@@ -454,20 +454,8 @@ func (s *AnyTLSService) reloadNodeContext(parent context.Context, nodeInfo *api.
 	return s.reloadNodeLockedContext(ctx, nodeInfo)
 }
 
-func (s *AnyTLSService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.reloadNodeLockedContext(ctx, nodeInfo)
-}
-
 func (s *AnyTLSService) reloadNodeLockedContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
 	return s.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, nil)
-}
-
-func (s *AnyTLSService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
 }
 
 func (s *AnyTLSService) reloadNodeWithCertificateLockedContext(ctx context.Context, nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {

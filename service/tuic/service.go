@@ -459,20 +459,8 @@ func (s *TuicService) reloadNodeContext(parent context.Context, nodeInfo *api.No
 	return s.reloadNodeLockedContext(ctx, nodeInfo)
 }
 
-func (s *TuicService) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.reloadNodeLockedContext(ctx, nodeInfo)
-}
-
 func (s *TuicService) reloadNodeLockedContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
 	return s.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, nil)
-}
-
-func (s *TuicService) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
 }
 
 func (s *TuicService) reloadNodeWithCertificateLockedContext(ctx context.Context, nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {

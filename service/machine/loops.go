@@ -78,12 +78,6 @@ func (s *Supervisor) activateLoopHandoffs(handoffs []machineLoopHandoff) {
 	}
 }
 
-func (s *Supervisor) joinLoopHandoffs(handoffs []machineLoopHandoff, ownerDone chan struct{}) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
-	defer cancel()
-	_ = s.joinLoopHandoffsContext(ctx, handoffs, ownerDone)
-}
-
 func (s *Supervisor) joinLoopHandoffsContext(ctx context.Context, handoffs []machineLoopHandoff, ownerDone chan struct{}) error {
 	var errs []error
 	for _, handoff := range handoffs {
@@ -98,12 +92,6 @@ func (s *Supervisor) joinLoopHandoffsContext(ctx context.Context, handoffs []mac
 		s.forgetRetiredLoop(done)
 	}
 	return errors.Join(errs...)
-}
-
-func (s *Supervisor) waitForLoop(done <-chan struct{}) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
-	defer cancel()
-	_ = s.waitForLoopContext(ctx, done)
 }
 
 func (s *Supervisor) waitForLoopContext(ctx context.Context, done <-chan struct{}) error {
