@@ -2,7 +2,7 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
-## Unreleased
+## 0.9.6 - 2026-10-12
 
 ### Security
 
@@ -224,4 +224,4 @@ See [Xboard / NewV2board Compatibility](./docs/xboard-newv2board.md) for the cur
 
 An older `0.9.8` tag/release used a version number outside the current release sequence. Its GitHub Release and active remote and primary local tag references were intentionally retired in October 2026, while the underlying commits and Git history remain preserved.
 
-The maintained release sequence continues from `0.9.4` to `0.9.5`.
+The maintained release sequence continues from `0.9.4` through `0.9.5` to `0.9.6`.
