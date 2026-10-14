@@ -2,6 +2,12 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
+## Unreleased
+
+### Security
+
+- Removed authentication credentials from Hysteria2 audit disconnect warnings. The warnings now identify known users by panel UID and omit user identity when the user is no longer present.
+
 ## 0.9.6 - 2026-10-12
 
 ### Security

@@ -35,10 +35,15 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 	if t.svc.blockedIDs != nil {
 		if blocked := t.svc.blockedIDs[id]; blocked {
 			delete(t.svc.blockedIDs, id)
-			if t.svc.logger != nil {
-				t.svc.logger.WithField("id", id).Warn("Hysteria2 closing connection due to audit rule")
-			}
+			user, known := t.svc.users[id]
 			t.svc.mu.Unlock()
+			if t.svc.logger != nil {
+				logger := t.svc.logger
+				if known {
+					logger = logger.WithField("uid", user.UID)
+				}
+				logger.Warn("Hysteria2 closing connection due to audit rule")
+			}
 			return false
 		}
 	}
