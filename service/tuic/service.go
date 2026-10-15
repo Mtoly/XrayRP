@@ -431,6 +431,7 @@ func (s *TuicService) CloseContext(parent context.Context) error {
 	s.traffic = make(map[string]*userTraffic)
 	s.onlineIPs = make(map[string]map[string]struct{})
 	s.ipLastActive = make(map[string]map[string]time.Time)
+	s.connections = nil
 	s.authUsers = nil
 	s.rateLimiters = nil
 	s.mu.Unlock()
