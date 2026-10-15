@@ -208,12 +208,6 @@ func (c *Controller) publishLifecycleRunning(ownership controllerRuntimeOwnershi
 	c.lifecycleMu.Unlock()
 }
 
-func (c *Controller) failLifecycleStart(primary error, ownership controllerRuntimeOwnership, hooks syncApplyHooks) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
-	defer cancel()
-	return c.failLifecycleStartContext(ctx, primary, ownership, hooks)
-}
-
 func (c *Controller) failLifecycleStartContext(ctx context.Context, primary error, ownership controllerRuntimeOwnership, hooks syncApplyHooks) error {
 	cleanupErr := c.cleanupControllerOwnershipContext(ctx, &ownership, hooks)
 	joined := errors.Join(primary, cleanupErr)
@@ -285,12 +279,6 @@ func (c *Controller) finishLifecycleClose(ownership controllerRuntimeOwnership, 
 		c.warnedUsers = nil
 		c.stateMu.Unlock()
 	}
-}
-
-func (c *Controller) cleanupControllerOwnership(ownership *controllerRuntimeOwnership, hooks syncApplyHooks) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
-	defer cancel()
-	return c.cleanupControllerOwnershipContext(ctx, ownership, hooks)
 }
 
 func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, ownership *controllerRuntimeOwnership, hooks syncApplyHooks) error {

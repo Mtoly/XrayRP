@@ -44,12 +44,6 @@ func (s *Supervisor) planReconcile(bindings []NodeBinding) (machineReconcileTran
 	}, true
 }
 
-func (s *Supervisor) executeReconcile(transaction machineReconcileTransaction) machineReconcileResult {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.executeReconcileContext(ctx, transaction)
-}
-
 func (s *Supervisor) executeReconcileContext(ctx context.Context, transaction machineReconcileTransaction) machineReconcileResult {
 	started := make([]*nodeRuntime, 0, len(transaction.plan.bindings))
 	var errs []error
@@ -214,12 +208,6 @@ func (s *Supervisor) startRuntimeContext(ctx context.Context, binding NodeBindin
 	return s.startPreparedRuntimeContext(ctx, newNodeRuntime(binding, nodeService), "start service")
 }
 
-func (s *Supervisor) startPreparedRuntime(runtime *nodeRuntime, operation string) (*nodeRuntime, error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return s.startPreparedRuntimeContext(ctx, runtime, operation)
-}
-
 func (s *Supervisor) startPreparedRuntimeContext(ctx context.Context, runtime *nodeRuntime, operation string) (*nodeRuntime, error) {
 	if runtime == nil || runtime.service == nil {
 		return nil, errors.New("machine runtime service is nil")
@@ -299,12 +287,6 @@ func (s *Supervisor) restartRuntimeContext(ctx context.Context, oldRuntime *node
 		startErr,
 		fmt.Errorf("rollback old service for machine node %d: %w", oldRuntime.binding.NodeID, rollbackErr),
 	)
-}
-
-func (s *Supervisor) recoverRuntime(runtime *nodeRuntime, desiredBinding NodeBinding) (*nodeRuntime, error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.recoverRuntimeContext(ctx, runtime, desiredBinding)
 }
 
 func (s *Supervisor) recoverRuntimeContext(ctx context.Context, runtime *nodeRuntime, desiredBinding NodeBinding) (*nodeRuntime, error) {
@@ -396,12 +378,6 @@ func (s *Supervisor) closeRuntimeContext(ctx context.Context, runtime *nodeRunti
 	}
 	runtime.failure = nil
 	return closeErr
-}
-
-func (s *Supervisor) cleanupUnpublishedRuntimes(runtimes []*nodeRuntime) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
-	defer cancel()
-	return s.cleanupUnpublishedRuntimesContext(ctx, runtimes)
 }
 
 func (s *Supervisor) cleanupUnpublishedRuntimesContext(ctx context.Context, runtimes []*nodeRuntime) error {

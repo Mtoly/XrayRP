@@ -143,12 +143,6 @@ func (h *Hysteria2Service) failWithRuntimeOwnership(primary error, clientInfo ap
 	return primary
 }
 
-func (h *Hysteria2Service) startReloadCandidate(spec serverBuildSpec) (reloadRuntime, error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return h.startReloadCandidateContext(ctx, spec)
-}
-
 func (h *Hysteria2Service) startReloadCandidateContext(ctx context.Context, spec serverBuildSpec) (reloadRuntime, error) {
 	if err := ctx.Err(); err != nil {
 		return reloadRuntime{}, err
@@ -561,20 +555,8 @@ func (h *Hysteria2Service) reloadNodeContext(parent context.Context, nodeInfo *a
 	return h.reloadNodeLockedContext(ctx, nodeInfo)
 }
 
-func (h *Hysteria2Service) reloadNodeLocked(nodeInfo *api.NodeInfo) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return h.reloadNodeLockedContext(ctx, nodeInfo)
-}
-
 func (h *Hysteria2Service) reloadNodeLockedContext(ctx context.Context, nodeInfo *api.NodeInfo) error {
 	return h.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, nil)
-}
-
-func (h *Hysteria2Service) reloadNodeWithCertificateLocked(nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return h.reloadNodeWithCertificateLockedContext(ctx, nodeInfo, renewal)
 }
 
 func (h *Hysteria2Service) reloadNodeWithCertificateLockedContext(ctx context.Context, nodeInfo *api.NodeInfo, renewal preparedCertificateRenewal) (err error) {
@@ -832,12 +814,6 @@ func rollbackCertificateRenewal(renewal preparedCertificateRenewal) error {
 	return renewal.Rollback()
 }
 
-func (h *Hysteria2Service) startReloadRuntime(runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return h.startReloadRuntimeContext(ctx, runtime, serveRuntime)
-}
-
 func (h *Hysteria2Service) startReloadRuntimeContext(ctx context.Context, runtime runtimeServer, serveRuntime serveRuntimeFunc) (*runtimeServeOutcome, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -892,12 +868,6 @@ func (h *Hysteria2Service) watchRuntime(runtime runtimeServer, serve *runtimeSer
 	if recordFailure && serve.err != nil && h.logger != nil {
 		h.logger.Errorf("Hysteria2 Serve error: %v", serve.err)
 	}
-}
-
-func (h *Hysteria2Service) waitRuntime(serveDone, watcherDone <-chan struct{}) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultJoinTimeout)
-	defer cancel()
-	_ = h.waitRuntimeContext(ctx, serveDone, watcherDone)
 }
 
 func runtimeLifecycleJoined(doneChannels ...<-chan struct{}) bool {

@@ -160,10 +160,6 @@ func cipherFromString(c string) shadowsocks.CipherType {
 	}
 }
 
-func (c *Controller) buildUserTag(user *api.UserInfo) string {
-	return c.buildUserTagFrom(*user, c.runtimeStateSnapshot().tag)
-}
-
 func (c *Controller) buildUserTagFrom(user api.UserInfo, tag string) string {
 	return buildRuntimeUserTag(user, tag)
 }

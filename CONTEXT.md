@@ -20,6 +20,12 @@ _Avoid_: WebSocket payload apply, delta reconstruction, specialized event handle
 The configuration surface that must parse from documented YAML into the runtime structures used to run panel-managed nodes.
 _Avoid_: Config loader, example config, viper config
 
+**Local certificate basis**:
+The detached copy of local certificate configuration captured before any panel certificate snapshot is applied. Startup and controller synchronization use this basis for every merge, so values from earlier panel snapshots do not carry over.
+
+Supplied panel fields take precedence, and DNS environment values merge by key. If the panel provides no certificate configuration, the local basis is used.
+_Avoid_: last applied certificate, panel credential cache, new YAML certificate section
+
 **Runtime routing selection**:
 The runtime decision that turns a node route policy and available outbound handlers into the outbound handler used for a connection.
 _Avoid_: Route engine, Xray router, outbound policy only
@@ -51,6 +57,12 @@ _Avoid_: panel protocol semantics, shared panel API, adapter request format
 **Runtime observability snapshot**:
 The immutable, credential-free view of panel, topology, and per-node lifecycle state used by health, readiness, and bounded-label metrics.
 _Avoid_: debug dump, runtime internals, raw error snapshot
+
+**Local device admission**:
+The per-runtime AnyTLS/TUIC IP reservations held by admitted connections. Online reporting observes these reservations without consuming them. Connections with the same authentication key and IP share one device slot until the last connection closes.
+
+An idle but open connection retains its slot, including while the user is temporarily absent from panel snapshots. Absent users cannot open new connections and are not reported online. The last connection close releases its reservation; a successful runtime stop releases all reservations. A late close cannot release a replacement reservation.
+_Avoid_: reporting interval IP set, global device cache, traffic activity TTL
 
 **Global device cache**:
 The optional per-inbound local TTL and Redis shared cache used to coordinate user IP observations across XrayRP instances. It is a bounded-staleness, fail-open supplement to admission state, not a strict distributed transaction or an authoritative panel snapshot.

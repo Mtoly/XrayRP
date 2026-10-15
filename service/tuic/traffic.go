@@ -3,7 +3,6 @@ package tuic
 import (
 	"context"
 	"errors"
-	"net"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
@@ -193,20 +192,13 @@ func reconcileUserState(userInfo []api.UserInfo, nodeLimit uint64, state userSta
 	state.authUsers = authUsers
 	state.rateLimiters = newRateLimiters
 
-	for uuid := range state.onlineIPs {
-		if _, ok := newUsers[uuid]; !ok {
-			delete(state.onlineIPs, uuid)
-		}
-	}
-	for uuid := range state.ipLastActive {
-		if _, ok := newUsers[uuid]; !ok {
-			delete(state.ipLastActive, uuid)
-		}
-	}
 	return state
 }
 
 func (s *TuicService) applyUserStateLocked(state userState) {
+	// User updates affect new authentication, not established connections.
+	// Keep live reservations until their last connection closes, even if the
+	// user is removed and later re-added.
 	s.users = state.users
 	s.traffic = state.traffic
 	s.onlineIPs = state.onlineIPs
@@ -227,40 +219,23 @@ func (s *TuicService) recordTraffic(uuid string, up, down uint64, host string) {
 	t.Upload = trafficstats.Add(t.Upload, up)
 	t.Download = trafficstats.Add(t.Download, down)
 
-	if host == "" {
-		return
-	}
-	if ipSet, exists := s.onlineIPs[uuid]; exists {
-		ipSet[host] = struct{}{}
-	} else {
-		s.onlineIPs[uuid] = map[string]struct{}{host: {}}
-	}
-	seenAt := time.Now()
-	if activeMap, exists := s.ipLastActive[uuid]; exists {
-		activeMap[host] = seenAt
-	} else {
-		s.ipLastActive[uuid] = map[string]time.Time{host: seenAt}
+	// Admission owns online membership. Late traffic must not recreate an IP
+	// after its last connection released the reservation.
+	if _, ok := s.onlineIPs[uuid][host]; ok {
+		s.ipLastActive[uuid][host] = time.Now()
 	}
 }
 
-func (s *TuicService) allowConnection(uuid, ip string) bool {
+func (s *TuicService) allowConnection(uuid, ip string) (*deviceConnections, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	user, ok := s.users[uuid]
 	if !ok {
-		return false
+		return nil, false
 	}
 
-	host := ip
-	if host != "" {
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-	}
-	if host == "" {
-		host = "unknown"
-	}
+	host := admissionHost(ip)
 
 	ips, ok := s.onlineIPs[uuid]
 	if !ok {
@@ -282,7 +257,7 @@ func (s *TuicService) allowConnection(uuid, ip string) bool {
 				"deviceLimit": user.DeviceLimit,
 				"remote":      ip,
 			}).Warn("TUIC user exceeded device limit")
-			return false
+			return nil, false
 		}
 		ips[host] = struct{}{}
 	}
@@ -290,19 +265,19 @@ func (s *TuicService) allowConnection(uuid, ip string) bool {
 	// Update last active time for this IP
 	activeMap[host] = time.Now()
 
-	return true
-}
-
-func trafficHost(addr net.Addr) string {
-	if addr == nil {
-		return ""
+	if s.connections == nil {
+		s.connections = make(map[string]map[string]*deviceConnections)
 	}
-
-	host := addr.String()
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	if s.connections[uuid] == nil {
+		s.connections[uuid] = make(map[string]*deviceConnections)
 	}
-	return host
+	device := s.connections[uuid][host]
+	if device == nil {
+		device = &deviceConnections{}
+		s.connections[uuid][host] = device
+	}
+	device.count++
+	return device, true
 }
 
 func (s *TuicService) collectUsage() ([]api.UserTraffic, []api.OnlineUser, map[string]userTraffic) {
@@ -333,8 +308,7 @@ func (s *TuicService) collectUsage() ([]api.UserTraffic, []api.OnlineUser, map[s
 		t.Download = 0
 	}
 
-	// Collect online users before clearing
-	// This mimics the behavior of traditional Xray protocols (VMess/VLESS/Trojan)
+	// Reporting observes admission state without consuming connection ownership.
 	var online []api.OnlineUser
 	for uuid, ipSet := range s.onlineIPs {
 		user, ok := s.users[uuid]
@@ -345,13 +319,6 @@ func (s *TuicService) collectUsage() ([]api.UserTraffic, []api.OnlineUser, map[s
 			online = append(online, api.OnlineUser{UID: user.UID, IP: ip})
 		}
 	}
-
-	// Clear online IPs and last active tracking after collection
-	// This prevents zombie connections from accumulating over time
-	// Similar to limiter.GetOnlineDevice() which calls inboundInfo.UserOnlineIP.Delete(email)
-	// Only IPs that are actively used in the next reporting cycle will be tracked again
-	s.onlineIPs = make(map[string]map[string]struct{})
-	s.ipLastActive = make(map[string]map[string]time.Time)
 
 	return uts, online, snapshot
 }
@@ -373,12 +340,6 @@ func (s *TuicService) restoreTraffic(snapshot map[string]userTraffic) {
 		counter.Upload = trafficstats.Add(counter.Upload, uint64(snap.Upload))
 		counter.Download = trafficstats.Add(counter.Download, uint64(snap.Download))
 	}
-}
-
-func (s *TuicService) userMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.userMonitorContext(ctx)
 }
 
 func (s *TuicService) userMonitorContext(ctx context.Context) error {
@@ -445,15 +406,6 @@ func (s *TuicService) userMonitorContext(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// nodeMonitor watches for TUIC node configuration changes from the panel
-// (port, TLS/SNI, TUIC-specific options, etc.) and hot-reloads the sing-box
-// instance when a change is detected.
-func (s *TuicService) nodeMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.nodeMonitorContext(ctx)
 }
 
 func (s *TuicService) nodeMonitorContext(ctx context.Context) error {
