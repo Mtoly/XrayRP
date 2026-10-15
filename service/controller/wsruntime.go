@@ -111,10 +111,6 @@ func (c *Controller) shouldStartWSRuntime() bool {
 	return ok
 }
 
-func (c *Controller) newConfiguredWSRuntime(submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
-	return c.newConfiguredWSRuntimeContext(context.Background(), submitter)
-}
-
 func (c *Controller) newConfiguredWSRuntimeContext(ctx context.Context, submitter syncActionSubmitter) (wsRuntimeLifecycle, error) {
 	capable, ok := c.apiClient.(api.WSCapable)
 	if !ok {
@@ -217,10 +213,6 @@ func websocketOrigin(endpoint *url.URL) (scheme, port string, err error) {
 		return "", "", fmt.Errorf("controller: unsupported websocket endpoint scheme %q", endpoint.Scheme)
 	}
 	return scheme, port, nil
-}
-
-func buildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {
-	return BuildWSEndpoint(wsConfig, runtimeConfig)
 }
 
 func BuildWSEndpoint(wsConfig *api.WSConfig, runtimeConfig *WebSocketConfig) (string, error) {

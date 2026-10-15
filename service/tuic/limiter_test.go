@@ -68,13 +68,17 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 
 	t.Run("stream", func(t *testing.T) {
 		service := limiterTestService()
-		service.onlineIPs["user"] = map[string]struct{}{host: {}}
-		service.ipLastActive["user"] = map[string]time.Time{host: time.Now()}
+		device, admitted := service.allowConnection("user", host)
+		if !admitted {
+			t.Fatal("initial device rejected")
+		}
 		connection := &limiterTestConn{remoteAddr: limiterTestAddr(host + ":1234")}
 		counter := &connCounter{
 			Conn:    connection,
 			svc:     service,
 			user:    "user",
+			host:    host,
+			device:  device,
 			limiter: rate.NewLimiter(1, 0),
 		}
 
@@ -84,13 +88,16 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 
 	t.Run("packet", func(t *testing.T) {
 		service := limiterTestService()
-		service.onlineIPs["user"] = map[string]struct{}{host: {}}
-		service.ipLastActive["user"] = map[string]time.Time{host: time.Now()}
+		device, admitted := service.allowConnection("user", host)
+		if !admitted {
+			t.Fatal("initial device rejected")
+		}
 		counter := &packetConnCounter{
 			PacketConn: &limiterTestPacketConn{},
 			svc:        service,
 			user:       "user",
 			host:       host,
+			device:     device,
 			limiter:    rate.NewLimiter(1, 0),
 		}
 		buffer := buf.As([]byte("blocked"))

@@ -33,14 +33,6 @@ func New(certConf *CertConfig) (*LegoCMD, error) {
 	return lego, nil
 }
 
-func (l *LegoCMD) getPath() string {
-	return l.path
-}
-
-func (l *LegoCMD) getCertConfig() *CertConfig {
-	return l.C
-}
-
 func (l *LegoCMD) validate() error {
 	if l == nil {
 		return errors.New("certificate client is nil")

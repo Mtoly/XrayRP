@@ -358,7 +358,7 @@ func (c *APIClient) ReportIllegalContext(ctx context.Context, detectResultList *
 	return api.ErrUnsupportedPanelFeature
 }
 
-// parseTrojanNodeResponse parse the response for the given nodeInfo format
+// parseTrojanNodeSnapshotResponse parse the response for the given nodeInfo format
 func (c *APIClient) parseTrojanNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	var (
 		host        string
@@ -657,7 +657,7 @@ func (c *APIClient) parseV2rayNodeSnapshotResponse(s *serverConfig) (*api.NodeSn
 	return nodeInfo, nil
 }
 
-// parseHysteria2NodeResponse parse the response for Hysteria2 nodes.
+// parseHysteria2NodeSnapshotResponse parse the response for Hysteria2 nodes.
 func (c *APIClient) parseHysteria2NodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -696,7 +696,7 @@ func (c *APIClient) parseHysteria2NodeSnapshotResponse(s *serverConfig) (*api.No
 	return nodeInfo, nil
 }
 
-// parseTuicNodeResponse parse the response for TUIC nodes.
+// parseTuicNodeSnapshotResponse parse the response for TUIC nodes.
 func (c *APIClient) parseTuicNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -724,7 +724,7 @@ func (c *APIClient) parseTuicNodeSnapshotResponse(s *serverConfig) (*api.NodeSna
 	return nodeInfo, nil
 }
 
-// parseAnyTLSNodeResponse parse the response for AnyTLS nodes.
+// parseAnyTLSNodeSnapshotResponse parse the response for AnyTLS nodes.
 func (c *APIClient) parseAnyTLSNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -747,7 +747,7 @@ func (c *APIClient) parseAnyTLSNodeSnapshotResponse(s *serverConfig) (*api.NodeS
 	return nodeInfo, nil
 }
 
-// parseSocksNodeResponse parse the response for Socks proxy nodes.
+// parseSocksNodeSnapshotResponse parse the response for Socks proxy nodes.
 func (c *APIClient) parseSocksNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -762,7 +762,7 @@ func (c *APIClient) parseSocksNodeSnapshotResponse(s *serverConfig) (*api.NodeSn
 	return nodeInfo, nil
 }
 
-// parseHTTPNodeResponse parse the response for HTTP proxy nodes.
+// parseHTTPNodeSnapshotResponse parse the response for HTTP proxy nodes.
 func (c *APIClient) parseHTTPNodeSnapshotResponse(s *serverConfig) (*api.NodeSnapshot, error) {
 	if s == nil {
 		return nil, fmt.Errorf("server config is nil")
@@ -787,36 +787,12 @@ func materializeNodeInfo(snapshot *api.NodeSnapshot, err error) (*api.NodeInfo, 
 	return snapshot.ToNodeInfo(), nil
 }
 
-func (c *APIClient) parseTrojanNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseTrojanNodeSnapshotResponse(s))
-}
-
 func (c *APIClient) parseSSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	return materializeNodeInfo(c.parseSSNodeSnapshotResponse(s))
 }
 
 func (c *APIClient) parseV2rayNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
 	return materializeNodeInfo(c.parseV2rayNodeSnapshotResponse(s))
-}
-
-func (c *APIClient) parseHysteria2NodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseHysteria2NodeSnapshotResponse(s))
-}
-
-func (c *APIClient) parseTuicNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseTuicNodeSnapshotResponse(s))
-}
-
-func (c *APIClient) parseAnyTLSNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseAnyTLSNodeSnapshotResponse(s))
-}
-
-func (c *APIClient) parseSocksNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseSocksNodeSnapshotResponse(s))
-}
-
-func (c *APIClient) parseHTTPNodeResponse(s *serverConfig) (*api.NodeInfo, error) {
-	return materializeNodeInfo(c.parseHTTPNodeSnapshotResponse(s))
 }
 
 func parseHeartbeatSeconds(value string) int {

@@ -114,12 +114,13 @@ type TuicService struct {
 	rules *rule.Manager
 
 	mu           sync.RWMutex
-	users        map[string]userRecord           // authKey -> user
-	traffic      map[string]*userTraffic         // authKey -> counters
-	onlineIPs    map[string]map[string]struct{}  // authKey -> set of IPs
-	ipLastActive map[string]map[string]time.Time // authKey -> ip -> last active time
-	authUsers    []option.TUICUser               // users for sing-box TUIC authentication
-	rateLimiters map[string]*rate.Limiter        // authKey -> per-user speed limiter
+	connections  map[string]map[string]*deviceConnections // live connection ownership, not a candidate snapshot
+	users        map[string]userRecord                    // authKey -> user
+	traffic      map[string]*userTraffic                  // authKey -> counters
+	onlineIPs    map[string]map[string]struct{}           // authKey -> set of IPs
+	ipLastActive map[string]map[string]time.Time          // authKey -> ip -> last active time
+	authUsers    []option.TUICUser                        // users for sing-box TUIC authentication
+	rateLimiters map[string]*rate.Limiter                 // authKey -> per-user speed limiter
 
 	// reloadMu prevents concurrent rebuilds of the underlying sing-box
 	// instance when node configuration or certificates change.

@@ -189,7 +189,7 @@ type Hysteria2Service struct {
 
 	// reloadMu serializes hot-reload operations (node / cert changes) so that
 	// we never rebuild the underlying Hysteria2 server concurrently from
-	// multiple goroutines (nodeMonitor, certMonitor, Start).
+	// multiple goroutines (nodeMonitorContext, certMonitor, Start).
 	reloadMu operation.Gate
 
 	// portHopRules keeps track of the iptables rules we added for Hysteria2

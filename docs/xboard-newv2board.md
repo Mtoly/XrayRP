@@ -1,6 +1,6 @@
 # Xboard / NewV2board Compatibility
 
-This document describes the Xboard/NewV2board backend compatibility contract implemented by XrayRP. It intentionally focuses on node operation and does not claim parity with panel UI, subscription-template, or future control-plane features.
+This document describes XrayRP's backend compatibility with Xboard/NewV2board for node operation. Panel UI, subscription templates, and future control-plane features are outside its scope.
 
 ## Supported operating modes
 
@@ -16,9 +16,15 @@ The `newV2board` adapter supports:
 
 REST snapshots remain authoritative for complex runtime state. WebSocket events normally trigger the existing REST synchronization pipeline instead of directly publishing event payloads. The exception is `sync.devices`, which carries the panel-provided global device/IP snapshot used by limiter admission.
 
-Machine mode keeps one shared WebSocket connection for ordinary Xray, AnyTLS, TUIC, and Hysteria2 nodes. Specialized runtimes receive only node-scoped synchronization triggers: `sync.config` refreshes the complete REST node snapshot, `sync.users` and `sync.user.delta` refresh the complete REST user snapshot, and reconnect or parse recovery refreshes node, user, and rule snapshots. They do not apply WebSocket delta payloads or create per-node WebSocket connections.
+Machine mode keeps one shared WebSocket connection for ordinary Xray, AnyTLS, TUIC, and Hysteria2 nodes. Specialized runtimes receive only node-scoped synchronization triggers:
 
-Each specialized node has one bounded synchronization executor. A fixed 250 ms window merges duplicate and mixed pending triggers, and only one apply may run for that node at a time. Periodic polling submits through the same executor and remains active when WebSocket delivery is unavailable. Traffic, online-user, status, and audit reporting retain their existing periodic ownership and are not amplified by WebSocket user events.
+- `sync.config` refreshes the complete REST node snapshot.
+- `sync.users` and `sync.user.delta` refresh the complete REST user snapshot.
+- Reconnect or parse recovery refreshes node, user, and rule snapshots.
+
+These runtimes do not apply WebSocket delta payloads or create per-node WebSocket connections.
+
+Each specialized node has one bounded synchronization executor. A fixed 250 ms window merges duplicate and mixed pending triggers, and only one apply may run for that node at a time. Periodic polling submits through the same executor and remains active when WebSocket delivery is unavailable. Traffic, online-user, status, and audit reporting remain under their existing periodic tasks; WebSocket user events do not cause additional reports.
 
 Fetched machine candidates are retained separately from confirmed Applied node values. Failed REST, rule, or runtime replacement attempts leave the last-known-good runtime and rollback snapshot unchanged. Shutdown unregisters the node mailbox, stops periodic producers, cancels and joins in-flight synchronization, and only then retires runtime resources.
 
@@ -111,7 +117,7 @@ MachineConfig:
       ResyncOnReconnect: true
 ```
 
-XrayRP appends the `machine_id` and `token` query parameters itself, so the endpoint must not contain them. Explicit endpoints are operator-controlled, unlike handshake-discovered ones, so XrayRP does not enforce same-origin or downgrade protection here: point it at the panel origin, and use `wss://` whenever the panel itself is HTTPS.
+XrayRP appends the `machine_id` and `token` query parameters itself, so the endpoint must not contain them. Operators control explicit endpoints. XrayRP applies same-origin and downgrade protection to handshake-discovered endpoints, but does not enforce those checks on explicit endpoints. Point the explicit endpoint at the panel origin and use `wss://` whenever the panel itself is HTTPS.
 
 ### Reverse proxy for the Xboard ws-server
 
@@ -130,7 +136,10 @@ location /ws {
 
 Replace `127.0.0.1:8076` when the ws-server runs on another host or port, including the Docker service name when the proxy itself runs in a container network. TLS can terminate on nginx even though the upstream is plain `http://`; clients still connect with `wss://`.
 
-Two details decide whether the upgrade reaches the ws-server: keep the location prefix aligned with the path in `Endpoint` (`location /ws` matches the default `/ws`; a `location /ws/` block would not), and keep `proxy_pass` without a trailing slash so the `/ws` path is forwarded unchanged instead of being rewritten to `/`.
+Check both details so the upgrade reaches the ws-server:
+
+- Match the location prefix to the path in `Endpoint`. `location /ws` matches the default `/ws`; a `location /ws/` block would not.
+- Keep `proxy_pass` without a trailing slash. This forwards the `/ws` path unchanged instead of rewriting it to `/`.
 
 `proxy_read_timeout` must stay above `WebSocketConfig.HeartbeatInterval`, and above any CDN idle timeout in the path, or the proxy drops an idle connection between heartbeats. If Xboard runs as the all-in-one Docker image, the container's internal Caddy already routes `/ws` to its ws-server, so an external proxy only needs to forward the upgrade to the single published port.
 
@@ -155,14 +164,22 @@ Observability:
   Listen: "127.0.0.1:10085"
 ```
 
-Then confirm both the machine runtime and its node controllers report a connected shared WebSocket:
+Then check readiness and the shared WebSocket state:
 
 ```bash
 curl -fsS http://127.0.0.1:10085/readyz
 curl -fsS http://127.0.0.1:10085/metrics | grep 'xrayrp_runtime_state'
 ```
 
-`/readyz` returns HTTP 200 while the process is running; its body reports `ready`, or `degraded` when only the WebSocket (or report backlog) is unhealthy. A lost WebSocket connection therefore degrades readiness instead of failing it, which is intended: polling keeps node configuration converging. In the metrics output, `kind="machine"` must show `websocket="connected"`. Ordinary Xray nodes appear as `kind="controller"` rows and mirror the shared connection state, so they must also show `websocket="connected"`. AnyTLS, TUIC, and Hysteria2 nodes appear under their own `kind` and keep `websocket="disabled"` because they receive node-scoped triggers through the shared machine connection without owning it; judge their latency behavior from the `kind="machine"` row instead. A machine without discovered nodes has no node rows yet; that is expected.
+`/readyz` returns HTTP 200 while the process is running. Its body reports `ready`, or `degraded` when only the WebSocket or report backlog is unhealthy. Losing the WebSocket connection degrades readiness without failing it because polling keeps node configuration converging.
+
+In the metrics output, check the rows by runtime kind:
+
+- `kind="machine"` must show `websocket="connected"`.
+- Ordinary Xray nodes appear as `kind="controller"` rows. They mirror the shared connection state and must also show `websocket="connected"`.
+- AnyTLS, TUIC, and Hysteria2 nodes appear under their own `kind` and keep `websocket="disabled"`. They receive node-scoped triggers through the shared machine connection without owning it. Use the `kind="machine"` row to assess their WebSocket synchronization latency.
+
+A machine without discovered nodes has no node rows yet; this is expected.
 
 If `websocket` is not `connected`:
 
@@ -171,7 +188,7 @@ If `websocket` is not `connected`:
 - The connection drops on a fixed interval: `proxy_read_timeout` or a CDN idle timeout is shorter than `HeartbeatInterval`.
 - Xboard logs `invalid machine credentials` or the client receives an `error` event right after the upgrade: `MachineID` or `Token` does not match the machine entry in the panel.
 
-In all of these cases XrayRP keeps polling, so node configuration still converges; WebSocket only reduces synchronization latency.
+Polling continues during these failures. WebSocket reduces synchronization latency.
 
 ## `base_config` scheduling
 
@@ -236,7 +253,7 @@ Start with a minimal panel-side XHTTP object:
 
 For legacy unencrypted VLESS, keep `VlessFlow` empty for WS, gRPC, HTTPUpgrade, and XHTTP/splithttp. Use a flow such as `xtls-rprx-vision` only for compatible direct TCP TLS/REALITY deployments; XrayRP clears the flow for the other transports.
 
-When server-side VLESS Encryption is enabled (a non-empty `decryption` other than `none`), XTLS Vision is no longer limited by the underlying transport, so XrayRP keeps a panel-provided `xtls-rprx-vision` for transports such as XHTTP, WS, or gRPC. XrayRP never adds the flow by itself: it only stops discarding the value the panel already sent, and it still clears an unencrypted non-TCP flow.
+When server-side VLESS Encryption is enabled (a non-empty `decryption` other than `none`), XTLS Vision is no longer limited by the underlying transport. XrayRP therefore preserves a panel-provided `xtls-rprx-vision` for transports such as XHTTP, WS, or gRPC. It does not add a flow on its own. For unencrypted non-TCP transports, XrayRP still clears the flow.
 
 Raw `extra`, `xmux`, and `downloadSettings` shapes can vary between panel and Xray-core versions. Validate the minimal transport first, then add only fields supported by the exact deployed panel, adapter, and Xray-core versions.
 
