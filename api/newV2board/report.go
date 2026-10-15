@@ -259,10 +259,6 @@ func (c *APIClient) legacyTrafficPath() string {
 	return "/api/v1/server/UniProxy/push"
 }
 
-func (c *APIClient) reportLegacyNodeStatus(nodeStatus *api.NodeStatus) error {
-	return c.reportLegacyNodeStatusContext(context.Background(), nodeStatus)
-}
-
 func (c *APIClient) reportLegacyNodeStatusContext(ctx context.Context, nodeStatus *api.NodeStatus) error {
 	path := c.legacyStatusPath()
 
@@ -292,10 +288,6 @@ func (c *APIClient) reportLegacyNodeStatusContext(ctx context.Context, nodeStatu
 	return err
 }
 
-func (c *APIClient) reportLegacyNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
-	return c.reportLegacyNodeOnlineUsersContext(context.Background(), onlineUserList)
-}
-
 func (c *APIClient) reportLegacyNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 	path := c.legacyAlivePath()
 	data := buildAliveMap(onlineUserList, c.NodeID)
@@ -308,10 +300,6 @@ func (c *APIClient) reportLegacyNodeOnlineUsersContext(ctx context.Context, onli
 
 	_, err = c.parseResponse(res, path, err)
 	return err
-}
-
-func (c *APIClient) reportLegacyUserTraffic(userTraffic *[]api.UserTraffic) error {
-	return c.reportLegacyUserTrafficContext(context.Background(), userTraffic)
 }
 
 func (c *APIClient) reportLegacyUserTrafficContext(ctx context.Context, userTraffic *[]api.UserTraffic) error {

@@ -15,6 +15,7 @@ func (config *Config) Clone() *Config {
 
 	cloned := *config
 	cloned.CertConfig = cloneCertConfig(config.CertConfig)
+	cloned.localCertConfig = cloneCertConfig(config.localCertConfig)
 	cloned.AutoSpeedLimitConfig = cloneAutoSpeedLimitConfig(config.AutoSpeedLimitConfig)
 	cloned.GlobalDeviceLimitConfig = cloneGlobalDeviceLimitConfig(config.GlobalDeviceLimitConfig)
 	cloned.FallBackConfigs = cloneFallBackConfigs(config.FallBackConfigs)

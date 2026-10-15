@@ -6,6 +6,17 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Security
 
+- Removed authentication credentials from Hysteria2 audit disconnect warnings. The warnings now identify known users by panel UID and omit user identity when the user is no longer present.
+
+### Fixed
+
+- Unified startup and certificate synchronization over the original local certificate configuration. Panel fields take precedence when supplied, while omitted DNS credentials and other fields fall back to local configuration; values removed from later panel snapshots no longer persist from earlier snapshots. Removing panel certificate configuration restores the local configuration.
+- Preserved AnyTLS/TUIC device-limit reservations across online reports. Connections from the same IP now share one device slot until the last connection closes, including idle connections; closing a rejected, duplicate, or retired connection no longer releases another connection's slot.
+
+## 0.9.6 - 2026-10-12
+
+### Security
+
 - Updated `golang.org/x/net` from `v0.59.0` to `v0.60.0` to fix the reachable advisories `GO-2026-6603`, `GO-2026-6610`, `GO-2026-6611`, `GO-2026-6612`, and `GO-2026-6617`.
 - Updated the Docker builder image from Go `1.27.1` to `1.27.2` so container binaries include the Go standard-library security fixes released in `1.27.2`.
 
@@ -13,6 +24,8 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Kept Xray node user traffic that arrives while a traffic report is in flight; a successful report now subtracts only the reported bytes instead of zeroing the counters.
 - Applied panel user changes to running AnyTLS and TUIC listeners. Added users and changed credentials previously failed authentication until the node was rebuilt by a configuration change, certificate renewal, or restart; user updates now take effect without dropping established connections. The listeners are derived from the sing-box `v1.14.2` AnyTLS and TUIC inbounds.
+- Bounded Xboard/NewV2board WebSocket event writes to 10 seconds. A panel connection that stops reading no longer blocks the WebSocket runtime and its shutdown until TCP gives up; the write fails and the runtime reconnects while polling continues.
+- Retried the last known good configuration every 30 seconds when a hot reload fails to start both the new and the previous configuration, for example during a panel outage. Previously no node ran until the next configuration change or a manual restart.
 
 ## 0.9.5 - 2026-10-07
 
@@ -222,4 +235,4 @@ See [Xboard / NewV2board Compatibility](./docs/xboard-newv2board.md) for the cur
 
 An older `0.9.8` tag/release used a version number outside the current release sequence. Its GitHub Release and active remote and primary local tag references were intentionally retired in October 2026, while the underlying commits and Git history remain preserved.
 
-The maintained release sequence continues from `0.9.4` to `0.9.5`.
+The maintained release sequence continues from `0.9.4` through `0.9.5` to `0.9.6`.
