@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
@@ -362,11 +361,16 @@ func (a nodeRuntimeStateApplyModule) applySyncSnapshotContext(ctx context.Contex
 	}
 
 	nodeChanged := false
-	certChanged := snapshot.CertConfigFetched && !panelCertConfigEqual(c.config.CertConfig, snapshot.CertConfig)
+	var nextCertConfig *mylego.CertConfig
+	certChanged := false
+	if snapshot.CertConfigFetched {
+		nextCertConfig = candidateCertConfig(c.config.localCertConfig, snapshot.CertConfig)
+		certChanged = !certConfigEqual(c.config.CertConfig, nextCertConfig)
+	}
 	appliedConfig := cloneControllerConfig(c.config)
 	candidateConfig := cloneControllerConfig(c.config)
 	if certChanged {
-		candidateConfig.CertConfig = candidateCertConfig(c.config.CertConfig, snapshot.CertConfig)
+		candidateConfig.CertConfig = nextCertConfig
 	}
 	nextNodeSnapshot := snapshot.NodeSnapshot
 	forceCertificateRebuild := certChanged && currentNodeSnapshot != nil && currentNodeSnapshot.EnableTLS && !currentNodeSnapshot.EnableREALITY && !candidateConfig.EnableREALITY
@@ -862,24 +866,10 @@ func (a nodeRuntimeStateApplyModule) restoreRuntimeUsersBestEffortSnapshot(snaps
 	return errors.Join(rollbackErrs...)
 }
 
-func candidateCertConfig(current *mylego.CertConfig, next *api.XrayRCertConfig) *mylego.CertConfig {
-	if next == nil {
-		return nil
-	}
-	candidate := cloneRuntimeCertConfig(current)
-	if candidate == nil {
-		candidate = &mylego.CertConfig{}
-	}
-	candidate.CertMode = normalizeCertMode(next.CertMode, next.Provider, next.DNSEnv)
-	candidate.CertDomain = next.CertDomain
-	candidate.CertFile = next.CertFile
-	candidate.KeyFile = next.KeyFile
-	candidate.CertContent = next.CertContent
-	candidate.KeyContent = next.KeyContent
-	candidate.Provider = next.Provider
-	candidate.Email = next.Email
-	candidate.DNSEnv = cloneStringMap(next.DNSEnv)
-	return candidate
+// candidateCertConfig merges one panel snapshot over the local certificate
+// basis, the same rule startup applies, so both paths converge on one result.
+func candidateCertConfig(local *mylego.CertConfig, next *api.XrayRCertConfig) *mylego.CertConfig {
+	return mergePanelCertConfig(local, next)
 }
 
 func cloneRuntimeCertConfig(certConfig *mylego.CertConfig) *mylego.CertConfig {
@@ -1155,32 +1145,6 @@ func detectRuleListsEqual(current, next []api.DetectRule) bool {
 		}
 	}
 	return true
-}
-
-func panelCertConfigEqual(current *mylego.CertConfig, next *api.XrayRCertConfig) bool {
-	if current == nil || next == nil {
-		return current == nil && next == nil
-	}
-	return normalizeCertMode(current.CertMode, current.Provider, current.DNSEnv) == normalizeCertMode(next.CertMode, next.Provider, next.DNSEnv) &&
-		current.CertDomain == next.CertDomain &&
-		current.CertFile == next.CertFile &&
-		current.KeyFile == next.KeyFile &&
-		current.CertContent == next.CertContent &&
-		current.KeyContent == next.KeyContent &&
-		current.Provider == next.Provider &&
-		current.Email == next.Email &&
-		reflect.DeepEqual(current.DNSEnv, next.DNSEnv)
-}
-
-func normalizeCertMode(certMode, provider string, dnsEnv map[string]string) string {
-	mode := strings.ToLower(strings.TrimSpace(certMode))
-	if mode != "" {
-		return mode
-	}
-	if strings.TrimSpace(provider) != "" || len(dnsEnv) > 0 {
-		return "dns"
-	}
-	return ""
 }
 
 func clonePanelCertConfig(certConfig *api.XrayRCertConfig) *api.XrayRCertConfig {
