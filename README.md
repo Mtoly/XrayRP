@@ -14,16 +14,16 @@
 
 ## 概览
 
-XrayRP 在节点机上应用面板下发的节点、用户和规则配置，并回报运行状态、流量与在线数据，减少逐节点维护配置的工作。
+XrayRP 在节点机上运行，应用面板下发的节点、用户和规则配置，再向面板上报运行状态、流量和在线数据，减少手动维护各节点配置的工作。
 
-面板负责节点与用户管理，XrayRP 负责同步和运行时生命周期。Xray-core 承载主要代理协议与传输；AnyTLS、TUIC 使用内嵌 sing-box，Hysteria2 使用 Hysteria core/extras。
+面板管理节点和用户，XrayRP 同步配置并管理节点运行时。主要代理协议和传输由 Xray-core 处理，AnyTLS、TUIC 使用内嵌的 sing-box，Hysteria2 使用 Hysteria core/extras。
 
 ## 核心能力
 
-- **面板对接**：Xboard / NewV2board 使用 `NewV2board` 适配器；其他面板与配置名称见[配置示例](./release/config/config.yml.example)。
-- **协议支持**：VLESS、VMess、Trojan、Shadowsocks（含 Plugin）、AnyTLS、TUIC、Hysteria2；完整 `NodeType` 清单见配置示例。具体支持取决于面板、适配器和运行时版本。
-- **自动同步**：Xboard / NewV2board 支持轮询与 WebSocket 双活，配置与用户事件通过共享的 REST 快照同步路径处理；连接中断后轮询继续工作。
-- **运维与可靠性**：流量与在线统计、限速、证书申请与续签、自定义 DNS、路由和审计规则；可选 Redis 设备缓存、健康检查与 Prometheus 指标。配置热重载失败时保留上次可用状态。
+- Xboard / NewV2board 使用 `NewV2board` 适配器；其他面板与配置名称见[配置示例](./release/config/config.yml.example)。
+- 支持 VLESS、VMess、Trojan、Shadowsocks（含 Plugin）、AnyTLS、TUIC、Hysteria2；完整 `NodeType` 清单见配置示例。具体支持取决于面板、适配器和运行时版本。
+- Xboard / NewV2board 可同时使用轮询和 WebSocket。配置、用户事件都通过同一条 REST 快照同步路径处理；WebSocket 断开后，轮询仍会继续。
+- 提供流量和在线统计、限速、证书申请与续签，以及自定义 DNS、路由和审计规则。可按需启用 Redis 设备缓存、健康检查和 Prometheus 指标。配置热重载失败时，会保留上次可用状态。
 
 Xboard 的 VLESS Encryption 使用面板下发的服务端 `decryption`，须关闭 inbound fallback。VLESS 的 REALITY、XHTTP 与 XTLS Vision 组合及字段映射见[兼容文档](./docs/xboard-newv2board.md#vless-trojan-reality-and-xhttp)。
 
@@ -33,7 +33,7 @@ AnyTLS、TUIC、Hysteria2 需配置证书；AnyTLS 使用面板下发的 `paddin
 
 ## 快速开始
 
-当前脚本安装要求 Linux、root 权限和 systemd。先在面板配置节点或绑定机器；远程 `ApiHost` 必须使用 HTTPS，HTTP 仅用于回环开发地址。
+安装脚本需要 Linux、root 权限和 systemd。安装前，先在面板配置节点或绑定机器。远程 `ApiHost` 必须使用 HTTPS；HTTP 只用于本机回环地址下的开发。
 
 ### 一键安装
 
@@ -45,7 +45,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.s
 
 ### Xboard Machine Mode
 
-先在 Xboard 创建并绑定机器，取得 `MachineID` 和 `Token`。以下示例需替换为实际值；脚本用于安装与配置，机器注册在面板中完成。
+先在 Xboard 中创建并绑定机器，取得 `MachineID` 和 `Token`，再将下面的示例值换成实际值。脚本负责安装和配置，机器注册需在面板中完成。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
@@ -56,9 +56,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-m
   --ws-endpoint "wss://panel.example.com/ws"
 ```
 
-Machine Mode 不使用 handshake 自动发现：请明确配置 `--ws-endpoint`，指向本部署实际公开的 `ws-server` 地址，通常为 `/ws`，HTTPS 面板应使用 `wss://`。部署与兼容细节见[部署说明](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket)。
+Machine Mode 不通过 handshake 自动发现连接地址。请用 `--ws-endpoint` 指定部署中对外提供的 `ws-server` 地址，路径通常为 `/ws`；HTTPS 面板应使用 `wss://`。部署与兼容细节见[部署说明](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket)。
 
-`MachineConfig` 与静态 `Nodes` 互斥；静态模式仍从面板同步节点配置与用户。已有配置默认保留，确认覆盖时才加 `--force`。
+`MachineConfig` 与静态 `Nodes` 只能选一种。静态模式也会从面板同步节点配置和用户。脚本默认保留已有配置，需要覆盖时再加 `--force`。
 
 <a name="docker"></a>
 
@@ -73,7 +73,7 @@ docker run -d --name xrayrp --restart unless-stopped \
   ghcr.io/mtoly/xrayrp:latest
 ```
 
-镜像发布原始 Release 标签与 `latest`；`latest` 随每次发布更新，包括预发布，升级时需重新拉取镜像并重建容器。生产部署可固定正式 Release 标签。
+镜像使用原始 Release 标签和 `latest` 标签。每次发布都会更新 `latest`，预发布也不例外。升级时需重新拉取镜像并重建容器；生产部署可固定使用正式 Release 标签。
 
 <a name="documentation"></a>
 
@@ -87,7 +87,7 @@ docker run -d --name xrayrp --restart unless-stopped \
 | [Releases](https://github.com/Mtoly/XrayRP/releases) · [Changelog](./CHANGELOG.md) | 下载、版本变化与发布校验文件 |
 | [go.mod](./go.mod) · [CI](./.github/workflows/test.yml) · [发布构建](./.github/workflows/release.yml) | Go 版本要求、测试与构建入口 |
 
-源码构建遵循 `go.mod` 的 Go 版本要求；包含 QUIC 支持的构建命令为 `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`。
+从源码构建时，请使用符合 `go.mod` 要求的 Go 版本。需要 QUIC 支持时，运行 `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`。
 
 手动下载时使用同一 Release 的 `SHA256SUMS` 校验归档；签名包为 `SHA256SUMS.sigstore.json`。SBOM 与 provenance 记录保存在发布工作流产物中。
 
@@ -97,6 +97,6 @@ docker run -d --name xrayrp --restart unless-stopped \
 
 采用 [Mozilla Public License 2.0](./LICENSE)。
 
-项目历史与上游：[XrayR](https://github.com/XrayR-project/XrayR)。工具命名和配置路径沿用 `XrayR`。
+项目源自 [XrayR](https://github.com/XrayR-project/XrayR)，工具名称和配置路径沿用 `XrayR`。
 
 感谢 [Project X](https://github.com/XTLS/)、[V2Fly](https://github.com/v2fly)、[VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray) 与 [Air-Universe](https://github.com/crossfw/Air-Universe)。
