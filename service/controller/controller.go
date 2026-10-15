@@ -127,6 +127,11 @@ func New(server *core.Instance, apiClient PanelClient, config *Config, panelType
 		logger.Panicf("failed to get mydispatcher.DefaultDispatcher feature, got %T", dispRaw)
 	}
 
+	// Record the locally declared certificate basis before any panel snapshot
+	// is merged into the config. Idempotent, so materialize-first callers keep
+	// their earlier capture.
+	config.CaptureLocalCertConfig()
+
 	controller := &Controller{
 		server:     server,
 		config:     config,

@@ -44,6 +44,9 @@ const (
 	// panelReloadCandidateObservationDelay separates snapshots so a writer that
 	// truncates and rewrites the file has time to finish.
 	panelReloadCandidateObservationDelay = 50 * time.Millisecond
+	// panelReloadRecoveryDelay spaces last-known-good restore retries after a
+	// reload left no runtime running, for example during a panel outage.
+	panelReloadRecoveryDelay = 30 * time.Second
 )
 
 type panelRuntime interface {
@@ -82,6 +85,7 @@ type panelReloadOperation uint8
 const (
 	panelReloadOperationReload panelReloadOperation = iota
 	panelReloadOperationClose
+	panelReloadOperationRecover
 )
 
 type panelReloadOperationPhase uint8
@@ -125,6 +129,8 @@ type panelReloadOptions struct {
 	now                func() time.Time
 	reloadClock        func() time.Time
 	observeOperation   func(panelReloadOperation, panelReloadOperationPhase)
+	// waitRecovery is the deterministic seam for the restore retry delay.
+	waitRecovery func(context.Context, time.Duration) error
 }
 
 type panelReloadObservation struct {
@@ -152,6 +158,12 @@ type panelReloadModule struct {
 	reloadClock       func() time.Time
 	observeOp         func(panelReloadOperation, panelReloadOperationPhase)
 	reload            panelReloadObservation
+	waitRecovery      func(context.Context, time.Duration) error
+	// recoveryMu guards the last-known-good restore retry goroutine. It is
+	// started and stopped only while operationMu is held.
+	recoveryMu     sync.Mutex
+	recoveryCancel context.CancelFunc
+	recoveryDone   chan struct{}
 }
 
 func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRuntime, options panelReloadOptions) *panelReloadModule {
@@ -163,6 +175,9 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 	}
 	if options.waitCandidate == nil {
 		options.waitCandidate = waitForPanelReloadObservation
+	}
+	if options.waitRecovery == nil {
+		options.waitRecovery = waitForPanelReloadObservation
 	}
 	if options.validateCandidate == nil {
 		options.validateCandidate = validatePanelReloadCandidate
@@ -210,6 +225,7 @@ func newPanelReloadModule(initialConfig *panel.Config, initialRuntime panelRunti
 		now:               options.now,
 		reloadClock:       options.reloadClock,
 		observeOp:         options.observeOperation,
+		waitRecovery:      options.waitRecovery,
 	}
 }
 
@@ -361,6 +377,9 @@ func (m *panelReloadModule) CloseContext(parent context.Context) error {
 	}
 	defer m.endOperation(panelReloadOperationClose)
 
+	if err := m.stopRecovery(ctx); err != nil {
+		return err
+	}
 	current := m.stateSnapshot()
 	if current.status == panelReloadStatusClosed {
 		return nil
@@ -386,12 +405,6 @@ func (m *panelReloadModule) CloseContext(parent context.Context) error {
 	})
 	return nil
 }
-func (m *panelReloadModule) restoreLastKnownGood(previous panelReloadState, errs []error) error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultStartTimeout)
-	defer cancel()
-	return m.restoreLastKnownGoodContext(ctx, previous, errs)
-}
-
 func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, previous panelReloadState, errs []error) error {
 	ctx, cancel := service.WithDefaultTimeout(context.WithoutCancel(parent), service.DefaultStartTimeout)
 	defer cancel()
@@ -405,6 +418,7 @@ func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, 
 			failure: joined,
 		})
 		log.Error("Hot reload: failed to restore old panel")
+		m.scheduleRecovery()
 		return joined
 	}
 
@@ -432,6 +446,7 @@ func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, 
 			failure: joined,
 		})
 		log.Error("Hot reload: failed to restore old panel")
+		m.scheduleRecovery()
 		return joined
 	}
 
@@ -442,10 +457,69 @@ func (m *panelReloadModule) restoreLastKnownGoodContext(parent context.Context, 
 	})
 	return errors.Join(errs...)
 }
-func (m *panelReloadModule) beginOperation(operation panelReloadOperation) {
-	_ = m.beginOperationContext(context.Background(), operation)
+
+// scheduleRecovery starts the last-known-good restore retry loop unless one is
+// already running. Callers hold operationMu.
+func (m *panelReloadModule) scheduleRecovery() {
+	m.recoveryMu.Lock()
+	defer m.recoveryMu.Unlock()
+	if m.recoveryDone != nil {
+		select {
+		case <-m.recoveryDone:
+		default:
+			return
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.recoveryCancel = cancel
+	m.recoveryDone = done
+	log.Warnf("Hot reload: no panel is running; retrying the last known good configuration every %s", panelReloadRecoveryDelay)
+	go m.runRecovery(ctx, done)
 }
 
+// stopRecovery cancels the retry loop and waits for it to exit. Callers hold
+// operationMu, so the loop can only be waiting for its delay or the gate.
+func (m *panelReloadModule) stopRecovery(ctx context.Context) error {
+	m.recoveryMu.Lock()
+	cancel, done := m.recoveryCancel, m.recoveryDone
+	m.recoveryMu.Unlock()
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runRecovery retries the last-known-good restore until it succeeds, a reload
+// or Close replaces the failed state, or the loop is cancelled.
+func (m *panelReloadModule) runRecovery(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	for {
+		if err := m.waitRecovery(ctx, panelReloadRecoveryDelay); err != nil {
+			return
+		}
+		if err := m.beginOperationContext(ctx, panelReloadOperationRecover); err != nil {
+			return
+		}
+		current := m.stateSnapshot()
+		if current.status != panelReloadStatusFailed {
+			m.endOperation(panelReloadOperationRecover)
+			return
+		}
+		err := m.restoreLastKnownGoodContext(ctx, current, nil)
+		m.endOperation(panelReloadOperationRecover)
+		if err == nil {
+			log.Info("Hot reload: restored the last known good configuration")
+			return
+		}
+	}
+}
 func (m *panelReloadModule) beginOperationContext(ctx context.Context, operation panelReloadOperation) error {
 	if m.observeOp != nil {
 		m.observeOp(operation, panelReloadOperationAttempted)

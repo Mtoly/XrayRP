@@ -14,16 +14,16 @@
 
 ## Tổng quan
 
-XrayRP áp dụng cấu hình node, người dùng và quy tắc do panel cung cấp trên máy node, rồi báo cáo trạng thái vận hành, lưu lượng và dữ liệu trực tuyến về panel, giúp giảm việc cấu hình từng node.
+XrayRP chạy trên máy node, áp dụng cấu hình node, người dùng và quy tắc từ panel, rồi gửi lại trạng thái vận hành, lưu lượng và dữ liệu trực tuyến. Nhờ đó, bạn bớt phải cấu hình thủ công từng node.
 
-Panel quản lý node và người dùng; XrayRP phụ trách đồng bộ và vòng đời runtime. Xray-core xử lý các giao thức proxy và phương thức truyền tải chính. AnyTLS và TUIC dùng sing-box nhúng; Hysteria2 dùng Hysteria core/extras.
+Panel quản lý node và người dùng. XrayRP đồng bộ cấu hình và quản lý runtime. Xray-core xử lý các giao thức proxy và phương thức truyền tải chính. AnyTLS và TUIC dùng sing-box nhúng; Hysteria2 dùng Hysteria core/extras.
 
 ## Tính năng
 
-- **Tích hợp panel**: Xboard / NewV2board dùng adapter `NewV2board`. Các panel khác và tên cấu hình tương ứng có trong [cấu hình mẫu](./release/config/config.yml.example).
-- **Hỗ trợ giao thức**: VLESS, VMess, Trojan, Shadowsocks (bao gồm Plugin), AnyTLS, TUIC và Hysteria2. Danh sách `NodeType` đầy đủ có trong cấu hình mẫu. Khả năng hỗ trợ phụ thuộc vào phiên bản panel, adapter và runtime.
-- **Đồng bộ tự động**: Xboard / NewV2board hỗ trợ polling và WebSocket cùng hoạt động. Sự kiện cấu hình và người dùng đi qua luồng đồng bộ snapshot REST chung; polling vẫn tiếp tục khi kết nối bị ngắt.
-- **Vận hành & độ tin cậy**: Thống kê lưu lượng và dữ liệu trực tuyến, giới hạn tốc độ, cấp và gia hạn chứng chỉ, DNS, định tuyến và quy tắc kiểm toán tùy chỉnh; bộ đệm thiết bị Redis, kiểm tra sức khỏe và chỉ số Prometheus tùy chọn. Khi tải lại nóng cấu hình thất bại, trạng thái hoạt động tốt gần nhất được giữ lại.
+- Xboard / NewV2board dùng adapter `NewV2board`. Các panel khác và tên cấu hình tương ứng có trong [cấu hình mẫu](./release/config/config.yml.example).
+- Hỗ trợ VLESS, VMess, Trojan, Shadowsocks (bao gồm Plugin), AnyTLS, TUIC và Hysteria2. Danh sách `NodeType` đầy đủ có trong cấu hình mẫu. Khả năng hỗ trợ phụ thuộc vào phiên bản panel, adapter và runtime.
+- Xboard / NewV2board có thể dùng polling và WebSocket cùng lúc. Sự kiện cấu hình và người dùng đi qua cùng một luồng đồng bộ snapshot REST. Polling vẫn tiếp tục khi WebSocket bị ngắt.
+- XrayRP cung cấp thống kê lưu lượng và dữ liệu trực tuyến, giới hạn tốc độ, cấp và gia hạn chứng chỉ, cùng DNS, định tuyến và quy tắc kiểm toán tùy chỉnh. Bạn có thể bật thêm bộ đệm thiết bị Redis, kiểm tra sức khỏe và chỉ số Prometheus. Nếu tải lại nóng cấu hình thất bại, XrayRP giữ trạng thái hoạt động tốt gần nhất.
 
 VLESS Encryption của Xboard dùng giá trị `decryption` phía máy chủ do panel cung cấp và yêu cầu tắt fallback inbound. Xem [tài liệu tương thích](./docs/xboard-newv2board.md#vless-trojan-reality-and-xhttp) để biết các tổ hợp REALITY, XHTTP, XTLS Vision của VLESS và cách ánh xạ trường.
 
@@ -33,7 +33,7 @@ AnyTLS, TUIC và Hysteria2 cần cấu hình chứng chỉ. AnyTLS dùng `paddin
 
 ## Bắt đầu nhanh
 
-Các script cài đặt hiện tại yêu cầu Linux, quyền root và systemd. Trước tiên, cấu hình node hoặc gắn máy trong panel. `ApiHost` từ xa phải dùng HTTPS; HTTP chỉ dành cho địa chỉ loopback khi phát triển.
+Các script cài đặt yêu cầu Linux, quyền root và systemd. Trước khi cài đặt, cấu hình node hoặc gắn máy trong panel. `ApiHost` từ xa phải dùng HTTPS; HTTP chỉ dành cho địa chỉ loopback khi phát triển.
 
 ### Cài đặt bằng một lệnh
 
@@ -56,9 +56,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-m
   --ws-endpoint "wss://panel.example.com/ws"
 ```
 
-Machine Mode không dùng handshake để tự tìm endpoint. Đặt rõ `--ws-endpoint` thành địa chỉ công khai thực tế của `ws-server` trong triển khai, thường là `/ws`; dùng `wss://` khi panel dùng HTTPS. Xem chi tiết triển khai và tương thích trong [hướng dẫn triển khai](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket).
+Machine Mode không tự tìm địa chỉ kết nối qua handshake. Đặt `--ws-endpoint` thành địa chỉ công khai của `ws-server` trong hệ thống của bạn, thường có đường dẫn `/ws`. Dùng `wss://` khi panel dùng HTTPS. Xem chi tiết triển khai và tương thích trong [hướng dẫn triển khai](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket).
 
-`MachineConfig` và `Nodes` tĩnh loại trừ lẫn nhau. Chế độ tĩnh vẫn đồng bộ cấu hình node và người dùng từ panel. Cấu hình hiện có được giữ lại theo mặc định; chỉ thêm `--force` khi xác nhận ghi đè.
+Chọn một trong hai: `MachineConfig` hoặc `Nodes` tĩnh. Chế độ tĩnh cũng đồng bộ cấu hình node và người dùng từ panel. Script mặc định giữ cấu hình hiện có; thêm `--force` nếu muốn ghi đè.
 
 <a name="docker"></a>
 
@@ -73,7 +73,7 @@ docker run -d --name xrayrp --restart unless-stopped \
   ghcr.io/mtoly/xrayrp:latest
 ```
 
-Image được phát hành với tag Release gốc và `latest`. Mỗi lần phát hành, kể cả bản phát hành trước, đều cập nhật `latest`; cần pull lại image và tạo lại container để nâng cấp. Triển khai production có thể ghim tag Release ổn định.
+Image dùng tag Release gốc và `latest`. Mọi lần phát hành đều cập nhật `latest`, kể cả bản phát hành trước. Để nâng cấp, pull image mới và tạo lại container. Khi triển khai production, bạn có thể ghim tag Release ổn định.
 
 <a name="documentation"></a>
 
@@ -87,7 +87,7 @@ Image được phát hành với tag Release gốc và `latest`. Mỗi lần ph�
 | [Releases](https://github.com/Mtoly/XrayRP/releases) · [Changelog](./CHANGELOG.md) | Tải xuống, thay đổi phiên bản và tệp xác minh bản phát hành |
 | [go.mod](./go.mod) · [CI](./.github/workflows/test.yml) · [Build bản phát hành](./.github/workflows/release.yml) | Yêu cầu phiên bản Go, kiểm thử và build |
 
-Build từ mã nguồn theo yêu cầu phiên bản Go trong `go.mod`. Lệnh build có hỗ trợ QUIC: `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`.
+Khi build từ mã nguồn, dùng phiên bản Go đáp ứng yêu cầu trong `go.mod`. Để bật hỗ trợ QUIC, chạy `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`.
 
 Khi tải thủ công, xác minh gói nén bằng `SHA256SUMS` của cùng Release. Gói chữ ký là `SHA256SUMS.sigstore.json`. Bản ghi SBOM và provenance được giữ trong artifact của workflow phát hành.
 
@@ -97,6 +97,6 @@ Báo lỗi và đề xuất cải tiến qua [GitHub Issues](https://github.com/
 
 Sử dụng [Mozilla Public License 2.0](./LICENSE).
 
-Lịch sử dự án và upstream: [XrayR](https://github.com/XrayR-project/XrayR). Tên công cụ và đường dẫn cấu hình giữ cách đặt tên `XrayR`.
+XrayRP dựa trên [XrayR](https://github.com/XrayR-project/XrayR) và giữ tên `XrayR` cho công cụ và đường dẫn cấu hình.
 
 Cảm ơn [Project X](https://github.com/XTLS/), [V2Fly](https://github.com/v2fly), [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray) và [Air-Universe](https://github.com/crossfw/Air-Universe).

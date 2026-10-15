@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-tun"
@@ -19,11 +20,15 @@ import (
 
 type connCounter struct {
 	net.Conn
-	svc     *AnyTLSService
-	user    string
-	blocked bool
-	ctx     context.Context
-	limiter *rate.Limiter
+	host      string
+	svc       *AnyTLSService
+	user      string
+	blocked   bool
+	ctx       context.Context
+	limiter   *rate.Limiter
+	device    *deviceConnections
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *connCounter) Read(p []byte) (int, error) {
@@ -33,7 +38,7 @@ func (c *connCounter) Read(p []byte) (int, error) {
 	n, readErr := c.Conn.Read(p)
 	if n > 0 {
 		if c.svc != nil {
-			c.svc.recordTraffic(c.user, uint64(n), 0, trafficHost(c.Conn.RemoteAddr()))
+			c.svc.recordTraffic(c.user, uint64(n), 0, c.host)
 		}
 		if c.limiter != nil {
 			if limitErr := commonlimiter.WaitN(admissionContext(c.ctx), c.limiter, uint64(n)); limitErr != nil {
@@ -56,52 +61,33 @@ func (c *connCounter) Write(p []byte) (int, error) {
 	n, writeErr := c.Conn.Write(p)
 	if n > 0 {
 		if c.svc != nil {
-			c.svc.recordTraffic(c.user, 0, uint64(n), trafficHost(c.Conn.RemoteAddr()))
+			c.svc.recordTraffic(c.user, 0, uint64(n), c.host)
 		}
 	}
 	return n, writeErr
 }
 
 func (c *connCounter) Close() error {
-	if c.svc != nil && c.user != "" {
-		remote := ""
-		if addr := c.Conn.RemoteAddr(); addr != nil {
-			remote = addr.String()
+	c.closeOnce.Do(func() {
+		c.closeErr = c.Conn.Close()
+		if c.svc != nil {
+			c.svc.releaseConnection(c.user, c.host, c.device)
 		}
-		host := remote
-		if host != "" {
-			if h, _, err := net.SplitHostPort(host); err == nil {
-				host = h
-			}
-		}
-
-		c.svc.mu.Lock()
-		if ips, ok := c.svc.onlineIPs[c.user]; ok && host != "" {
-			delete(ips, host)
-			if len(ips) == 0 {
-				delete(c.svc.onlineIPs, c.user)
-			}
-		}
-		// Also remove from ipLastActive
-		if activeMap, ok := c.svc.ipLastActive[c.user]; ok && host != "" {
-			delete(activeMap, host)
-			if len(activeMap) == 0 {
-				delete(c.svc.ipLastActive, c.user)
-			}
-		}
-		c.svc.mu.Unlock()
-	}
-	return c.Conn.Close()
+	})
+	return c.closeErr
 }
 
 type packetConnCounter struct {
 	N.PacketConn
-	svc     *AnyTLSService
-	user    string
-	host    string
-	blocked bool
-	ctx     context.Context
-	limiter *rate.Limiter
+	svc       *AnyTLSService
+	user      string
+	host      string
+	blocked   bool
+	ctx       context.Context
+	limiter   *rate.Limiter
+	device    *deviceConnections
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *packetConnCounter) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
@@ -143,24 +129,13 @@ func (c *packetConnCounter) WritePacket(buffer *buf.Buffer, destination M.Socksa
 }
 
 func (c *packetConnCounter) Close() error {
-	if c.svc != nil && c.user != "" && c.host != "" {
-		c.svc.mu.Lock()
-		if ips, ok := c.svc.onlineIPs[c.user]; ok {
-			delete(ips, c.host)
-			if len(ips) == 0 {
-				delete(c.svc.onlineIPs, c.user)
-			}
+	c.closeOnce.Do(func() {
+		c.closeErr = c.PacketConn.Close()
+		if c.svc != nil {
+			c.svc.releaseConnection(c.user, c.host, c.device)
 		}
-		// Also remove from ipLastActive
-		if activeMap, ok := c.svc.ipLastActive[c.user]; ok {
-			delete(activeMap, c.host)
-			if len(activeMap) == 0 {
-				delete(c.svc.ipLastActive, c.user)
-			}
-		}
-		c.svc.mu.Unlock()
-	}
-	return c.PacketConn.Close()
+	})
+	return c.closeErr
 }
 
 type anyTLSTracker struct {
@@ -238,9 +213,11 @@ func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m a
 	}
 
 	// Device limit check (only if not already blocked by audit).
-	if !blocked && !t.svc.allowConnection(m.User, remote) {
-		// allowConnection already logs a warning when device limit is exceeded.
-		blocked = true
+	var device *deviceConnections
+	if !blocked {
+		var admitted bool
+		device, admitted = t.svc.allowConnection(m.User, remote)
+		blocked = !admitted
 	}
 
 	var limiter *rate.Limiter
@@ -255,7 +232,7 @@ func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m a
 		return &connCounter{Conn: conn, svc: t.svc, user: m.User, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &connCounter{Conn: conn, svc: t.svc, user: m.User, ctx: ctx, limiter: limiter}
+	return &connCounter{Conn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, ctx: ctx, limiter: limiter}
 }
 
 func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
@@ -322,9 +299,11 @@ func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.Packe
 	}
 
 	// Device limit check (only if not already blocked by audit).
-	if !blocked && !t.svc.allowConnection(m.User, remote) {
-		// allowConnection already logs a warning when device limit is exceeded.
-		blocked = true
+	var device *deviceConnections
+	if !blocked {
+		var admitted bool
+		device, admitted = t.svc.allowConnection(m.User, remote)
+		blocked = !admitted
 	}
 
 	var limiter *rate.Limiter
@@ -339,7 +318,7 @@ func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.Packe
 		return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, ctx: ctx, limiter: limiter}
+	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, ctx: ctx, limiter: limiter}
 }
 
 func admissionContext(ctx context.Context) context.Context {

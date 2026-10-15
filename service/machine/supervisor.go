@@ -568,10 +568,6 @@ func (s *Supervisor) showErrorDetails() bool {
 	return common.ShowErrorDetails() || s != nil && s.config.ShowErrorDetails
 }
 
-func (s *Supervisor) beginOperation(operation supervisorOperation) {
-	_, _, _ = s.beginOperationContext(context.Background(), operation)
-}
-
 func (s *Supervisor) beginOperationContext(ctx context.Context, operation supervisorOperation) (context.Context, context.CancelFunc, error) {
 	s.notifyOperation(operation, supervisorOperationAttempted)
 	if err := s.operationMu.Lock(ctx); err != nil {
