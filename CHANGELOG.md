@@ -2,6 +2,17 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
+## Unreleased
+
+### Security
+
+- Removed authentication credentials from Hysteria2 audit disconnect warnings. The warnings now identify known users by panel UID and omit user identity when the user is no longer present.
+
+### Fixed
+
+- Unified startup and certificate synchronization over the original local certificate configuration. Panel fields take precedence when supplied, while omitted DNS credentials and other fields fall back to local configuration; values removed from later panel snapshots no longer persist from earlier snapshots. Removing panel certificate configuration restores the local configuration.
+- Preserved AnyTLS/TUIC device-limit reservations across online reports. Connections from the same IP now share one device slot until the last connection closes, including idle connections; closing a rejected, duplicate, or retired connection no longer releases another connection's slot.
+
 ## 0.9.6 - 2026-10-12
 
 ### Security

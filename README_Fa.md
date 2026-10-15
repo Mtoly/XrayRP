@@ -16,16 +16,16 @@
 
 ## نمای کلی
 
-روی میزبان گره، XrayRP پیکربندی گره‌ها، کاربران و قواعد دریافتی از پنل را اعمال می‌کند و وضعیت اجرا، ترافیک و داده‌های آنلاین را به پنل گزارش می‌دهد تا کار پیکربندی جداگانهٔ گره‌ها کمتر شود.
+XrayRP روی میزبان گره اجرا می‌شود و پیکربندی گره‌ها، کاربران و قواعد دریافتی از پنل را اعمال می‌کند. سپس وضعیت اجرا، ترافیک و داده‌های آنلاین را به پنل گزارش می‌دهد تا نیاز به پیکربندی دستی هر گره کمتر شود.
 
-پنل، گره‌ها و کاربران را مدیریت می‌کند؛ XrayRP مسئول همگام‌سازی و چرخهٔ عمر محیط اجرا است. Xray-core پروتکل‌های اصلی پروکسی و روش‌های انتقال را اجرا می‌کند. AnyTLS و TUIC از sing-box تعبیه‌شده و Hysteria2 از Hysteria core/extras استفاده می‌کنند.
+پنل گره‌ها و کاربران را مدیریت می‌کند. XrayRP پیکربندی را همگام می‌کند و محیط اجرا را مدیریت می‌کند. Xray-core پروتکل‌های اصلی پروکسی و روش‌های انتقال را اجرا می‌کند. AnyTLS و TUIC از sing-box تعبیه‌شده و Hysteria2 از Hysteria core/extras استفاده می‌کنند.
 
 ## قابلیت‌ها
 
-- **اتصال به پنل**: Xboard / NewV2board از آداپتور <span dir="ltr">`NewV2board`</span> استفاده می‌کنند. پنل‌های دیگر و نام‌های پیکربندی آن‌ها در [نمونهٔ پیکربندی](./release/config/config.yml.example) آمده‌اند.
-- **پشتیبانی از پروتکل‌ها**: VLESS، VMess، Trojan، Shadowsocks (شامل Plugin)، AnyTLS، TUIC و Hysteria2. فهرست کامل <span dir="ltr">`NodeType`</span> در نمونهٔ پیکربندی آمده است. پشتیبانی به نسخه‌های پنل، آداپتور و محیط اجرا بستگی دارد.
-- **همگام‌سازی خودکار**: Xboard / NewV2board از polling و WebSocket به‌صورت هم‌زمان پشتیبانی می‌کنند. رویدادهای پیکربندی و کاربران از مسیر مشترک همگام‌سازی snapshotهای REST عبور می‌کنند؛ هنگام قطع اتصال، polling ادامه می‌یابد.
-- **عملیات و قابلیت اطمینان**: آمار ترافیک و وضعیت آنلاین، محدودیت سرعت، صدور و تمدید گواهی، DNS، مسیریابی و قواعد حسابرسی سفارشی؛ کش دستگاه Redis، بررسی سلامت و معیارهای Prometheus به‌صورت اختیاری. در صورت شکست بارگذاری مجدد پیکربندی، آخرین وضعیت سالم حفظ می‌شود.
+- Xboard / NewV2board از آداپتور <span dir="ltr">`NewV2board`</span> استفاده می‌کنند. پنل‌های دیگر و نام‌های پیکربندی آن‌ها در [نمونهٔ پیکربندی](./release/config/config.yml.example) آمده‌اند.
+- از VLESS، VMess، Trojan، Shadowsocks (شامل Plugin)، AnyTLS، TUIC و Hysteria2 پشتیبانی می‌شود. فهرست کامل <span dir="ltr">`NodeType`</span> در نمونهٔ پیکربندی آمده است. پشتیبانی به نسخه‌های پنل، آداپتور و محیط اجرا بستگی دارد.
+- در Xboard / NewV2board می‌توان polling و WebSocket را هم‌زمان به کار برد. رویدادهای پیکربندی و کاربران از یک مسیر همگام‌سازی snapshotهای REST عبور می‌کنند. اگر اتصال WebSocket قطع شود، polling ادامه می‌یابد.
+- XrayRP آمار ترافیک و وضعیت آنلاین، محدودیت سرعت، صدور و تمدید گواهی، و DNS، مسیریابی و قواعد حسابرسی سفارشی را فراهم می‌کند. کش دستگاه Redis، بررسی سلامت و معیارهای Prometheus اختیاری هستند. اگر بارگذاری مجدد پیکربندی شکست بخورد، XrayRP آخرین وضعیت سالم را نگه می‌دارد.
 
 در Xboard، قابلیت VLESS Encryption از مقدار سمت سرور <span dir="ltr">`decryption`</span> ارسالی پنل استفاده می‌کند و نیازمند غیرفعال کردن fallback ورودی است. ترکیب‌های REALITY، XHTTP و XTLS Vision در VLESS و نگاشت فیلدها در [سند سازگاری](./docs/xboard-newv2board.md#vless-trojan-reality-and-xhttp) آمده‌اند.
 
@@ -35,7 +35,7 @@
 
 ## شروع سریع
 
-اسکریپت‌های نصب فعلی به Linux، دسترسی root و systemd نیاز دارند. ابتدا گره‌ها را در پنل پیکربندی کنید یا ماشین را به آن متصل کنید. <span dir="ltr">`ApiHost`</span> راه دور باید از HTTPS استفاده کند؛ HTTP فقط برای آدرس‌های loopback در محیط توسعه است.
+اسکریپت‌های نصب به Linux، دسترسی root و systemd نیاز دارند. ابتدا گره‌ها را در پنل پیکربندی کنید یا ماشین را به آن متصل کنید. <span dir="ltr">`ApiHost`</span> راه دور باید از HTTPS استفاده کند؛ HTTP فقط برای آدرس‌های loopback در محیط توسعه است.
 
 ### نصب با یک فرمان
 
@@ -68,7 +68,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-m
 
 حالت Machine Mode از کشف خودکار handshake استفاده نمی‌کند. <span dir="ltr">`--ws-endpoint`</span> را صریحاً روی آدرس عمومی واقعی <span dir="ltr">`ws-server`</span> در استقرار خود تنظیم کنید که معمولاً <span dir="ltr">`/ws`</span> است؛ برای پنل HTTPS از <span dir="ltr">`wss://`</span> استفاده کنید. جزئیات استقرار و سازگاری در [راهنمای استقرار](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket) آمده است.
 
-دو حالت <span dir="ltr">`MachineConfig`</span> و <span dir="ltr">`Nodes`</span> ثابت متقابلاً انحصاری هستند. حالت ثابت همچنان پیکربندی گره و کاربران را از پنل همگام می‌کند. پیکربندی موجود به‌صورت پیش‌فرض حفظ می‌شود؛ فقط پس از تأیید بازنویسی، <span dir="ltr">`--force`</span> را اضافه کنید.
+باید یکی از دو حالت <span dir="ltr">`MachineConfig`</span> یا <span dir="ltr">`Nodes`</span> ثابت را انتخاب کنید. حالت ثابت همچنان پیکربندی گره و کاربران را از پنل همگام می‌کند. پیکربندی موجود به‌صورت پیش‌فرض حفظ می‌شود؛ فقط پس از تأیید بازنویسی، <span dir="ltr">`--force`</span> را اضافه کنید.
 
 <a name="docker"></a>
 
@@ -87,7 +87,7 @@ docker run -d --name xrayrp --restart unless-stopped \
 
 </div>
 
-ایمیج‌ها با تگ اصلی Release و <span dir="ltr">`latest`</span> منتشر می‌شوند. هر انتشار، از جمله پیش‌انتشار، <span dir="ltr">`latest`</span> را به‌روزرسانی می‌کند؛ برای ارتقا باید ایمیج را دوباره pull کرده و کانتینر در حال اجرا را دوباره ایجاد کنید. در محیط عملیاتی می‌توانید تگ یک Release پایدار را ثابت نگه دارید.
+ایمیج‌ها با تگ اصلی Release و <span dir="ltr">`latest`</span> منتشر می‌شوند. هر انتشار، از جمله پیش‌انتشار، <span dir="ltr">`latest`</span> را به‌روزرسانی می‌کند. برای ارتقا، ایمیج جدید را pull کنید و کانتینر را دوباره بسازید. در محیط عملیاتی می‌توانید تگ یک Release پایدار را ثابت نگه دارید.
 
 <a name="documentation"></a>
 
@@ -111,7 +111,7 @@ docker run -d --name xrayrp --restart unless-stopped \
 
 این پروژه تحت [Mozilla Public License 2.0](./LICENSE) منتشر می‌شود.
 
-تاریخچهٔ پروژه و بالادست: [XrayR](https://github.com/XrayR-project/XrayR). نام ابزارها و مسیرهای پیکربندی، نام‌گذاری <span dir="ltr">`XrayR`</span> را حفظ کرده‌اند.
+XrayRP بر پایهٔ [XrayR](https://github.com/XrayR-project/XrayR) ساخته شده و نام ابزارها و مسیرهای پیکربندی آن همچنان <span dir="ltr">`XrayR`</span> است.
 
 با سپاس از [Project X](https://github.com/XTLS/)، [V2Fly](https://github.com/v2fly)، [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray) و [Air-Universe](https://github.com/crossfw/Air-Universe).
 
