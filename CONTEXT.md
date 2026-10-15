@@ -21,7 +21,9 @@ The configuration surface that must parse from documented YAML into the runtime 
 _Avoid_: Config loader, example config, viper config
 
 **Local certificate basis**:
-The detached certificate configuration captured from local runtime configuration before applying any panel certificate snapshot. Startup and controller synchronization merge each panel snapshot over this basis, not over the previously merged result. Supplied panel fields take precedence and DNS environment values merge per key; absent panel certificate configuration falls back to the local basis.
+The detached copy of local certificate configuration captured before any panel certificate snapshot is applied. Startup and controller synchronization use this basis for every merge, so values from earlier panel snapshots do not carry over.
+
+Supplied panel fields take precedence, and DNS environment values merge by key. If the panel provides no certificate configuration, the local basis is used.
 _Avoid_: last applied certificate, panel credential cache, new YAML certificate section
 
 **Runtime routing selection**:
@@ -57,7 +59,9 @@ The immutable, credential-free view of panel, topology, and per-node lifecycle s
 _Avoid_: debug dump, runtime internals, raw error snapshot
 
 **Local device admission**:
-The per-runtime AnyTLS/TUIC IP reservations held by admitted connections. Online reporting observes these reservations without consuming them; connections from the same authentication key and IP share one device slot until the last connection closes. An idle but open connection retains its slot, even while the user is temporarily absent from panel snapshots; absent users cannot open new connections and are not reported online. The last connection close or successful runtime stop releases reservations; late closes cannot release a replacement reservation.
+The per-runtime AnyTLS/TUIC IP reservations held by admitted connections. Online reporting observes these reservations without consuming them. Connections with the same authentication key and IP share one device slot until the last connection closes.
+
+An idle but open connection retains its slot, including while the user is temporarily absent from panel snapshots. Absent users cannot open new connections and are not reported online. The last connection close releases its reservation; a successful runtime stop releases all reservations. A late close cannot release a replacement reservation.
 _Avoid_: reporting interval IP set, global device cache, traffic activity TTL
 
 **Global device cache**:
