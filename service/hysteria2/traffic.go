@@ -35,10 +35,15 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 	if t.svc.blockedIDs != nil {
 		if blocked := t.svc.blockedIDs[id]; blocked {
 			delete(t.svc.blockedIDs, id)
-			if t.svc.logger != nil {
-				t.svc.logger.WithField("id", id).Warn("Hysteria2 closing connection due to audit rule")
-			}
+			user, known := t.svc.users[id]
 			t.svc.mu.Unlock()
+			if t.svc.logger != nil {
+				logger := t.svc.logger
+				if known {
+					logger = logger.WithField("uid", user.UID)
+				}
+				logger.Warn("Hysteria2 closing connection due to audit rule")
+			}
 			return false
 		}
 	}
@@ -405,7 +410,7 @@ func (h *Hysteria2Service) collectUsage() ([]api.UserTraffic, []api.OnlineUser, 
 	defer h.mu.Unlock()
 
 	// snapshot keeps a copy of the counters that are being reported in this
-	// cycle so that userMonitor can restore them on report failure.
+	// cycle so that userMonitorContext can restore them on report failure.
 	snapshot := make(map[string]userTraffic)
 	var uts []api.UserTraffic
 	for uuid, t := range h.traffic {
@@ -470,16 +475,6 @@ func (h *Hysteria2Service) restoreTraffic(snapshot map[string]userTraffic) {
 		counter.Upload = trafficstats.Add(counter.Upload, uint64(snap.Upload))
 		counter.Download = trafficstats.Add(counter.Download, uint64(snap.Download))
 	}
-}
-
-// userMonitor is the periodic task used by Hysteria2Service to
-// - report node status
-// - refresh user list
-// - report user traffic and online users.
-func (h *Hysteria2Service) userMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return h.userMonitorContext(ctx)
 }
 
 func (h *Hysteria2Service) userMonitorContext(ctx context.Context) error {
@@ -559,21 +554,11 @@ func (h *Hysteria2Service) userMonitorContext(ctx context.Context) error {
 	return nil
 }
 
-// nodeMonitor watches for node-level configuration changes from the panel
-// (including port, TLS/SNI and speed limits) and hot-reloads the underlying
-// Hysteria2 server when needed. This avoids having to restart the whole
-// XrayR process when you edit the node on the panel.
-func (h *Hysteria2Service) nodeMonitor() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return h.nodeMonitorContext(ctx)
-}
-
 func (h *Hysteria2Service) nodeMonitorContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// delay to start, keep in sync with userMonitor behaviour
+	// delay to start, keep in sync with userMonitorContext behaviour
 	_, _, startAt := h.appliedStateSnapshot()
 	if startAt.IsZero() || time.Since(startAt) < time.Duration(h.config.UpdatePeriodic)*time.Second {
 		return nil

@@ -18,15 +18,20 @@ var (
 
 const wsClientReadLimit int64 = 1 << 20
 
+// wsClientWriteTimeout bounds each event write, so a peer that stops reading
+// cannot hold writeMu and block Close and the runtime loop indefinitely.
+const wsClientWriteTimeout = 10 * time.Second
+
 // WSClient is a minimal websocket reader that parses upstream events.
 type WSClient struct {
-	conn      *websocket.Conn
-	events    chan *WSEvent
-	errs      chan error
-	done      chan struct{}
-	closing   chan struct{}
-	closeOnce sync.Once
-	writeMu   sync.Mutex
+	conn         *websocket.Conn
+	events       chan *WSEvent
+	errs         chan error
+	done         chan struct{}
+	closing      chan struct{}
+	closeOnce    sync.Once
+	writeMu      sync.Mutex
+	writeTimeout time.Duration
 }
 
 // NewWSClient dials the websocket endpoint and starts the read loop.
@@ -42,11 +47,12 @@ func NewWSClientContext(ctx context.Context, rawURL string) (*WSClient, error) {
 	}
 
 	client := &WSClient{
-		conn:    conn,
-		events:  make(chan *WSEvent, 16),
-		errs:    make(chan error, 16),
-		done:    make(chan struct{}),
-		closing: make(chan struct{}),
+		conn:         conn,
+		events:       make(chan *WSEvent, 16),
+		errs:         make(chan error, 16),
+		done:         make(chan struct{}),
+		closing:      make(chan struct{}),
+		writeTimeout: wsClientWriteTimeout,
 	}
 
 	go client.readLoop()
@@ -147,6 +153,9 @@ func (c *WSClient) writeJSONEvent(event string, data map[string]any) error {
 	payload := map[string]any{
 		"event": event,
 		"data":  data,
+	}
+	if err := c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+		return errors.Join(ErrWSClientTransport, err)
 	}
 	if err := c.conn.WriteJSON(payload); err != nil {
 		return errors.Join(ErrWSClientTransport, err)

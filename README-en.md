@@ -1,98 +1,54 @@
-# XrayRP
+<h1 align="center">XrayRP</h1>
 
-Manage your own Xray nodes from a panel. The panel handles management, Xray Core handles the running, and XrayRP connects the two: it turns the configuration your panel sends into nodes that actually run on your server, then reports status, traffic, and online data back to the panel.
+<p align="center">A panel-managed proxy node runtime</p>
 
-Current release: `0.9.5` (see [CHANGELOG.md](./CHANGELOG.md))
+<div align="center">
 
-[![Stars](https://img.shields.io/github/stars/Mtoly/XrayRP.svg)](https://github.com/Mtoly/XrayRP/stargazers)
-[![Release](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/release.yml)
-[![Docker](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/docker.yml)
-[![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml)
-[![License](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/Mtoly/XrayRP?style=flat-square)](https://github.com/Mtoly/XrayRP/releases/latest) [![Required checks](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/Mtoly/XrayRP/actions/workflows/test.yml) [![License](https://img.shields.io/badge/license-MPL--2.0-blue?style=flat-square)](./LICENSE)
 
-[中文](./README.md) | [فارسی](./README_Fa.md) | [Tiếng Việt](./README-vi.md)
+[简体中文](./README.md) · **English** · [Tiếng Việt](./README-vi.md) · [فارسی](./README_Fa.md)
 
-## Why XrayRP
+[Quick Start](#quick-start) · [Documentation](#documentation) · [Releases](https://github.com/Mtoly/XrayRP/releases) · [Docker](#docker)
 
-If you run nodes on your own servers and would rather not maintain each node's configuration and process by hand, XrayRP applies the configuration in your panel to the node machine and reports runtime status and traffic back to the panel. Day-to-day node and user configuration is managed in the panel, which cuts down manual node maintenance. The underlying traffic is handled by Xray Core and the runtime for each protocol.
+</div>
 
-Before you start, you need a panel with nodes already configured, and root access on the node machine.
+## Overview
 
-See the [architecture document](./docs/architecture.md) and the [Xboard / NewV2board compatibility document](./docs/xboard-newv2board.md) for details.
+XrayRP runs on node hosts, applies node, user and rule configuration from the panel, and reports runtime status, traffic and online data back to it. This reduces the configuration work needed on each node.
+
+The panel manages nodes and users. XrayRP synchronizes their configuration and manages the runtimes. Xray-core handles the main proxy protocols and transports. AnyTLS and TUIC use embedded sing-box instances; Hysteria2 uses Hysteria core/extras.
 
 ## Features
 
-### Panels & Node Management
+- Xboard / NewV2board use the `NewV2board` adapter. Other panels and their configuration names are listed in the [configuration example](./release/config/config.yml.example).
+- Supported protocols include VLESS, VMess, Trojan, Shadowsocks (including Plugin), AnyTLS, TUIC and Hysteria2. See the configuration example for the full `NodeType` list. Support depends on the panel, adapter and runtime versions.
+- Xboard / NewV2board can use polling and WebSocket at the same time. Configuration and user events follow the same REST snapshot synchronization path. Polling continues if WebSocket disconnects.
+- XrayRP provides traffic and online statistics, rate limits, certificate issuance and renewal, plus custom DNS, routing and audit rules. Redis device caching, health checks and Prometheus metrics are optional. If a configuration hot reload fails, XrayRP keeps the last working state.
 
-- **Xboard / NewV2board**: integrate Xboard and NewV2board through the `NewV2board` adapter.
-- **Machine Mode**: `MachineConfig` authenticates with `MachineID` + `Token`; one instance discovers the nodes bound to this machine and starts and stops them dynamically.
-- **Automatic node sync**: polling and WebSocket triggers merge into one sync path, configuration changes take effect only after a successful runtime apply, and a dropped WebSocket reconnects on its own.
-- **Keeps the last working state**: during hot reload, a configuration that fails validation or apply does not replace the configuration currently running.
-- **Static `Nodes` mode**: nodes live in the configuration file instead of panel discovery; use it as an alternative to Machine Mode.
+Xboard VLESS Encryption uses the panel-provided server-side `decryption` value and requires inbound fallbacks to be disabled. See the [compatibility document](./docs/xboard-newv2board.md#vless-trojan-reality-and-xhttp) for VLESS REALITY, XHTTP and XTLS Vision combinations and field mappings.
 
-### Protocols & Transports
+AnyTLS, TUIC and Hysteria2 require certificate configuration. AnyTLS uses the panel-provided `padding_scheme`. Health checks and metrics are restricted to loopback or private addresses.
 
-- VLESS (including REALITY / XHTTP / WS / gRPC / HTTPUpgrade / VLESS Encryption)
-- VMess
-- Trojan
-- Shadowsocks (including Shadowsocks-Plugin)
-- AnyTLS (uses the panel-provided `padding_scheme`)
-- TUIC (requires local certificate configuration)
-- Hysteria2 (requires local certificate configuration)
+<a name="quick-start"></a>
 
-The full node type list and the other transports (including Socks and HTTP) are documented in the `NodeType` comment of [config.yml.example](./release/config/config.yml.example).
+## Quick Start
 
-### Advanced VLESS
+The installation scripts require Linux, root privileges and systemd. Before installing, configure nodes or bind a machine in the panel. Remote `ApiHost` values must use HTTPS; use HTTP only for development on loopback addresses.
 
-- **VLESS Encryption**: passes the server-side key delivered by Xboard to Xray-core; encrypted nodes must disable inbound fallbacks.
-- **XTLS Vision**: supports the panel-provided `xtls-rprx-vision`. See the [compatibility document](./docs/xboard-newv2board.md) for how transports and encryption interact.
-
-### Operations
-
-- User traffic statistics and node status reporting.
-- Online IP limits, online user limits, node port speed limits and per-user speed limits; an optional Redis global device cache coordinates multiple instances.
-- Automatic certificate issuance and renewal, supporting ACME DNS/HTTP/TLS and custom files.
-- Custom DNS, routing and audit rules.
-- Observability: optional local `/livez`, `/readyz` and `/metrics` (the `Observability` configuration, disabled by default and restricted to loopback or private addresses) exposing metrics such as `xrayrp_runtime_state`.
-- Hot reload: configuration changes reload a candidate configuration and replace the running instance only after validation and apply succeed.
-
-### Release & Security
-
-- CodeQL static analysis (`codeql-analysis.yml`, on push / PR / weekly schedule).
-- govulncheck reachable-vulnerability scanning, with only a documented exception that carries a version floor (`test.yml`).
-- Dependabot updates for dependencies and base images.
-- Signed release artifacts: the release page provides the per-platform archives and `SHA256SUMS`, together with the `SHA256SUMS.sigstore.json` Sigstore signature.
-- SPDX SBOMs, the release manifest and provenance attestations are produced by the release workflow and retained as workflow evidence.
-- Docker PR validation: PRs that touch the `Dockerfile` or the docker workflows build the image and run the `version` smoke test (`docker-test.yml`).
-
-## Architecture
-
-```mermaid
-flowchart TD
-    P[Panel<br/>Xboard / NewV2board / sspanel-uim / v2board] -->|node / user snapshot| G[XrayRP]
-    G -->|apply| C[Xray Core<br/>inbound / outbound / routing]
-    C -->|runtime state| G
-    G -->|status / traffic / online data| P
-```
-
-- Panel: delivers nodes, users, routing and audit rules, and receives reports.
-- XrayRP: converges panel snapshots into local runtime state; owns runtime lifecycle (start, readiness, stop and reclaim, replacement, failure state), limit and rule enforcement, certificate management, and reporting.
-- Xray Core: carries the protocols and transports; XrayRP talks to it through `app/`.
-
-Code locations and invariants are in the [architecture document](./docs/architecture.md).
-
-## Installation
-
-### One-click installation script
+### One-click installation
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install.sh)
 ```
 
-### Xboard Machine Mode installation
+After installation, enter your panel and node settings in `/etc/XrayR/config.yml`, then run `XrayR start`. The [configuration example](./release/config/config.yml.example) explains the fields.
+
+### Xboard Machine Mode
+
+Create and bind the machine in Xboard first, then obtain its `MachineID` and `Token`. Replace the example values below with your own. The script installs and configures the service; machine registration happens in the panel.
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
+bash <(curl -fsSL https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-machine.sh) \
   --api-host https://panel.example.com \
   --machine-id 1 \
   --token "machine-token" \
@@ -100,63 +56,47 @@ bash <(curl -Ls https://raw.githubusercontent.com/Mtoly/XrayRPS/main/install-mac
   --ws-endpoint "wss://panel.example.com/ws"
 ```
 
-- The script only writes `MachineConfig` and installs / starts the service. It does not create or register a machine in Xboard, so create and bind the machine in Xboard first.
-- `MachineConfig` and static `Nodes` are mutually exclusive; enabling machine mode does not generate static `Nodes`.
-- Machine mode does not use handshake discovery. Set `--ws-endpoint` to the address your Xboard `ws-server` is published on (usually `/ws`). When it is omitted, the legacy `<ApiHost>/api/v1/server/UniProxy/ws` path is used, which current Xboard no longer serves.
-- If `/etc/XrayR/config.yml` already exists, the script does not overwrite it by default; add `--force` to overwrite.
+Machine Mode does not discover the connection address through a handshake. Set `--ws-endpoint` to the public address of your deployment's `ws-server`, usually at `/ws`. Use `wss://` with an HTTPS panel. See the [deployment guide](./docs/xboard-newv2board.md#xboard-deployment-machine-mode-shared-websocket) for deployment and compatibility details.
 
-### Docker (GHCR)
+Choose either `MachineConfig` or static `Nodes`. Static mode also synchronizes node configuration and users from the panel. The script keeps existing configuration by default; add `--force` to overwrite it.
 
-Image: `ghcr.io/mtoly/xrayrp`, published with both the original release tag and `latest`.
+<a name="docker"></a>
+
+### Docker
+
+Save the [configuration example](./release/config/config.yml.example) as `/etc/XrayR/config.yml` and fill in your settings, or use an existing configuration. Then run this on the Linux node host:
 
 ```bash
-mkdir -p /etc/XrayR
-cp release/config/config.yml.example /etc/XrayR/config.yml
-# edit /etc/XrayR/config.yml, then start
 docker run -d --name xrayrp --restart unless-stopped \
   --network host \
   -v /etc/XrayR:/etc/XrayR \
   ghcr.io/mtoly/xrayrp:latest
 ```
 
-The container entrypoint is `XrayR --config /etc/XrayR/config.yml`. Listen addresses inside the container come from `ListenIP` in `config.yml`; `Observability.Listen` defaults to `127.0.0.1`, so change it to a private address reachable inside the container and map the port when you need to reach it from outside.
+Images use the original Release tag and `latest`. Every release updates `latest`, including prereleases. To upgrade, pull the new image and recreate the containers. For production, you can pin a stable Release tag.
 
-## Configuration
+<a name="documentation"></a>
 
-See [release/config/config.yml.example](./release/config/config.yml.example) for the annotated reference covering `Log`, `DnsConfigPath`, `RouteConfigPath`, `ConnectionConfig`, `Observability`, `MachineConfig` and `Nodes`.
+## Documentation
 
-- Remote panel addresses (`ApiHost`) must use HTTPS; only loopback development addresses may use HTTP.
-- `MachineConfig` and static `Nodes` are alternatives; do not enable both.
-- Details are in the [Xboard / NewV2board compatibility document](./docs/xboard-newv2board.md).
+| Entry | Contents |
+| --- | --- |
+| [Configuration example](./release/config/config.yml.example) | Panels, node types, certificates, limits and observability |
+| [Xboard / NewV2board](./docs/xboard-newv2board.md) | Machine Mode, WebSocket deployment, protocol and field compatibility |
+| [Architecture](./docs/architecture.md) | Module responsibilities, runtime boundaries and state invariants |
+| [Releases](https://github.com/Mtoly/XrayRP/releases) · [Changelog](./CHANGELOG.md) | Downloads, version changes and release verification files |
+| [go.mod](./go.mod) · [CI](./.github/workflows/test.yml) · [Release build](./.github/workflows/release.yml) | Go version requirements, tests and builds |
 
-## Development
+To build from source, use a Go version that meets the requirement in `go.mod`. For QUIC support, run `CGO_ENABLED=0 go build -tags with_quic -o XrayR .`.
 
-The required Go version is the `go` directive in [go.mod](./go.mod) (currently `1.27`).
+For manual downloads, verify archives against `SHA256SUMS` from the same Release. The signature bundle is `SHA256SUMS.sigstore.json`. SBOM and provenance records are retained as release workflow artifacts.
 
-```bash
-git clone https://github.com/Mtoly/XrayRP.git
-cd XrayRP
+## Community & License
 
-go build ./...
-go test ./...
-go vet ./...
+Report problems and suggest improvements through [GitHub Issues](https://github.com/Mtoly/XrayRP/issues).
 
-# build matching the release artifacts (includes QUIC support)
-CGO_ENABLED=0 go build -tags with_quic -o XrayR .
-```
+Licensed under the [Mozilla Public License 2.0](./LICENSE).
 
-## License
+XrayRP is based on [XrayR](https://github.com/XrayR-project/XrayR) and keeps the `XrayR` tool names and configuration paths.
 
-[Mozilla Public License Version 2.0](./LICENSE)
-
-## Thanks
-
-- [Project X](https://github.com/XTLS/)
-- [V2Fly](https://github.com/v2fly)
-- [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray)
-- [Air-Universe](https://github.com/crossfw/Air-Universe)
-
-## Telegram
-
-- [XrayR discussion group](https://t.me/XrayR_project)
-- [XrayR notification channel](https://t.me/XrayR_channel)
+Thanks to [Project X](https://github.com/XTLS/), [V2Fly](https://github.com/v2fly), [VNet-V2ray](https://github.com/ProxyPanel/VNet-V2ray) and [Air-Universe](https://github.com/crossfw/Air-Universe).

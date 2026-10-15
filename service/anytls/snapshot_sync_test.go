@@ -2,6 +2,8 @@ package anytls
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -18,8 +20,10 @@ func TestAnyTLSSnapshotUserTriggerAppliesAuthoritativeUsersWithoutReload(t *test
 		users:    []api.UserInfo{{UID: 1, UUID: "user-1", Email: "user@example.test"}},
 	}
 	runtime := New(client, &controller.Config{})
+	events := &lifecycleEvents{}
 	runtime.lifecycleMu.Lock()
 	runtime.nodeInfo = cloneNodeInfo(client.nodeInfo)
+	runtime.box = &fakeRuntimeInstance{events: events}
 	runtime.state = stateRunning
 	runtime.lifecycleMu.Unlock()
 
@@ -43,6 +47,9 @@ func TestAnyTLSSnapshotUserTriggerAppliesAuthoritativeUsersWithoutReload(t *test
 
 	waitForAnyTLSUser(t, runtime, "user-1")
 	waitForAnyTLSSnapshotExecutions(t, runtime, 1)
+	if got, want := events.snapshot(), []string{"update-users:user-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime events = %v, want %v", got, want)
+	}
 	if client.userListCalls != 1 {
 		t.Fatalf("GetUserList calls = %d, want 1", client.userListCalls)
 	}
@@ -101,10 +108,13 @@ func TestAnyTLSSnapshotCancellationDoesNotPublishLateUsers(t *testing.T) {
 	runtime := New(client, &controller.Config{})
 	runtime.lifecycleMu.Lock()
 	runtime.nodeInfo = cloneNodeInfo(client.nodeInfo)
+	runtime.box = &fakeRuntimeInstance{events: &lifecycleEvents{}}
 	runtime.state = stateRunning
 	runtime.lifecycleMu.Unlock()
 	initialUsers := []api.UserInfo{{UID: 1, UUID: "applied-user"}}
-	runtime.syncUsers(&initialUsers)
+	if err := runtime.syncUsers(&initialUsers); err != nil {
+		t.Fatalf("syncUsers() error = %v", err)
+	}
 
 	if err := runtime.syncCoordinator.StartContext(context.Background()); err != nil {
 		t.Fatalf("start snapshot coordinator: %v", err)
@@ -127,6 +137,32 @@ func TestAnyTLSSnapshotCancellationDoesNotPublishLateUsers(t *testing.T) {
 	runtime.mu.RUnlock()
 	if !keptApplied || publishedLate {
 		t.Fatalf("users after cancellation: kept applied=%v published late=%v", keptApplied, publishedLate)
+	}
+}
+
+func TestAnyTLSUserSyncKeepsAppliedUsersWhenRuntimeRejectsUpdate(t *testing.T) {
+	runtime := New(&configurablePanelClient{}, &controller.Config{})
+	fake := &fakeRuntimeInstance{events: &lifecycleEvents{}}
+	runtime.lifecycleMu.Lock()
+	runtime.box = fake
+	runtime.lifecycleMu.Unlock()
+	applied := []api.UserInfo{{UID: 1, UUID: "applied-user"}}
+	if err := runtime.syncUsers(&applied); err != nil {
+		t.Fatalf("syncUsers(applied) error = %v", err)
+	}
+
+	fake.updateUsersErr = errors.New("runtime rejected users")
+	next := []api.UserInfo{{UID: 2, UUID: "next-user"}}
+	if err := runtime.syncUsers(&next); !errors.Is(err, fake.updateUsersErr) {
+		t.Fatalf("syncUsers(next) error = %v, want %v", err, fake.updateUsersErr)
+	}
+
+	runtime.mu.RLock()
+	_, keptApplied := runtime.users["applied-user"]
+	_, appliedNext := runtime.users["next-user"]
+	runtime.mu.RUnlock()
+	if !keptApplied || appliedNext {
+		t.Fatalf("users after rejected update: kept applied=%v applied next=%v", keptApplied, appliedNext)
 	}
 }
 

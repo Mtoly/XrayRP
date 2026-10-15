@@ -2,6 +2,7 @@ package tuic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -15,7 +16,22 @@ import (
 	"github.com/Mtoly/XrayRP/service/internal/singboxregistry"
 )
 
-func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, error) {
+// tuicUserUpdater is implemented by singboxregistry.TUICInbound, which exists
+// only in with_quic builds.
+type tuicUserUpdater interface {
+	UpdateUsers([]option.TUICUser) error
+}
+
+type singBoxRuntime struct {
+	*box.Box
+	inbound tuicUserUpdater
+}
+
+func (r singBoxRuntime) UpdateUsers(users []option.TUICUser) error {
+	return r.inbound.UpdateUsers(users)
+}
+
+func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (runtimeInstance, string, error) {
 	listenIP := s.config.ListenIP
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -115,11 +131,16 @@ func (s *TuicService) buildSingBoxFor(spec runtimeBuildSpec) (*box.Box, string, 
 	if err != nil {
 		return nil, "", err
 	}
+	registered, _ := boxInstance.Inbound().Get(spec.inboundTag)
+	inbound, ok := registered.(tuicUserUpdater)
+	if !ok {
+		return nil, "", errors.Join(fmt.Errorf("TUIC inbound %q does not support user updates", spec.inboundTag), boxInstance.Close())
+	}
 
 	tracker := &tuicTracker{svc: s}
 	boxInstance.Router().AppendTracker(tracker)
 
-	return boxInstance, spec.inboundTag, nil
+	return singBoxRuntime{Box: boxInstance, inbound: inbound}, spec.inboundTag, nil
 }
 
 func buildInboundTLSOptions(spec runtimeBuildSpec) (*option.InboundTLSOptions, error) {

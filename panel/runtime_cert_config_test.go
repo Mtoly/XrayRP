@@ -15,7 +15,7 @@ import (
 	"github.com/Mtoly/XrayRP/service/controller"
 )
 
-func TestMergeRuntimePanelCertConfigKeepsLocalWhenPanelEmpty(t *testing.T) {
+func TestMaterializeRuntimeCertConfigKeepsLocalWhenPanelEmpty(t *testing.T) {
 	localCert := &mylego.CertConfig{
 		CertMode:    "file",
 		CertDomain:  "local.example.com",
@@ -31,18 +31,14 @@ func TestMergeRuntimePanelCertConfigKeepsLocalWhenPanelEmpty(t *testing.T) {
 	want.DNSEnv = map[string]string{"CF_DNS_API_TOKEN": "local-token"}
 	controllerConfig := &controller.Config{CertConfig: localCert}
 
-	if err := mergeRuntimePanelCertConfig(controllerConfig, &api.XrayRCertConfig{}); err != nil {
-		t.Fatalf("merge runtime panel cert config: %v", err)
-	}
-	if controllerConfig.CertConfig != localCert {
-		t.Fatal("expected existing local cert config pointer to be preserved")
-	}
+	materializeRuntimeCertConfig(&runtimeCertConfigAPI{cert: &api.XrayRCertConfig{}}, controllerConfig, discardTestLogger())
+
 	if !reflect.DeepEqual(&want, controllerConfig.CertConfig) {
 		t.Fatalf("expected local cert config to remain unchanged, got %#v", controllerConfig.CertConfig)
 	}
 }
 
-func TestMergeRuntimePanelCertConfigMaterializesContentCert(t *testing.T) {
+func TestMaterializeRuntimeCertConfigMaterializesContentCert(t *testing.T) {
 	controllerConfig := &controller.Config{}
 	panelCert := &api.XrayRCertConfig{
 		CertMode:    "content",
@@ -51,9 +47,7 @@ func TestMergeRuntimePanelCertConfigMaterializesContentCert(t *testing.T) {
 		KeyContent:  "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
 	}
 
-	if err := mergeRuntimePanelCertConfig(controllerConfig, panelCert); err != nil {
-		t.Fatalf("merge runtime panel cert config: %v", err)
-	}
+	materializeRuntimeCertConfig(&runtimeCertConfigAPI{cert: panelCert}, controllerConfig, discardTestLogger())
 	certConfig := controllerConfig.CertConfig
 	if certConfig == nil {
 		t.Fatal("expected panel cert config to be materialized")
@@ -69,7 +63,7 @@ func TestMergeRuntimePanelCertConfigMaterializesContentCert(t *testing.T) {
 	}
 }
 
-func TestMergeRuntimePanelCertConfigMaterializesFileAndDNSFields(t *testing.T) {
+func TestMaterializeRuntimeCertConfigMaterializesFileAndDNSFields(t *testing.T) {
 	controllerConfig := &controller.Config{}
 	panelCert := &api.XrayRCertConfig{
 		CertMode:   "file",
@@ -81,9 +75,7 @@ func TestMergeRuntimePanelCertConfigMaterializesFileAndDNSFields(t *testing.T) {
 		DNSEnv:     map[string]string{"CF_DNS_API_TOKEN": "panel-token"},
 	}
 
-	if err := mergeRuntimePanelCertConfig(controllerConfig, panelCert); err != nil {
-		t.Fatalf("merge runtime panel cert config: %v", err)
-	}
+	materializeRuntimeCertConfig(&runtimeCertConfigAPI{cert: panelCert}, controllerConfig, discardTestLogger())
 	certConfig := controllerConfig.CertConfig
 	if certConfig == nil {
 		t.Fatal("expected panel cert config to be materialized")
@@ -96,19 +88,75 @@ func TestMergeRuntimePanelCertConfigMaterializesFileAndDNSFields(t *testing.T) {
 	}
 }
 
-func TestMergeRuntimePanelCertConfigTreatsLegacyDNSFieldsAsDNSMode(t *testing.T) {
+func TestMaterializeRuntimeCertConfigTreatsLegacyDNSFieldsAsDNSMode(t *testing.T) {
 	controllerConfig := &controller.Config{}
 	panelCert := &api.XrayRCertConfig{Provider: "cloudflare", DNSEnv: map[string]string{"CF_DNS_API_TOKEN": "panel-token"}}
 
-	if err := mergeRuntimePanelCertConfig(controllerConfig, panelCert); err != nil {
-		t.Fatalf("merge runtime panel cert config: %v", err)
-	}
+	materializeRuntimeCertConfig(&runtimeCertConfigAPI{cert: panelCert}, controllerConfig, discardTestLogger())
 	certConfig := controllerConfig.CertConfig
 	if certConfig == nil {
 		t.Fatal("expected legacy DNS cert config to be materialized")
 	}
 	if certConfig.CertMode != "dns" || certConfig.Provider != panelCert.Provider || !reflect.DeepEqual(certConfig.DNSEnv, panelCert.DNSEnv) {
 		t.Fatalf("expected legacy DNS fields to materialize dns mode, got %#v", certConfig)
+	}
+}
+
+func TestMaterializeRuntimeCertConfigIgnoresPanelSnapshotWithoutCertMode(t *testing.T) {
+	localCert := &mylego.CertConfig{CertMode: "file", CertDomain: "local.example.com", CertFile: "/local.crt", KeyFile: "/local.key"}
+	controllerConfig := &controller.Config{CertConfig: localCert}
+	client := &runtimeCertConfigAPI{cert: &api.XrayRCertConfig{CertDomain: "panel.example.com", CertFile: "/panel.crt"}}
+
+	materializeRuntimeCertConfig(client, controllerConfig, discardTestLogger())
+
+	if controllerConfig.CertConfig.CertFile != "/local.crt" || controllerConfig.CertConfig.CertDomain != "local.example.com" {
+		t.Fatalf("snapshot without mode, provider or DNS must not change local config, got %#v", controllerConfig.CertConfig)
+	}
+}
+
+func TestMaterializeRuntimeCertConfigRecordsLocalBasisBeforePanelMerge(t *testing.T) {
+	controllerConfig := &controller.Config{CertConfig: &mylego.CertConfig{
+		CertMode: "dns",
+		Provider: "cloudflare",
+		DNSEnv:   map[string]string{"CF_API_TOKEN": "local-token"},
+	}}
+	client := &runtimeCertConfigAPI{cert: &api.XrayRCertConfig{
+		Provider: "cloudflare",
+		DNSEnv:   map[string]string{"PANEL_TOKEN": "panel-token"},
+	}}
+
+	materializeRuntimeCertConfig(client, controllerConfig, discardTestLogger())
+
+	// The basis is private, so probe it through a later merge. A snapshot that
+	// omits DNSEnv must yield only the local credential, never the panel token.
+	probe := controllerConfig.MergePanelCertConfig(&api.XrayRCertConfig{CertMode: "dns", Provider: "cloudflare"})
+	if !reflect.DeepEqual(probe.DNSEnv, map[string]string{"CF_API_TOKEN": "local-token"}) {
+		t.Fatalf("recorded local basis contains panel values, probe DNSEnv = %#v", probe.DNSEnv)
+	}
+	if reflect.ValueOf(probe.DNSEnv).Pointer() == reflect.ValueOf(controllerConfig.CertConfig.DNSEnv).Pointer() {
+		t.Fatal("local basis merge must not share DNSEnv storage with the effective config")
+	}
+	want := map[string]string{"CF_API_TOKEN": "local-token", "PANEL_TOKEN": "panel-token"}
+	if !reflect.DeepEqual(controllerConfig.CertConfig.DNSEnv, want) {
+		t.Fatalf("effective DNSEnv = %#v, want %#v", controllerConfig.CertConfig.DNSEnv, want)
+	}
+}
+
+func TestMaterializeRuntimeCertConfigKeepsLocalDNSWhenPanelOmitsIt(t *testing.T) {
+	controllerConfig := &controller.Config{CertConfig: &mylego.CertConfig{
+		CertMode: "dns",
+		Provider: "cloudflare",
+		DNSEnv:   map[string]string{"CF_API_TOKEN": "local-token"},
+	}}
+	client := &runtimeCertConfigAPI{cert: &api.XrayRCertConfig{Provider: "cloudflare", Email: "ops@example.com"}}
+
+	materializeRuntimeCertConfig(client, controllerConfig, discardTestLogger())
+
+	if got := controllerConfig.CertConfig.DNSEnv["CF_API_TOKEN"]; got != "local-token" {
+		t.Fatalf("local DNS credential lost at startup, DNSEnv = %#v", controllerConfig.CertConfig.DNSEnv)
+	}
+	if controllerConfig.CertConfig.Email != "ops@example.com" {
+		t.Fatalf("panel email not applied, got %q", controllerConfig.CertConfig.Email)
 	}
 }
 

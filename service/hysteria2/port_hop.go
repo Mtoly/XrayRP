@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
-	"github.com/Mtoly/XrayRP/service"
 )
 
 var (
@@ -69,12 +68,6 @@ func (h *Hysteria2Service) replacePortHopRulesLocked(ctx context.Context, rules 
 	}
 	h.portHopRules = append([]portHopRule(nil), rules...)
 	return true, nil
-}
-
-func (h *Hysteria2Service) cleanupPortHopRules() error {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultCloseTimeout)
-	defer cancel()
-	return h.cleanupPortHopRulesContext(ctx)
 }
 
 func (h *Hysteria2Service) cleanupPortHopRulesContext(ctx context.Context) error {

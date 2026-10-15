@@ -9,30 +9,6 @@ import (
 	"github.com/Mtoly/XrayRP/api"
 )
 
-func (c *Controller) removeOldTag(oldTag string) (err error) {
-	err = c.removeInbound(oldTag)
-	if err != nil {
-		return err
-	}
-	err = c.removeOutbound(oldTag)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Controller) addNewTag(newNodeInfo *api.NodeInfo, tag string) (err error) {
-	return c.addNewTagWithConfig(newNodeInfo, tag, c.config)
-}
-
-func (c *Controller) addNewTagWithConfig(newNodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.addNewTagWithConfigContext(context.Background(), newNodeInfo, tag, config)
-}
-
-func (c *Controller) addNewTagWithConfigContext(ctx context.Context, newNodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.addNewTagWithSnapshotConfigContext(ctx, api.NormalizeNodeInfo(newNodeInfo), tag, config)
-}
-
 func (c *Controller) addNewTagWithSnapshotConfigContext(ctx context.Context, snapshot *api.NodeSnapshot, tag string, config *Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -44,7 +20,7 @@ func (c *Controller) addNewTagWithSnapshotConfigContext(ctx context.Context, sna
 	nodeType := inbound.listener.nodeType
 
 	// Socks/HTTP inbounds are built with users embedded (no UserManager support).
-	// Skip here; addNewUserWithConfigContext creates the inbound with its users.
+	// Skip here; addNewUserWithSnapshotConfigContext creates the inbound with its users.
 	if nodeType == "Socks" || nodeType == "HTTP" {
 		outBoundConfig, err := buildOutbound(config, outbound, tag)
 		if err != nil {
@@ -72,10 +48,6 @@ func (c *Controller) addNewTagWithSnapshotConfigContext(ctx context.Context, sna
 		return err
 	}
 	return c.addOutboundContext(ctx, outBoundConfig, tag, routePolicy)
-}
-
-func (c *Controller) addInboundForSSPlugin(node nodeValue, tag string, config *Config) error {
-	return c.addInboundForSSPluginContext(context.Background(), node, tag, config)
 }
 
 func (c *Controller) addInboundForSSPluginContext(ctx context.Context, node nodeValue, tag string, config *Config) error {
@@ -113,20 +85,6 @@ func (c *Controller) addInboundForSSPluginContext(ctx context.Context, node node
 	return c.addOutboundContext(ctx, outBoundConfig, dokodemoTag, views.routing)
 }
 
-// rebuildInboundWithUsers rebuilds the socks/http inbound with all users embedded.
-// This is needed because socks/http inbounds don't support proxy.UserManager.
-func (c *Controller) rebuildInboundWithUsers(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) error {
-	return c.rebuildInboundWithUsersWithConfig(userInfo, nodeInfo, tag, c.config)
-}
-
-func (c *Controller) rebuildInboundWithUsersWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.rebuildInboundWithUsersWithConfigContext(context.Background(), userInfo, nodeInfo, tag, config)
-}
-
-func (c *Controller) rebuildInboundWithUsersWithConfigContext(ctx context.Context, userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.rebuildInboundWithUsersWithSnapshotConfigContext(ctx, userInfo, api.NormalizeNodeInfo(nodeInfo), tag, config)
-}
-
 func (c *Controller) rebuildInboundWithUsersWithSnapshotConfigContext(ctx context.Context, userInfo *[]api.UserInfo, snapshot *api.NodeSnapshot, tag string, config *Config) error {
 	// Remove existing inbound if present (ignore errors for first-time setup).
 	_ = c.removeInboundContext(ctx, tag)
@@ -143,18 +101,6 @@ func (c *Controller) rebuildInboundWithUsersWithSnapshotConfigContext(ctx contex
 
 	c.logger.Printf("Rebuilt %s inbound with %d users", snapshot.NodeType, len(*userInfo))
 	return nil
-}
-
-func (c *Controller) addNewUser(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string) (err error) {
-	return c.addNewUserWithConfig(userInfo, nodeInfo, tag, c.config)
-}
-
-func (c *Controller) addNewUserWithConfig(userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.addNewUserWithConfigContext(context.Background(), userInfo, nodeInfo, tag, config)
-}
-
-func (c *Controller) addNewUserWithConfigContext(ctx context.Context, userInfo *[]api.UserInfo, nodeInfo *api.NodeInfo, tag string, config *Config) error {
-	return c.addNewUserWithSnapshotConfigContext(ctx, userInfo, api.NormalizeNodeInfo(nodeInfo), tag, config)
 }
 
 func (c *Controller) addNewUserWithSnapshotConfigContext(ctx context.Context, userInfo *[]api.UserInfo, snapshot *api.NodeSnapshot, tag string, config *Config) error {

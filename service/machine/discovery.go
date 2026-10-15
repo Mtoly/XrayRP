@@ -6,7 +6,6 @@ import (
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/api/newV2board"
-	"github.com/Mtoly/XrayRP/service"
 )
 
 // NewV2boardDiscoverer is retained as a compatibility wrapper. New
@@ -22,12 +21,6 @@ func (d *NewV2boardDiscoverer) DiscoverMachineNodes() (*api.MachineNodesResponse
 
 func (d *NewV2boardDiscoverer) DiscoverMachineNodesContext(ctx context.Context) (*api.MachineNodesResponse, error) {
 	return newV2board.DiscoverMachineNodesContext(ctx, d.Config)
-}
-
-func (s *Supervisor) discoverSnapshot() (discoverySnapshot, error) {
-	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
-	defer cancel()
-	return s.discoverSnapshotContext(ctx)
 }
 
 func (s *Supervisor) discoverSnapshotContext(ctx context.Context) (discoverySnapshot, error) {
