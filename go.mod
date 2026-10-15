@@ -6,7 +6,7 @@ require (
 	dario.cat/mergo v1.0.2
 	github.com/anytls/sing-anytls v0.0.13
 	github.com/apernet/hysteria/core/v2 v2.13.0
-	github.com/apernet/hysteria/extras/v2 v2.12.3
+	github.com/apernet/hysteria/extras/v2 v2.13.0
 	github.com/bitly/go-simplejson v0.5.1
 	github.com/eko/gocache/lib/v4 v4.4.0
 	github.com/eko/gocache/store/go_cache/v4 v4.2.10
