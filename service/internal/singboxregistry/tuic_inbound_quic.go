@@ -25,7 +25,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// TUICInbound is derived from sing-box v1.14.2 protocol/tuic/inbound.go
+// TUICInbound is derived from sing-box v1.14.3 protocol/tuic/inbound.go
 // (GPL-3.0). It adds UpdateUsers so panel user snapshots reach the running
 // inbound; review it against upstream on every sing-box upgrade.
 //
@@ -46,7 +46,6 @@ func registerQUICUserInbounds(registry *inbound.Registry) {
 }
 
 func newTUICInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TUICInboundOptions) (adapter.Inbound, error) {
-	options.UDPFragmentDefault = true
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
@@ -165,7 +164,7 @@ func (h *TUICInbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketCo
 	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
-func (h *TUICInbound) Start(stage adapter.StartStage) error {
+func (h *TUICInbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -174,18 +173,17 @@ func (h *TUICInbound) Start(stage adapter.StartStage) error {
 		if err != nil {
 			return err
 		}
+		scope.Add(h.tlsConfig.Close)
 	}
 	packetConn, err := h.listener.ListenUDP()
 	if err != nil {
 		return err
 	}
-	return h.server.Start(packetConn)
-}
-
-func (h *TUICInbound) Close() error {
-	return common.Close(
-		h.listener,
-		h.tlsConfig,
-		common.PtrOrNil(h.server),
-	)
+	scope.Add(h.listener.Close)
+	err = h.server.Start(packetConn)
+	if err != nil {
+		return err
+	}
+	scope.Add(h.server.Close)
+	return nil
 }

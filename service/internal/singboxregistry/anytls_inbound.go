@@ -23,7 +23,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// AnyTLSInbound is derived from sing-box v1.14.2 protocol/anytls/inbound.go
+// AnyTLSInbound is derived from sing-box v1.14.3 protocol/anytls/inbound.go
 // (GPL-3.0). It adds UpdateUsers so panel user snapshots reach the running
 // inbound; review it against upstream on every sing-box upgrade.
 type AnyTLSInbound struct {
@@ -91,7 +91,7 @@ func (h *AnyTLSInbound) UpdateUsers(users []option.AnyTLSUser) error {
 	return nil
 }
 
-func (h *AnyTLSInbound) Start(stage adapter.StartStage) error {
+func (h *AnyTLSInbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -100,12 +100,14 @@ func (h *AnyTLSInbound) Start(stage adapter.StartStage) error {
 		if err != nil {
 			return err
 		}
+		scope.Add(h.tlsConfig.Close)
 	}
-	return h.listener.Start()
-}
-
-func (h *AnyTLSInbound) Close() error {
-	return common.Close(h.listener, h.tlsConfig)
+	err := h.listener.Start()
+	if err != nil {
+		return err
+	}
+	scope.Add(h.listener.Close)
+	return nil
 }
 
 func (h *AnyTLSInbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
