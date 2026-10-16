@@ -2,7 +2,14 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
-## Unreleased
+## 0.9.7 - 2026-10-16
+
+### Changed
+
+- Updated sing-box from `v1.14.2` to `v1.14.3` with its dependency graph, including sing `v0.9.7-0.20260929150544-0ad23b637bd4`, sing-quic `v0.7.2-0.20261002084117-75c3ac4fa12b`, and sing-tun `v0.9.7-0.20261009020158-bca4bf029237`. The XrayRP AnyTLS and TUIC listeners follow the upstream `v1.14.3` lifecycle, and TUIC listeners no longer force-enable UDP fragmentation, matching the upstream QUIC inbounds.
+- Updated Hysteria core and extras from `v2.12.3` to `v2.13.0`.
+- Updated sing-anytls from `v0.0.11` to `v0.0.13`.
+- Updated `golang.org/x/net` to `v0.61.0`, `golang.org/x/crypto` to `v0.58.0`, `golang.org/x/mod` to `v0.42.0`, and go-redis to `v9.23.0`.
 
 ### Security
 
@@ -235,4 +242,4 @@ See [Xboard / NewV2board Compatibility](./docs/xboard-newv2board.md) for the cur
 
 An older `0.9.8` tag/release used a version number outside the current release sequence. Its GitHub Release and active remote and primary local tag references were intentionally retired in October 2026, while the underlying commits and Git history remain preserved.
 
-The maintained release sequence continues from `0.9.4` through `0.9.5` to `0.9.6`.
+The maintained release sequence continues from `0.9.4` through `0.9.5` and `0.9.6` to `0.9.7`.
