@@ -108,6 +108,7 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
           ProxyProtocolVer: 0 # PROXY protocol version to send to fallback destination. 0 disables it.
       DisableLocalREALITYConfig: false # Ignore local REALITYConfigs and use panel-provided REALITY settings when available.
       EnableREALITY: false # Enable REALITY for supported VLESS/Trojan nodes.
+      SpliceCopyEnable: false # Enable Splice copy feature; may delay traffic statistics.
       REALITYConfigs: # Local REALITY settings used when EnableREALITY is true and local REALITY is not disabled.
         Show: false # Whether to show REALITY debug information to clients.
         Dest: www.amazon.com:443 # Required REALITY destination, usually a real TLS site host:port.
