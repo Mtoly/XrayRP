@@ -30,7 +30,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.12.1
-	github.com/xtls/xray-core v1.260327.1-0.20261005035322-5121c28b855c
+	github.com/xtls/xray-core v1.260327.1-0.20261017152356-92ccc939aaf4
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.42.0
 	golang.org/x/net v0.61.0
@@ -74,7 +74,7 @@ require (
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.9 // indirect
 	github.com/aliyun/credentials-go v1.4.7 // indirect
 	github.com/anchore/go-lzo v0.1.0 // indirect
-	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/anthropics/anthropic-sdk-go v1.26.0 // indirect
 	github.com/apernet/quic-go v0.63.1-0.20261004180939-a10df75c260c // indirect
@@ -108,7 +108,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
-	github.com/cloudflare/circl v1.6.5 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
@@ -199,7 +198,7 @@ require (
 	github.com/juju/ratelimit v1.0.2 // indirect
 	github.com/k0kubun/go-ansi v0.0.0-20180517002512-3bf9e2903213 // indirect
 	github.com/keybase/go-keychain v0.0.1 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/kolo/xmlrpc v0.0.0-20220921171641-a4b6fa1dd06b // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
@@ -382,11 +381,12 @@ require (
 	github.com/vultr/govultr/v3 v3.31.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0 // indirect
+	github.com/xtls/reality v0.0.0-20261014101318-83f621788ca8 // indirect
 	github.com/yandex-cloud/go-genproto v0.73.0 // indirect
 	github.com/yandex-cloud/go-sdk/services/dns v0.0.54 // indirect
 	github.com/yandex-cloud/go-sdk/v2 v2.92.0 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.mongodb.org/mongo-driver v1.17.9 // indirect
@@ -404,6 +404,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261005185213-c3db4df58582 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
@@ -422,7 +423,7 @@ require (
 	gopkg.in/ns1/ns1-go.v2 v2.17.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
+	layeh.com/gopher-luar v1.0.11 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )

@@ -2,6 +2,12 @@
 
 Notable user-facing, compatibility, security, performance, and operational changes are recorded here. Dates use `YYYY-MM-DD`. Internal test-only changes are included only when they alter the project's quality or release contract.
 
+## Unreleased
+
+### Changed
+
+- Updated Xray-core from the `v1.260327.1-0.20261005035322-5121c28b855c` pin to `v1.260327.1-0.20261017152356-92ccc939aaf4` (upstream `v26.10.17`). The update brings the REALITY library refresh with standard-library ML-DSA, the VLESS Vision server crash fix for Go 1.27.3-and-later toolchains, the Shadowsocks 2022 UDP connection-reuse and interrupt fixes, and the Mux client UDP and race fixes. It also drops the `gvisor` dependency (`layeh.com/gopher-luar`, `github.com/yuin/gopher-lua`, and `golang.org/x/crypto/x509roots/fallback` are added as indirect dependencies; `cloudflare/circl` and `gvisor.dev/gvisor` are removed). Panel behavior, supported protocols, transports, configuration, and reporting are unchanged.
+
 ## 0.9.7 - 2026-10-16
 
 ### Changed
