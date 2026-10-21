@@ -8,6 +8,11 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Updated Xray-core from the `v1.260327.1-0.20261005035322-5121c28b855c` pin to `v1.260327.1-0.20261017152356-92ccc939aaf4` (upstream `v26.10.17`). The update brings the REALITY library refresh with standard-library ML-DSA, the VLESS Vision server crash fix for Go 1.27.3-and-later toolchains, the Shadowsocks 2022 UDP connection-reuse and interrupt fixes, and the Mux client UDP and race fixes. It also drops the `gvisor` dependency (`layeh.com/gopher-luar`, `github.com/yuin/gopher-lua`, and `golang.org/x/crypto/x509roots/fallback` are added as indirect dependencies; `cloudflare/circl` and `gvisor.dev/gvisor` are removed). Panel behavior, supported protocols, transports, configuration, and reporting are unchanged.
 
+### Security
+
+- Updated Xray-core to `v1.260327.1-0.20261021080731-ec73b73f5e2f`, including the bundled root-certificate update that removes emSign ECC Root CA - C3, emSign ECC Root CA - G3, and emSign Root CA - C1, and cpuid `v2.4.1`. Xray TLS outbounds using the default bundled roots no longer trust these roots; explicitly configured CA certificates and system-root selection remain supported.
+- Raised the minimum Go version and the digest-pinned Docker builder to Go `1.27.3` to include the `crypto/x509` fix for `GO-2026-6809`. The runtime Alpine image is unchanged.
+
 ## 0.9.7 - 2026-10-16
 
 ### Changed
