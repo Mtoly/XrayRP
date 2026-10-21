@@ -29,4 +29,4 @@ XrayRP runs panel-managed proxy nodes on top of Xray. It translates normalized p
 - Readers observe either the previous valid generation or the complete next generation.
 - Static `Nodes` mode and enabled `MachineConfig` mode are mutually exclusive.
 - Polling, WebSocket, reconnect, and manual triggers converge through the same Sync action submission and apply path.
-- Runtime replacement prepares and validates a candidate before publication, then retires the previous runtime.
+- Runtime config reload validates the candidate configuration before touching the running runtime, closes the old Panel, then builds and starts the candidate; a failed start rebuilds the previous configuration. Machine-node replacement builds the replacement service, closes the old service, then starts the replacement, and rolls back to the last applied node value on failure. Last-known-good state and rollback therefore do not mean the old connections stay up while the new runtime starts.

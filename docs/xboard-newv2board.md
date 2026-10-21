@@ -164,14 +164,21 @@ Observability:
   Listen: "127.0.0.1:10085"
 ```
 
-Then check readiness and the shared WebSocket state:
+Then check liveness, readiness, and the shared WebSocket state:
 
 ```bash
-curl -fsS http://127.0.0.1:10085/readyz
+curl -fsS http://127.0.0.1:10085/livez
+curl -sS -i http://127.0.0.1:10085/readyz
 curl -fsS http://127.0.0.1:10085/metrics | grep 'xrayrp_runtime_state'
 ```
 
-`/readyz` returns HTTP 200 while the process is running. Its body reports `ready`, or `degraded` when only the WebSocket or report backlog is unhealthy. Losing the WebSocket connection degrades readiness without failing it because polling keeps node configuration converging.
+`/livez` answers whether the process is alive; `/readyz` answers whether this instance can currently serve panel-managed nodes. They are separate checks, and a running process can report itself not ready.
+
+`/livez` returns HTTP 200 `live` until shutdown begins, then HTTP 503 `shutdown`.
+
+`/readyz` returns HTTP 200 `ready`, or HTTP 200 `degraded` when the runtime is usable but a WebSocket connection, the traffic-report backlog, or an in-progress reload is unhealthy. It returns HTTP 503 `not_ready` whenever the runtime is unusable: shutdown, a failed or cleanup-pending runtime, a missing or stale successful sync, or an expired certificate. A `not_ready` response carries a `reasons` array naming the failing checks. Losing the WebSocket connection degrades readiness without failing it because polling keeps node configuration converging.
+
+The `readyz` command above deliberately omits `-f`: a 503 during an incident is a valid diagnostic result, not a failed check.
 
 In the metrics output, check the rows by runtime kind:
 
