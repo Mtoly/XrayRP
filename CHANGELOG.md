@@ -4,6 +4,13 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+## 0.9.9 - 2026-10-22
+
+### Upgrade notes
+
+- When upgrading from 0.9.7, Xray TLS outbounds use bundled root certificates by default instead of the operating system's trust store. Custom outbounds that rely on an OS-installed private or enterprise CA must configure that CA explicitly in their Xray TLS settings or select system roots with `"useSystemCA": true` in `tlsSettings`. Certificate and hostname verification remain enabled. Managed `freedom` outbounds do not themselves verify TLS server certificates.
+- Version 0.9.8 remains retired; this release advances directly from 0.9.7 to 0.9.9.
+
 ### Changed
 
 - Updated Xray-core from `v1.260327.1-0.20261021080731-ec73b73f5e2f` to `v1.260327.1-0.20261021115930-1b1647cd9ddf` (upstream `v26.10.21`), retaining the bundled-root security update below. This adds upstream fixes for SOCKS UDP connection timers, HTTP outbounds handling server-first traffic, Linux UDP process routing, and UDP dialer-controller destination addresses. It also includes upstream XDRIVE enhancements, inbound finalmask source-IP filters, Linux TUN read optimizations, and owner-only permissions for newly created TLS/REALITY key-log files. XrayRP's panel mappings and public YAML configuration are unchanged; upstream additions do not imply new panel-level support.
@@ -13,6 +20,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Updated Xray-core to `v1.260327.1-0.20261021080731-ec73b73f5e2f`, including the bundled root-certificate update that removes emSign ECC Root CA - C3, emSign ECC Root CA - G3, and emSign Root CA - C1, and cpuid `v2.4.1`. Xray TLS outbounds using the default bundled roots no longer trust these roots; explicitly configured CA certificates and system-root selection remain supported.
 - Raised the minimum Go version and the digest-pinned Docker builder to Go `1.27.3` to include the `crypto/x509` fix for `GO-2026-6809`. The runtime Alpine image is unchanged.
+
+### Documentation
+
+- Clarified that `/readyz` can return HTTP 200 for a ready but degraded runtime, while unready runtimes return HTTP 503. Corrected the reload and machine-node replacement descriptions: the old runtime closes before the replacement starts, so rollback does not guarantee uninterrupted existing connections. Runtime behavior is unchanged.
 
 ## 0.9.7 - 2026-10-16
 
