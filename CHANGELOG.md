@@ -6,6 +6,7 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ### Changed
 
+- Updated Xray-core from `v1.260327.1-0.20261021080731-ec73b73f5e2f` to `v1.260327.1-0.20261021115930-1b1647cd9ddf` (upstream `v26.10.21`), retaining the bundled-root security update below. This adds upstream fixes for SOCKS UDP connection timers, HTTP outbounds handling server-first traffic, Linux UDP process routing, and UDP dialer-controller destination addresses. It also includes upstream XDRIVE enhancements, inbound finalmask source-IP filters, Linux TUN read optimizations, and owner-only permissions for newly created TLS/REALITY key-log files. XrayRP's panel mappings and public YAML configuration are unchanged; upstream additions do not imply new panel-level support.
 - Updated Xray-core from the `v1.260327.1-0.20261005035322-5121c28b855c` pin to `v1.260327.1-0.20261017152356-92ccc939aaf4` (upstream `v26.10.17`). The update brings the REALITY library refresh with standard-library ML-DSA, the VLESS Vision server crash fix for Go 1.27.3-and-later toolchains, the Shadowsocks 2022 UDP connection-reuse and interrupt fixes, and the Mux client UDP and race fixes. It also drops the `gvisor` dependency (`layeh.com/gopher-luar`, `github.com/yuin/gopher-lua`, and `golang.org/x/crypto/x509roots/fallback` are added as indirect dependencies; `cloudflare/circl` and `gvisor.dev/gvisor` are removed). Panel behavior, supported protocols, transports, configuration, and reporting are unchanged.
 
 ### Security
