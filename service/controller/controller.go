@@ -89,7 +89,8 @@ type Controller struct {
 	prepareRenewal                 prepareCertificateRenewalFunc
 	newPeriodicTask                periodicTaskFactory
 	syncCoordinatorFactory         func(syncActionExecutor) syncCoordinatorLifecycle
-	wsRuntimeFactory               func(context.Context, syncActionSubmitter) (wsRuntimeLifecycle, error)
+	wsRuntimeFactory       func(context.Context, syncActionSubmitter) (wsRuntimeLifecycle, error)
+	SpliceCopyEnable       bool
 }
 
 type periodicTask = controllerPeriodicTask
@@ -152,6 +153,7 @@ func New(server *core.Instance, apiClient PanelClient, config *Config, panelType
 		return newSyncCoordinatorWithResultHandling(executor, controller.syncExecutionState, controller.logSyncExecutionResult)
 	}
 	controller.wsRuntimeFactory = controller.newConfiguredWSRuntimeContext
+	controller.SpliceCopyEnable = config.SpliceCopyEnable
 
 	return controller
 }
