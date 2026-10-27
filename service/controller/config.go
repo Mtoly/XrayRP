@@ -27,6 +27,7 @@ type Config struct {
 	REALITYConfigs            *REALITYConfig                   `mapstructure:"REALITYConfigs"`
 	WebSocketConfig           *WebSocketConfig                 `mapstructure:"WebSocketConfig"`
 	ShowErrorDetails          bool                             `mapstructure:"-"`
+	GlobalPanelType           string                           `mapstructure:"-"`
 
 	// localCertConfig is the locally declared certificate basis that panel
 	// snapshots merge over. It stays private so callers cannot rewrite it.
@@ -34,6 +35,13 @@ type Config struct {
 	// localCertCaptured records that localCertConfig holds the declared basis.
 	// It distinguishes a captured nil basis from one that was never captured.
 	localCertCaptured bool
+}
+
+func (config *Config) ValidateGlobalDeviceLimit() error {
+	if config == nil {
+		return nil
+	}
+	return limiter.ValidateGlobalDeviceLimitConfig(config.GlobalDeviceLimitConfig, len(config.TrustedXForwardedFor) > 0)
 }
 
 type WebSocketConfig struct {

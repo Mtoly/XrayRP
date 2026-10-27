@@ -47,6 +47,10 @@ func cloneGlobalDeviceLimitConfig(config *limiter.GlobalDeviceLimitConfig) *limi
 		return nil
 	}
 	cloned := *config
+	if config.IPv6Prefix != nil {
+		prefix := *config.IPv6Prefix
+		cloned.IPv6Prefix = &prefix
+	}
 	return &cloned
 }
 

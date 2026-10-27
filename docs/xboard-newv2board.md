@@ -14,7 +14,7 @@ The `newV2board` adapter supports:
 
 `MachineConfig` and static `Nodes` are mutually exclusive.
 
-REST snapshots remain authoritative for complex runtime state. WebSocket events normally trigger the existing REST synchronization pipeline instead of directly publishing event payloads. The exception is `sync.devices`, which carries the panel-provided global device/IP snapshot used by limiter admission.
+REST snapshots remain authoritative for complex runtime state. WebSocket events normally trigger the existing REST synchronization pipeline instead of directly publishing event payloads. The exception is `sync.devices`, which carries the panel-provided global device/IP snapshot. That snapshot is used by limiter admission only while Redis global source-IP admission is disabled; see [Panel device snapshots](./redis-global-ip-limit.md#panel-device-snapshots).
 
 Machine mode keeps one shared WebSocket connection for ordinary Xray, AnyTLS, TUIC, and Hysteria2 nodes. Specialized runtimes receive only node-scoped synchronization triggers:
 
@@ -42,7 +42,7 @@ Important current events:
 - `sync.config` triggers node configuration synchronization through REST.
 - `sync.users` and `sync.user.delta` trigger a complete REST user synchronization. Delta payloads are not applied as independent partial state.
 - `sync.nodes` triggers a full resync in static-node mode and machine rediscovery in machine mode.
-- `sync.devices` applies the global device/IP snapshot while the WebSocket state is fresh. A malformed device snapshot triggers a full resync instead of publishing partial state.
+- `sync.devices` applies the global device/IP snapshot while the WebSocket state is fresh. A malformed device snapshot triggers a full resync instead of publishing partial state. When Redis global source-IP admission is enabled, the snapshot is retained but does not admit or reject connections.
 - `ping` receives an application-level `pong`.
 - `auth.success`, `pong`, and `error` are accepted without entering the apply pipeline.
 
@@ -215,6 +215,19 @@ Minimum effective intervals are:
 | Machine discovery (`pull_interval`) | 30 seconds |
 
 Changing only `base_config` reschedules periodic work without rebuilding inbound or outbound runtime state.
+
+## Redis global source-IP admission
+
+`ControllerConfig.GlobalDeviceLimitConfig` can enforce one source-IP quota per panel UID across all nodes and processes that share a panel namespace, instead of relying on the panel's device snapshot or per-inbound cache. It is disabled by default and covers the Xray node path plus AnyTLS, TUIC, and Hysteria2.
+
+When it is enabled:
+
+- Admission, cropping, and renewal ignore `sync.devices` and the panel alive list. Live reservations reported by XrayRP come from connections it is holding.
+- The namespace is derived from the canonical panel type and `ApiHost`, so static nodes and machine mode resolve the same key space. Set `Namespace` when you need an explicit shared name.
+- `Mode: cache` keeps cache-style reuse and is the default. `Mode: strict` verifies every connection atomically against Redis.
+- `FailMode: open` keeps serving with a process-local quota when Redis fails. `FailMode: closed` rejects new connections that cannot be verified.
+
+Configuration, failure semantics, renewal, expiry, and limits are described in [Redis global source-IP admission](./redis-global-ip-limit.md). In machine mode, put the block under `MachineConfig.ControllerConfig`; it applies to every discovered server.
 
 ## Report endpoint fallback
 

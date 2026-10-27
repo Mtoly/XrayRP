@@ -183,6 +183,24 @@ func (s *TuicService) StartContext(parent context.Context) (err error) {
 	if s.config == nil || s.config.CertConfig == nil {
 		return fail(errors.New("CertConfig is required for TUIC"))
 	}
+	if s.config.GlobalDeviceLimitConfig != nil && s.config.GlobalDeviceLimitConfig.Enable {
+		if err := s.config.ValidateGlobalDeviceLimit(); err != nil {
+			return fail(fmt.Errorf("invalid global device limit config: %w", err))
+		}
+	}
+	admission, err := s.buildGlobalAdmission(clientInfo)
+	if err != nil {
+		return fail(fmt.Errorf("initialize global device admission: %w", err))
+	}
+	admissionCommitted := false
+	defer func() {
+		if admissionCommitted || admission == nil {
+			return
+		}
+		if closeErr := admission.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close global device admission: %w", closeErr))
+		}
+	}()
 	if nodeInfo.TuicConfig == nil {
 		nodeInfo.TuicConfig = &api.TuicConfig{}
 	}
@@ -267,17 +285,37 @@ func (s *TuicService) StartContext(parent context.Context) (err error) {
 	if startRuntime == nil {
 		startRuntime = defaultStartRuntime
 	}
+	// Publish the shared manager before the runtime can accept connections.
+	// Otherwise connections arriving between listener start and final state
+	// publication would take the local-only path and bypass the Redis quota.
+	admissionLimits := userDeviceLimits(startupUsers.users)
+	admissionPublished := false
+	if admission != nil {
+		s.mu.Lock()
+		s.globalAdmission = admission
+		s.mu.Unlock()
+		admission.SetUsers(admissionLimits)
+		admissionPublished = true
+	}
 	host := specialruntime.NewRuntimeHost(tasks, specialruntime.RuntimeHostCallbacks{
 		Start: func(context.Context) error { return startRuntime(boxInstance) },
 		Stop:  func(context.Context) error { return shutdownRuntime() },
 	})
 	if err := host.StartContext(ctx); err != nil {
 		if specialruntime.StartCleanupFailed(err) {
+			// A surviving owned runtime can still accept connections, so keep
+			// the manager installed; service Close releases it after stop.
+			admissionCommitted = true
 			ownedTasks := tasks
 			if specialruntime.RuntimeStartFailed(err) {
 				ownedTasks = nil
 			}
 			return s.failWithRuntimeOwnership(err, clientInfo, nodeInfo, boxInstance, inboundTag, tag, startAt, ownedTasks)
+		}
+		if admissionPublished {
+			s.mu.Lock()
+			s.globalAdmission = nil
+			s.mu.Unlock()
 		}
 		return fail(err)
 	}
@@ -292,6 +330,7 @@ func (s *TuicService) StartContext(parent context.Context) (err error) {
 	s.tasks = tasks
 	s.mu.Lock()
 	s.applyUserStateLocked(startupUsers)
+	admissionCommitted = true
 	s.mu.Unlock()
 	s.state = stateRunning
 	s.runtimeErr = nil
@@ -427,6 +466,8 @@ func (s *TuicService) CloseContext(parent context.Context) error {
 	s.runtimeErr = nil
 	s.closed = true
 	s.mu.Lock()
+	admission := s.globalAdmission
+	s.globalAdmission = nil
 	s.users = make(map[string]userRecord)
 	s.traffic = make(map[string]*userTraffic)
 	s.onlineIPs = make(map[string]map[string]struct{})
@@ -436,7 +477,13 @@ func (s *TuicService) CloseContext(parent context.Context) error {
 	s.rateLimiters = nil
 	s.mu.Unlock()
 	s.lifecycleMu.Unlock()
-	return nil
+	// The runtime is fully stopped, so no new connection can acquire a lease.
+	// Connection-owned leases stop renewal from their own Close; the manager
+	// only needs its shared reference released here.
+	if admission == nil {
+		return nil
+	}
+	return admission.Close()
 }
 
 // reloadNode replaces the active sing-box instance while preserving the last

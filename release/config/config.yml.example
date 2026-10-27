@@ -90,15 +90,20 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
         WarnTimes: 0 # Number of consecutive warnings before limiting. 0 limits immediately after one warning.
         LimitSpeed: 0 # Speed limit applied to punished users in Mbps.
         LimitDuration: 0 # Punishment duration in minutes.
-      GlobalDeviceLimitConfig: # Redis-backed global online device/IP limit across multiple XrayRP instances.
-        Enable: false # Enable global device limit for users.
+      GlobalDeviceLimitConfig: # Shared source-IP quota per panel UID across XrayRP nodes and processes. See docs/redis-global-ip-limit.md.
+        Enable: false # Enable Redis global device/IP admission. Disabled keeps local-only admission.
         RedisNetwork: tcp # Redis network type: tcp or unix.
         RedisAddr: 127.0.0.1:6379 # Redis server address, or Unix socket path when RedisNetwork is unix.
         RedisUsername: # Optional Redis username. Leave empty when Redis ACL username is not used.
         RedisPassword: YOUR PASSWORD # Redis password. Keep this secret.
-        RedisDB: 0 # Redis database index.
-        Timeout: 5 # Redis request timeout in seconds.
-        Expiry: 60 # Redis online-device record expiry in seconds.
+        RedisDB: 0 # Redis database index. All nodes sharing a quota must use the same database.
+        Timeout: 5 # Redis request timeout in seconds. 0 uses the 5 second default.
+        Expiry: 60 # Lease and policy lifetime in seconds; renewed every Expiry/3 while a connection is open. 0 uses 60.
+        Mode: cache # cache reuses a confirmed local reservation; strict verifies every connection atomically. All nodes must match.
+        FailMode: open # open keeps a process-local quota on Redis failure; closed rejects new connections that cannot be verified.
+        Namespace: # Optional shared key-space name; hashed before use. Empty derives it from panel type and ApiHost.
+        IPv6Prefix: 64 # IPv6 mask (0-128) used to group client addresses; an explicit 0 counts each full address.
+        StrictClientIPSource: peer # Acknowledgment only; it does not select or verify the source address. peer is the default. In strict mode with TrustedXForwardedFor set, use forwarded to accept header-derived sources.
       EnableFallback: false # Enable fallback routing. Only supported for Trojan and VLESS.
       FallBackConfigs: # Fallback destinations used when EnableFallback is true.
         - SNI: # TLS SNI matcher. Empty matches any SNI.
@@ -170,15 +175,20 @@ Nodes: # Static node list. Use this when MachineConfig is disabled.
 #        WarnTimes: 0 # Number of consecutive warnings before limiting. 0 limits immediately after one warning.
 #        LimitSpeed: 0 # Speed limit applied to punished users in Mbps.
 #        LimitDuration: 0 # Punishment duration in minutes.
-#      GlobalDeviceLimitConfig: # Redis-backed global online device/IP limit across multiple XrayRP instances.
-#        Enable: false # Enable global device limit for users.
+#      GlobalDeviceLimitConfig: # Shared source-IP quota per panel UID across XrayRP nodes and processes. See docs/redis-global-ip-limit.md.
+#        Enable: false # Enable Redis global device/IP admission. Disabled keeps local-only admission.
 #        RedisNetwork: tcp # Redis network type: tcp or unix.
 #        RedisAddr: 127.0.0.1:6379 # Redis server address, or Unix socket path when RedisNetwork is unix.
 #        RedisUsername: # Optional Redis username. Leave empty when Redis ACL username is not used.
 #        RedisPassword: YOUR PASSWORD # Redis password. Keep this secret.
-#        RedisDB: 0 # Redis database index.
-#        Timeout: 5 # Redis request timeout in seconds.
-#        Expiry: 60 # Redis online-device record expiry in seconds.
+#        RedisDB: 0 # Redis database index. All nodes sharing a quota must use the same database.
+#        Timeout: 5 # Redis request timeout in seconds. 0 uses the 5 second default.
+#        Expiry: 60 # Lease and policy lifetime in seconds; renewed every Expiry/3 while a connection is open. 0 uses 60.
+#        Mode: cache # cache reuses a confirmed local reservation; strict verifies every connection atomically. All nodes must match.
+#        FailMode: open # open keeps a process-local quota on Redis failure; closed rejects new connections that cannot be verified.
+#        Namespace: # Optional shared key-space name; hashed before use. Empty derives it from panel type and ApiHost.
+#        IPv6Prefix: 64 # IPv6 mask (0-128) used to group client addresses; an explicit 0 counts each full address.
+#        StrictClientIPSource: peer # Acknowledgment only; it does not select or verify the source address. peer is the default. In strict mode with TrustedXForwardedFor set, use forwarded to accept header-derived sources.
 #      EnableFallback: false # Enable fallback routing. Only supported for Trojan and VLESS.
 #      FallBackConfigs: # Fallback destinations used when EnableFallback is true.
 #        - SNI: # TLS SNI matcher. Empty matches any SNI.

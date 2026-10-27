@@ -121,6 +121,15 @@ type AnyTLSService struct {
 	ipLastActive map[string]map[string]time.Time          // authKey -> ip -> last active time
 	authUsers    []option.AnyTLSUser                      // users for sing-anytls authentication
 	rateLimiters map[string]*rate.Limiter                 // authKey -> per-user speed limiter
+	// policyGeneration changes whenever the published user policy snapshot is
+	// replaced. Admission revalidates it after the Redis round trip so a
+	// reservation is never committed against a superseded policy view.
+	policyGeneration uint64
+
+	// globalAdmission is the shared Redis-backed manager when global device
+	// limiting is enabled. It is nil in local-only mode.
+	globalAdmission  globalAdmission
+	admissionFactory func(api.ClientInfo) (globalAdmission, error)
 
 	// reloadMu prevents concurrent rebuilds of the underlying sing-box
 	// instance when node configuration or certificates change.
