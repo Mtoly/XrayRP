@@ -4,6 +4,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Changed
+
+- Updated the embedded sing-box runtime from `v1.14.3` to `v1.14.4` with its required dependency updates, including sing, sing-quic, sing-tun, and SagerNet quic-go. This brings upstream UDP/QUIC stability, routing, and connection cleanup fixes. The existing AnyTLS and TUIC runtime user-update integrations are retained.
+
 ## 0.9.9 - 2026-10-22
 
 ### Upgrade notes
