@@ -26,6 +26,37 @@ func localAdmissionConfig(namespace string) *GlobalDeviceLimitConfig {
 	}
 }
 
+func TestGlobalAdmissionBackendSharesOnlyMatchingConnectionOptions(t *testing.T) {
+	config := &GlobalDeviceLimitConfig{
+		RedisNetwork:  "tcp",
+		RedisAddr:     "redis|username",
+		RedisUsername: "tenant",
+		RedisPassword: "test-only-credential",
+	}
+	first := acquireGlobalAdmissionBackend(config, time.Second)
+	t.Cleanup(first.release)
+	matching := acquireGlobalAdmissionBackend(config, time.Second)
+	t.Cleanup(matching.release)
+	if first != matching {
+		t.Fatal("matching Redis options did not reuse the client")
+	}
+	other := *config
+	other.RedisAddr = "redis"
+	other.RedisUsername = "username|tenant"
+	distinct := acquireGlobalAdmissionBackend(&other, time.Second)
+	t.Cleanup(distinct.release)
+	if first == distinct {
+		t.Fatal("different Redis options reused the same client")
+	}
+	other = *config
+	other.RedisPassword = "different-test-only-credential"
+	differentCredential := acquireGlobalAdmissionBackend(&other, time.Second)
+	t.Cleanup(differentCredential.release)
+	if first == differentCredential {
+		t.Fatal("different Redis credentials reused the same client")
+	}
+}
+
 func TestNewGlobalAdmissionDisabledReturnsNil(t *testing.T) {
 	for _, config := range []*GlobalDeviceLimitConfig{nil, {Enable: false}, {}} {
 		admission, err := NewGlobalAdmission(config, "NewV2board", "https://panel.example.test")

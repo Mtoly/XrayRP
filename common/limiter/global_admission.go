@@ -1345,23 +1345,42 @@ var (
 	globalAdmissionAbortScript  = redis.NewScript(globalAdmissionAbortLua)
 )
 
+// globalAdmissionBackendKey stays in memory alongside the Redis client's own
+// credentials. It is never logged or used as a Redis key; structured equality
+// avoids both password hashing and delimiter collisions between options.
+type globalAdmissionBackendKey struct {
+	network  string
+	address  string
+	username string
+	password string
+	database int
+	timeout  time.Duration
+}
+
 type globalAdmissionBackend struct {
-	key    string
+	key    globalAdmissionBackendKey
 	client *redis.Client
 	refs   int
 }
 
 var globalAdmissionBackendRegistry = struct {
 	mu       sync.Mutex
-	backends map[string]*globalAdmissionBackend
-}{backends: make(map[string]*globalAdmissionBackend)}
+	backends map[globalAdmissionBackendKey]*globalAdmissionBackend
+}{backends: make(map[globalAdmissionBackendKey]*globalAdmissionBackend)}
 
 // acquireGlobalAdmissionBackend returns a reference-counted client shared by
 // all managers with the same connection configuration. Creating a client does
 // not perform network I/O, so no connection is made while the registry lock is
 // held. Credentials never appear in logs or Redis keys.
 func acquireGlobalAdmissionBackend(config *GlobalDeviceLimitConfig, timeout time.Duration) *globalAdmissionBackend {
-	key := globalAdmissionBackendKey(config, timeout)
+	key := globalAdmissionBackendKey{
+		network:  config.RedisNetwork,
+		address:  config.RedisAddr,
+		username: config.RedisUsername,
+		password: config.RedisPassword,
+		database: config.RedisDB,
+		timeout:  timeout,
+	}
 	globalAdmissionBackendRegistry.mu.Lock()
 	defer globalAdmissionBackendRegistry.mu.Unlock()
 	if backend, ok := globalAdmissionBackendRegistry.backends[key]; ok {
@@ -1403,16 +1422,4 @@ func (b *globalAdmissionBackend) release() {
 	if last {
 		_ = b.client.Close()
 	}
-}
-
-func globalAdmissionBackendKey(config *GlobalDeviceLimitConfig, timeout time.Duration) string {
-	passwordHash := sha256.Sum256([]byte(config.RedisPassword))
-	return fmt.Sprintf("%s|%s|%s|%x|%d|%d",
-		strings.TrimSpace(config.RedisNetwork),
-		strings.TrimSpace(config.RedisAddr),
-		strings.TrimSpace(config.RedisUsername),
-		passwordHash,
-		config.RedisDB,
-		int64(timeout/time.Millisecond),
-	)
 }
