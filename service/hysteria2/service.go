@@ -88,6 +88,7 @@ func New(apiClient PanelClient, cfg *controller.Config) *Hysteria2Service {
 		onlineIPs:            make(map[string]map[string]struct{}),
 		ipLastActive:         make(map[string]map[string]time.Time),
 		blockedIDs:           make(map[string]bool),
+		sessions:             make(map[string]*hySession),
 	}
 	serviceRuntime.initializeSnapshotSyncCoordinator()
 	return serviceRuntime
@@ -234,6 +235,11 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	if h.config == nil || h.config.CertConfig == nil {
 		return fail(errors.New("CertConfig is required for Hysteria2"))
 	}
+	if h.config.GlobalDeviceLimitConfig != nil && h.config.GlobalDeviceLimitConfig.Enable {
+		if err := h.config.ValidateGlobalDeviceLimit(); err != nil {
+			return fail(fmt.Errorf("invalid global device limit config: %w", err))
+		}
+	}
 	nodeInfo = cloneNodeInfo(nodeInfo)
 
 	tag := fmt.Sprintf("%s_%s_%d_%d", nodeInfo.NodeType, h.config.ListenIP, nodeInfo.Port, nodeInfo.NodeID)
@@ -245,6 +251,24 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	}
 
 	startupUsers := h.buildCandidateUserState(userInfo, nodeInfo)
+
+	admissionFactory := h.admissionFactory
+	if admissionFactory == nil {
+		admissionFactory = h.buildGlobalAdmission
+	}
+	admission, err := admissionFactory(clientInfo)
+	if err != nil {
+		return fail(fmt.Errorf("initialize global device admission: %w", err))
+	}
+	admissionCommitted := false
+	defer func() {
+		if admissionCommitted || admission == nil {
+			return
+		}
+		if closeErr := admission.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close global device admission: %w", closeErr))
+		}
+	}()
 
 	rulesApplied := false
 	if !h.config.DisableGetRule && h.rules != nil {
@@ -340,6 +364,7 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	}
 
 	watcherDone := make(chan struct{})
+	admissionLimits := userDeviceLimits(startupUsers.users)
 	h.lifecycleMu.Lock()
 	h.clientInfo = clientInfo
 	h.nodeInfo = nodeInfo
@@ -354,6 +379,10 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	h.onlineIPs = startupUsers.onlineIPs
 	h.ipLastActive = startupUsers.ipLastActive
 	h.rateLimiters = startupUsers.rateLimiters
+	h.sessions = make(map[string]*hySession)
+	h.globalAdmission = admission
+	h.userGeneration++
+	admissionCommitted = true
 	h.mu.Unlock()
 	h.state = stateRunning
 	h.runtimeErr = nil
@@ -361,6 +390,9 @@ func (h *Hysteria2Service) StartContext(parent context.Context) (err error) {
 	h.watcherDone = watcherDone
 	h.trafficCancel = candidate.cancel
 	h.lifecycleMu.Unlock()
+	if admission != nil {
+		admission.SetUsers(admissionLimits)
+	}
 	h.health.RecordSuccessfulSync(time.Now())
 	h.refreshCertificateExpiry()
 	candidate.authGate.resolve(true)
@@ -521,6 +553,9 @@ func (h *Hysteria2Service) CloseContext(parent context.Context) error {
 	h.runtimeErr = nil
 	h.state = stateStopped
 	h.closed = true
+	// The runtime is fully stopped, so no new session can acquire a lease.
+	// Detach connection-owned leases and stop renewal only after this point.
+	leases, admission := h.takeSessions()
 	h.mu.Lock()
 	h.users = make(map[string]userRecord)
 	h.traffic = make(map[string]*userTraffic)
@@ -531,7 +566,14 @@ func (h *Hysteria2Service) CloseContext(parent context.Context) error {
 	h.rateLimiters = nil
 	h.mu.Unlock()
 	h.lifecycleMu.Unlock()
-	return nil
+	var admissionErr error
+	for _, lease := range leases {
+		admissionErr = errors.Join(admissionErr, closeGlobalLease(lease))
+	}
+	if admission != nil {
+		admissionErr = errors.Join(admissionErr, admission.Close())
+	}
+	return admissionErr
 }
 
 // reloadNode replaces the active Hysteria2 server while preserving the last

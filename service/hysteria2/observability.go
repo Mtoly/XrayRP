@@ -30,6 +30,7 @@ func (h *Hysteria2Service) ObservabilitySnapshot() service.RuntimeSnapshot {
 		LastFailureAt:        health.LastFailureAt,
 		CleanupPending:       cleanupPending,
 		TrafficReportBacklog: health.TrafficBacklog,
+		GlobalDeviceDegraded: h.globalDeviceDegraded(),
 		CertificateExpiresAt: health.CertificateExpiry,
 		WebSocket:            service.WebSocketDisabled,
 	}

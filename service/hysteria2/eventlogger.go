@@ -21,19 +21,17 @@ func (l *hyEventLogger) logger() *log.Entry {
 	return l.svc.logger
 }
 
-// userFields resolves the given Hysteria2 connection ID (which is the
-// auth string returned by the Authenticator) to a stable, non-sensitive
-// user identity such as UID / email for logging purposes.
+// userFields resolves the given Hysteria2 connection ID to a stable,
+// non-sensitive user identity such as UID / email for logging purposes. The ID
+// is either a credential (local mode) or an opaque session id (global mode).
 func (l *hyEventLogger) userFields(id string) log.Fields {
 	fields := log.Fields{}
 	if l == nil || l.svc == nil {
 		return fields
 	}
 
-	l.svc.mu.RLock()
-	defer l.svc.mu.RUnlock()
-
-	if user, ok := l.svc.users[id]; ok {
+	user, _, ok := l.svc.lookupUser(id)
+	if ok {
 		fields["uid"] = user.UID
 	}
 	return fields
@@ -49,9 +47,7 @@ func (l *hyEventLogger) auditRequest(addr net.Addr, id, reqAddr string) {
 		host = h
 	}
 
-	l.svc.mu.RLock()
-	user, ok := l.svc.users[id]
-	l.svc.mu.RUnlock()
+	user, _, ok := l.svc.lookupUser(id)
 	if !ok || reqAddr == "" {
 		return
 	}
@@ -60,11 +56,12 @@ func (l *hyEventLogger) auditRequest(addr net.Addr, id, reqAddr string) {
 		// Mark this connection ID as blocked. The TrafficLogger will see this
 		// flag and return false on the next traffic callback, which instructs
 		// the Hysteria2 core to disconnect the client immediately.
-		if l.svc.blockedIDs != nil {
-			l.svc.mu.Lock()
-			l.svc.blockedIDs[id] = true
-			l.svc.mu.Unlock()
+		l.svc.mu.Lock()
+		if l.svc.blockedIDs == nil {
+			l.svc.blockedIDs = make(map[string]bool)
 		}
+		l.svc.blockedIDs[id] = true
+		l.svc.mu.Unlock()
 
 		l.logger().WithFields(log.Fields{
 			"remote":  host,
@@ -102,23 +99,20 @@ func (l *hyEventLogger) Disconnect(addr net.Addr, id string, err error) {
 		fields[k] = v
 	}
 
-	// Remove this IP from online IP tracking.
-	if l != nil && l.svc != nil && id != "" && host != "" {
-		l.svc.mu.Lock()
-		if ipSet, ok := l.svc.onlineIPs[id]; ok {
-			delete(ipSet, host)
-			if len(ipSet) == 0 {
-				delete(l.svc.onlineIPs, id)
-			}
+	// Remove this connection's online IP tracking. In global mode a session
+	// owns a lease and the IP stays online while another session still uses it;
+	// closing the lease only stops renewal and never deletes shared Redis state.
+	if l != nil && l.svc != nil && id != "" {
+		l.svc.mu.RLock()
+		_, isSession := l.svc.sessions[id]
+		l.svc.mu.RUnlock()
+		if isSession {
+			l.svc.endSession(id)
+		} else if host != "" {
+			l.svc.mu.Lock()
+			l.svc.forgetIPLocked(id, host)
+			l.svc.mu.Unlock()
 		}
-		// Also remove from ipLastActive
-		if activeMap, ok := l.svc.ipLastActive[id]; ok {
-			delete(activeMap, host)
-			if len(activeMap) == 0 {
-				delete(l.svc.ipLastActive, id)
-			}
-		}
-		l.svc.mu.Unlock()
 	}
 
 	if err != nil {
@@ -141,35 +135,24 @@ func (l *hyEventLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
 	}
 
 	var (
-		user    userRecord
-		ok      bool
-		nodeTag string
+		user       userRecord
+		credential string
+		ok         bool
+		nodeTag    string
 	)
 
 	if l != nil && l.svc != nil {
 		nodeTag = l.svc.appliedTag()
+		user, credential, ok = l.svc.lookupUser(id)
 
-		l.svc.mu.RLock()
-		user, ok = l.svc.users[id]
-		l.svc.mu.RUnlock()
-
-		// Update last active time and re-add IP to onlineIPs
-		// This ensures that active connections are tracked even after collectUsage() clears the maps
-		// Similar to how traditional Xray protocols call GetUserBucket on every traffic event
-		if ok && host != "" && id != "" {
+		// Update last active time and re-add the IP to onlineIPs. This keeps an
+		// active connection tracked even after collectUsage() clears the maps,
+		// similar to how traditional Xray protocols call GetUserBucket on every
+		// traffic event.
+		if ok && host != "" && credential != "" {
 			l.svc.mu.Lock()
-			// Re-add IP to onlineIPs (in case it was cleared by collectUsage)
-			if ipSet, exists := l.svc.onlineIPs[id]; exists {
-				ipSet[host] = struct{}{}
-			} else {
-				l.svc.onlineIPs[id] = map[string]struct{}{host: struct{}{}}
-			}
-			// Update last active time
-			if activeMap, exists := l.svc.ipLastActive[id]; exists {
-				activeMap[host] = time.Now()
-			} else {
-				l.svc.ipLastActive[id] = map[string]time.Time{host: time.Now()}
-			}
+			l.svc.trackedIPsLocked(credential)[host] = struct{}{}
+			l.svc.touchIPLocked(credential, host, time.Now())
 			l.svc.mu.Unlock()
 		}
 	}
@@ -178,8 +161,7 @@ func (l *hyEventLogger) TCPRequest(addr net.Addr, id, reqAddr string) {
 		l.logger().Infof("from %s accepted tcp:%s [%s] uid: %d",
 			remote, reqAddr, nodeTag, user.UID)
 	} else {
-		l.logger().Infof("from %s accepted tcp:%s [%s]",
-			remote, reqAddr, nodeTag)
+		l.logger().Infof("from %s accepted tcp:%s [%s]", remote, reqAddr, nodeTag)
 	}
 
 	l.auditRequest(addr, id, reqAddr)
@@ -213,35 +195,20 @@ func (l *hyEventLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, r
 	}
 
 	var (
-		user    userRecord
-		ok      bool
-		nodeTag string
+		user       userRecord
+		credential string
+		ok         bool
+		nodeTag    string
 	)
 
 	if l != nil && l.svc != nil {
 		nodeTag = l.svc.appliedTag()
+		user, credential, ok = l.svc.lookupUser(id)
 
-		l.svc.mu.RLock()
-		user, ok = l.svc.users[id]
-		l.svc.mu.RUnlock()
-
-		// Update last active time and re-add IP to onlineIPs
-		// This ensures that active connections are tracked even after collectUsage() clears the maps
-		// Similar to how traditional Xray protocols call GetUserBucket on every traffic event
-		if ok && host != "" && id != "" {
+		if ok && host != "" && credential != "" {
 			l.svc.mu.Lock()
-			// Re-add IP to onlineIPs (in case it was cleared by collectUsage)
-			if ipSet, exists := l.svc.onlineIPs[id]; exists {
-				ipSet[host] = struct{}{}
-			} else {
-				l.svc.onlineIPs[id] = map[string]struct{}{host: {}}
-			}
-			// Update last active time
-			if activeMap, exists := l.svc.ipLastActive[id]; exists {
-				activeMap[host] = time.Now()
-			} else {
-				l.svc.ipLastActive[id] = map[string]time.Time{host: time.Now()}
-			}
+			l.svc.trackedIPsLocked(credential)[host] = struct{}{}
+			l.svc.touchIPLocked(credential, host, time.Now())
 			l.svc.mu.Unlock()
 		}
 	}
@@ -250,8 +217,7 @@ func (l *hyEventLogger) UDPRequest(addr net.Addr, id string, sessionID uint32, r
 		l.logger().Infof("from %s accepted udp:%s [%s] uid: %d",
 			remote, reqAddr, nodeTag, user.UID)
 	} else {
-		l.logger().Infof("from %s accepted udp:%s [%s]",
-			remote, reqAddr, nodeTag)
+		l.logger().Infof("from %s accepted udp:%s [%s]", remote, reqAddr, nodeTag)
 	}
 
 	l.auditRequest(addr, id, reqAddr)

@@ -27,6 +27,7 @@ type connCounter struct {
 	ctx       context.Context
 	limiter   *rate.Limiter
 	device    *deviceConnections
+	lease     globalLease
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -73,6 +74,9 @@ func (c *connCounter) Close() error {
 		if c.svc != nil {
 			c.svc.releaseConnection(c.user, c.host, c.device)
 		}
+		if leaseErr := closeGlobalLease(c.lease); leaseErr != nil && c.svc != nil && c.svc.logger != nil {
+			c.svc.logger.WithField("uid", c.user).Warn("failed to stop global device lease renewal")
+		}
 	})
 	return c.closeErr
 }
@@ -86,6 +90,7 @@ type packetConnCounter struct {
 	ctx       context.Context
 	limiter   *rate.Limiter
 	device    *deviceConnections
+	lease     globalLease
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -133,6 +138,9 @@ func (c *packetConnCounter) Close() error {
 		c.closeErr = c.PacketConn.Close()
 		if c.svc != nil {
 			c.svc.releaseConnection(c.user, c.host, c.device)
+		}
+		if leaseErr := closeGlobalLease(c.lease); leaseErr != nil && c.svc != nil && c.svc.logger != nil {
+			c.svc.logger.WithField("uid", c.user).Warn("failed to stop global device lease renewal")
 		}
 	})
 	return c.closeErr
@@ -213,10 +221,13 @@ func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m a
 	}
 
 	// Device limit check (only if not already blocked by audit).
-	var device *deviceConnections
+	var (
+		device *deviceConnections
+		lease  globalLease
+	)
 	if !blocked {
 		var admitted bool
-		device, admitted = t.svc.allowConnection(m.User, remote)
+		device, lease, admitted = t.svc.allowConnection(ctx, m.User, remote)
 		blocked = !admitted
 	}
 
@@ -232,7 +243,7 @@ func (t *anyTLSTracker) RoutedConnection(ctx context.Context, conn net.Conn, m a
 		return &connCounter{Conn: conn, svc: t.svc, user: m.User, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &connCounter{Conn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, ctx: ctx, limiter: limiter}
+	return &connCounter{Conn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, lease: lease, ctx: ctx, limiter: limiter}
 }
 
 func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, m adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
@@ -299,10 +310,13 @@ func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.Packe
 	}
 
 	// Device limit check (only if not already blocked by audit).
-	var device *deviceConnections
+	var (
+		device *deviceConnections
+		lease  globalLease
+	)
 	if !blocked {
 		var admitted bool
-		device, admitted = t.svc.allowConnection(m.User, remote)
+		device, lease, admitted = t.svc.allowConnection(ctx, m.User, remote)
 		blocked = !admitted
 	}
 
@@ -318,7 +332,7 @@ func (t *anyTLSTracker) RoutedPacketConnection(ctx context.Context, conn N.Packe
 		return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: host, blocked: true, ctx: ctx, limiter: limiter}
 	}
 
-	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, ctx: ctx, limiter: limiter}
+	return &packetConnCounter{PacketConn: conn, svc: t.svc, user: m.User, host: admissionHost(remote), device: device, lease: lease, ctx: ctx, limiter: limiter}
 }
 
 func admissionContext(ctx context.Context) context.Context {
