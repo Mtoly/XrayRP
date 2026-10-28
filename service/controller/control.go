@@ -33,6 +33,7 @@ type dataPathWrapper struct {
 	sm          stats.Manager
 	limiter     *limiter.Limiter
 	routePolicy routingPolicyValue
+	SpliceCopyEnable bool
 	logger      *log.Entry
 	// ruleMgr provides audit detection
 	ruleMgr interface {
@@ -78,9 +79,9 @@ func (w *dataPathWrapper) selectDispatchHandler(ctx context.Context) (outbound.H
 
 func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 	// Force userland path to keep stats/limit in effect
-	if sess := session.InboundFromContext(ctx); sess != nil {
-		sess.CanSpliceCopy = 3
-	}
+		if sess := session.InboundFromContext(ctx); sess != nil && !w.SpliceCopyEnable {		
+			sess.CanSpliceCopy = 3
+		}
 
 	decision := w.selectDispatch(ctx)
 	if decision.rejectReason != "" || decision.handler == nil {
@@ -187,6 +188,7 @@ func (c *Controller) addOutboundContext(ctx context.Context, config *core.Outbou
 		obm:         c.obm,
 		routePolicy: routePolicy.clone(),
 		logger:      c.logger.WithField("outbound_tag", tag),
+		SpliceCopyEnable: c.SpliceCopyEnable,
 	}
 	log.Infof("Adding outbound handler: configTag=%s handlerTag=%s wrapperTag=%s controllerTag=%s", config.Tag, handler.Tag(), wrapper.Tag(), tag)
 	if err := c.obm.AddHandler(ctx, wrapper); err != nil {
