@@ -4,17 +4,27 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+## 0.9.11 - 2026-10-28
+
 ### Added
 
-- Added opt-in Redis global source-IP admission, configured through `ControllerConfig.GlobalDeviceLimitConfig`. When enabled, one source-IP quota follows the panel UID across XrayRP nodes, processes, and the Xray, AnyTLS, TUIC, and Hysteria2 paths. The same normalized address counts once even when it opens several connections, IPv4-mapped IPv6 addresses count as IPv4, and IPv6 addresses are grouped by `IPv6Prefix` (default `/64`; an explicit `0` counts the full address). `Mode: cache` is the default compatibility mode and reuses a confirmed reservation, while `Mode: strict` verifies every new connection against Redis. `FailMode: open` keeps serving with a process-local quota when Redis fails; `FailMode: closed` rejects new connections that cannot be verified. Leases renew while a connection stays open, including idle connections, and expire by TTL after a crash; lowering a limit does not disconnect addresses that are already admitted. While enabled, panel device snapshots no longer drive admission or online-IP cropping. The feature is disabled by default, and existing configuration keeps local-only admission. See [docs/redis-global-ip-limit.md](docs/redis-global-ip-limit.md).
+- Added opt-in Redis global source-IP admission, configured through `ControllerConfig.GlobalDeviceLimitConfig`. When enabled, one source-IP quota follows the panel UID across XrayRP nodes, processes, and the Xray, AnyTLS, TUIC, and Hysteria2 paths. The same normalized address counts once even when it opens several connections, IPv4-mapped IPv6 addresses count as IPv4, and IPv6 addresses are grouped by `IPv6Prefix` (default `/64`; an explicit `0` counts the full address). `Mode: cache` is the default compatibility mode and reuses a confirmed reservation, while `Mode: strict` verifies every new connection against Redis. `FailMode: open` keeps serving with a process-local quota when Redis fails; `FailMode: closed` rejects new connections that cannot be verified. Leases renew while a connection stays open, including idle connections, and expire by TTL after a crash; lowering a limit does not disconnect addresses that are already admitted. While enabled, panel device snapshots no longer drive admission or online-IP cropping. The feature is disabled by default; configurations with `GlobalDeviceLimitConfig.Enable: false` keep local-only admission. Existing Redis-enabled deployments change behavior as described in the upgrade notes below. See [docs/redis-global-ip-limit.md](docs/redis-global-ip-limit.md).
 
 ### Upgrade notes
 
+- If `GlobalDeviceLimitConfig.Enable` was already `true` on an older version, upgrading switches that deployment from the legacy Redis cache to shared panel-namespace/UID admission. Xray, AnyTLS, TUIC, and Hysteria2 now participate; specialized runtimes previously enforced only local device limits. Without an explicit `Namespace`, the panel type and `ApiHost` derive the shared namespace, so the same panel UID can share a quota across nodes without adding a new configuration switch. Review this behavior change before upgrading existing Redis-enabled deployments. The defaults remain `Mode: cache` and `FailMode: open`; cache mode is not a strict distributed guarantee.
 - Redis global source-IP admission requires a coordinated upgrade. Nodes running an older version do not participate in the shared quota and keep their previous local and cache behavior, and participating nodes must use the same namespace, `Mode`, `IPv6Prefix`, and Redis database. New entries use a dedicated Redis key prefix and expire by TTL, so upgrading does not require deleting existing keys.
 
 ### Security
 
+- Updated `github.com/go-jose/go-jose/v4` from `v4.1.4` to `v4.1.6`, including the JWK RSA parsing denial-of-service fix for GHSA-mgcc-cww5-fp2q. Upstream now caps parsed JWK RSA moduli at 4096 bits; XrayRP's existing certificate-account and DNS signing paths do not use that JWK parsing entry point.
+- Updated `github.com/go-chi/chi/v5` from `v5.2.5` to `v5.4.0`, including the `ClientIPFromXFF` fix for GHSA-j6qf-3m9c-vwj3. XrayRP does not use this middleware for source-IP admission; the update does not change forwarded-header trust configuration.
 - Updated `golang.org/x/net` from `v0.61.0` to `v0.62.0` to fix GO-2026-6860 (CVE-2026-78661), quadratic text-node coalescing in the HTML parser reachable through the Lego ddnss DNS provider. Existing vulnerability-gate exceptions are unchanged.
+
+### Changed
+
+- Updated the Docker runtime base from Alpine `3.24.2` to `3.24.3` and refreshed the digest-pinned Go `1.27.3-alpine` builder image. The Go version and full `with_quic` build remain unchanged.
+- Updated both GHCR publishing jobs to `docker/login-action v4.7.0`, retaining commit-SHA pins and the existing registry inputs and permissions.
 
 ### Fixed
 
