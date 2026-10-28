@@ -35,7 +35,7 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 	if t.svc.blockedIDs != nil {
 		if blocked := t.svc.blockedIDs[id]; blocked {
 			delete(t.svc.blockedIDs, id)
-			user, known := t.svc.users[id]
+			user, _, known := t.svc.userForIDLocked(id)
 			t.svc.mu.Unlock()
 			if t.svc.logger != nil {
 				logger := t.svc.logger
@@ -48,21 +48,21 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 		}
 	}
 
-	user, ok := t.svc.users[id]
+	user, credential, ok := t.svc.userForIDLocked(id)
 	if !ok {
 		t.svc.mu.Unlock()
 		return true
 	}
-	counter, ok := t.svc.traffic[id]
-	if !ok {
+	counter, ok := t.svc.traffic[credential]
+	if !ok || counter == nil {
 		counter = &userTraffic{}
-		t.svc.traffic[id] = counter
+		t.svc.traffic[credential] = counter
 	}
 	counter.Upload = trafficstats.Add(counter.Upload, tx)
 	counter.Download = trafficstats.Add(counter.Download, rx)
 
 	if t.svc.rateLimiters != nil {
-		limiter = t.svc.rateLimiters[id]
+		limiter = t.svc.rateLimiters[credential]
 	}
 
 	t.svc.mu.Unlock()
@@ -94,6 +94,11 @@ func (t *hyTrafficLogger) LogTraffic(id string, tx, rx uint64) bool {
 
 func (t *hyTrafficLogger) LogOnlineState(id string, online bool) {
 	// Online state is tracked via Authenticator and event logger using the onlineIPs map.
+	// The core calls online=false before Disconnect, so stop renewal for that
+	// session here while keeping its identity resolvable for the disconnect log.
+	if !online {
+		t.svc.retireSessionLease(id)
+	}
 }
 
 func (h *Hysteria2Service) cleanupStaleUserIPsLocked(id string, now time.Time) {
@@ -147,7 +152,6 @@ func (h *Hysteria2Service) syncUsersFor(userInfo *[]api.UserInfo, nodeInfo *api.
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.users, h.rateLimiters = reconcileUsers(
 		userInfo,
 		nodeLimit,
@@ -156,6 +160,15 @@ func (h *Hysteria2Service) syncUsersFor(userInfo *[]api.UserInfo, nodeInfo *api.
 		h.ipLastActive,
 		h.rateLimiters,
 	)
+	h.userGeneration++
+	admission := h.globalAdmission
+	limits := userDeviceLimits(h.users)
+	h.mu.Unlock()
+	// Policy publication never performs network I/O; the manager's renewal
+	// worker publishes it.
+	if admission != nil {
+		admission.SetUsers(limits)
+	}
 }
 
 func reconcileUsers(
@@ -440,8 +453,20 @@ func (h *Hysteria2Service) collectUsage() ([]api.UserTraffic, []api.OnlineUser, 
 	// For Hysteria2, long-lived connections may authenticate once and then remain
 	// active without a fresh auth event every reporting cycle, so we keep active
 	// IPs across cycles and rely on TTL cleanup instead of full map reset.
-	h.cleanupStaleOnlineIPsLocked(time.Now())
 	var onlineUsers []api.OnlineUser
+	if h.globalAdmission != nil {
+		// Redis admission owns the shared guarantee: report the source IPs of
+		// live sessions, including idle authenticated ones, instead of using
+		// the local TTL snapshot.
+		live := h.liveSessionIPsLocked()
+		for uid, ips := range live {
+			for _, ip := range ips {
+				onlineUsers = append(onlineUsers, api.OnlineUser{UID: uid, IP: ip})
+			}
+		}
+		return uts, onlineUsers, snapshot
+	}
+	h.cleanupStaleOnlineIPsLocked(time.Now())
 	for uuid, ipSet := range h.onlineIPs {
 		user, ok := h.users[uuid]
 		if !ok {

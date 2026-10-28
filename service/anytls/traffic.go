@@ -36,7 +36,6 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	state := reconcileUserState(*userInfo, nodeLimit, userState{
 		traffic:      s.traffic,
 		onlineIPs:    s.onlineIPs,
@@ -44,9 +43,16 @@ func (s *AnyTLSService) syncUsers(userInfo *[]api.UserInfo) error {
 		rateLimiters: s.rateLimiters,
 	})
 	if err := runtime.UpdateUsers(state.authUsers); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.applyUserStateLocked(state)
+	admission := s.globalAdmission
+	limits := userDeviceLimits(state.users)
+	s.mu.Unlock()
+	if admission != nil {
+		admission.SetUsers(limits)
+	}
 	return nil
 }
 
@@ -222,6 +228,7 @@ func (s *AnyTLSService) applyUserStateLocked(state userState) {
 	s.ipLastActive = state.ipLastActive
 	s.authUsers = state.authUsers
 	s.rateLimiters = state.rateLimiters
+	s.policyGeneration++
 }
 
 func (s *AnyTLSService) recordTraffic(uuid string, up, down uint64, host string) {
@@ -243,43 +250,101 @@ func (s *AnyTLSService) recordTraffic(uuid string, up, down uint64, host string)
 	}
 }
 
-func (s *AnyTLSService) allowConnection(uuid, ip string) (*deviceConnections, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, ok := s.users[uuid]
-	if !ok {
-		return nil, false
-	}
-
+// allowConnection reserves one connection slot for an authenticated user and
+// returns this connection's shared global lease, if any.
+//
+// Redis admission runs outside s.mu: the user snapshot and manager are read
+// under a read lock, the shared reservation happens without locks, and the
+// local slot is only published after the same user policy and manager are
+// revalidated. Any rejection aborts the tentative Redis hold so a denied
+// connection never leaves a phantom reservation behind.
+func (s *AnyTLSService) allowConnection(ctx context.Context, uuid, ip string) (*deviceConnections, globalLease, bool) {
 	host := admissionHost(ip)
 
+	s.mu.RLock()
+	user, known := s.users[uuid]
+	admission := s.globalAdmission
+	generation := s.policyGeneration
+	existing := s.connections[uuid][host]
+	s.mu.RUnlock()
+
+	if !known {
+		return nil, nil, false
+	}
+
+	// A live reservation for this user and IP already holds the local slot.
+	// Reusing it is local-only; in Redis mode each connection owns its own
+	// global lease so renewal stops exactly when that connection closes.
+	if existing != nil && admission == nil {
+		s.mu.Lock()
+		current, stillKnown := s.users[uuid]
+		device := s.connections[uuid][host]
+		if !stillKnown || current != user || device != existing || s.globalAdmission != admission || s.policyGeneration != generation {
+			s.mu.Unlock()
+			return nil, nil, false
+		}
+		device.count++
+		s.onlineIPs[uuid][host] = struct{}{}
+		s.ipLastActive[uuid][host] = time.Now()
+		s.mu.Unlock()
+		return device, nil, true
+	}
+
+	var lease globalLease
+	if admission != nil {
+		acquired, err := admission.Acquire(admissionContext(ctx), user.UID, host, user.DeviceLimit)
+		if err != nil {
+			s.logger.WithFields(log.Fields{
+				"uid":    user.UID,
+				"remote": ip,
+			}).Warn("AnyTLS global device admission rejected connection")
+			return nil, nil, false
+		}
+		lease = acquired
+	}
+
+	s.mu.Lock()
+	current, stillKnown := s.users[uuid]
+	if !stillKnown || current != user || s.globalAdmission != admission || s.policyGeneration != generation {
+		s.mu.Unlock()
+		abortGlobalLease(lease)
+		return nil, nil, false
+	}
+
+	// The shared manager owns distributed capacity. Local capacity would
+	// otherwise count /64-normalized IPs as separate devices, so it is only
+	// applied in local-only mode. Online/reporting state is preserved either
+	// way.
+	if admission == nil && current.DeviceLimit > 0 {
+		if _, exists := s.onlineIPs[uuid][host]; !exists && len(s.onlineIPs[uuid]) >= current.DeviceLimit {
+			s.mu.Unlock()
+			s.logger.WithFields(log.Fields{
+				"uid":         current.UID,
+				"deviceLimit": current.DeviceLimit,
+				"remote":      ip,
+			}).Warn("AnyTLS user exceeded device limit")
+			return nil, nil, false
+		}
+	}
+
+	if s.onlineIPs == nil {
+		s.onlineIPs = make(map[string]map[string]struct{})
+	}
 	ips, ok := s.onlineIPs[uuid]
 	if !ok {
 		ips = make(map[string]struct{})
 		s.onlineIPs[uuid] = ips
 	}
+	ips[host] = struct{}{}
 
-	// Initialize ipLastActive map for this user if not exists
+	if s.ipLastActive == nil {
+		s.ipLastActive = make(map[string]map[string]time.Time)
+	}
 	activeMap, ok := s.ipLastActive[uuid]
 	if !ok {
 		activeMap = make(map[string]time.Time)
 		s.ipLastActive[uuid] = activeMap
 	}
-
-	if _, exists := ips[host]; !exists {
-		if user.DeviceLimit > 0 && len(ips) >= user.DeviceLimit {
-			s.logger.WithFields(log.Fields{
-				"uid":         user.UID,
-				"deviceLimit": user.DeviceLimit,
-				"remote":      ip,
-			}).Warn("AnyTLS user exceeded device limit")
-			return nil, false
-		}
-		ips[host] = struct{}{}
-	}
-
-	// Update last active time for this IP
 	activeMap[host] = time.Now()
 
 	if s.connections == nil {
@@ -294,7 +359,20 @@ func (s *AnyTLSService) allowConnection(uuid, ip string) (*deviceConnections, bo
 		s.connections[uuid][host] = device
 	}
 	device.count++
-	return device, true
+	s.mu.Unlock()
+
+	if lease != nil {
+		if err := lease.Commit(); err != nil {
+			s.logger.WithFields(log.Fields{
+				"uid":    user.UID,
+				"remote": ip,
+			}).Warn("AnyTLS global device admission commit failed, rejecting connection")
+			s.releaseConnection(uuid, host, device)
+			_ = closeGlobalLease(lease)
+			return nil, nil, false
+		}
+	}
+	return device, lease, true
 }
 
 func (s *AnyTLSService) collectUsage() ([]api.UserTraffic, []api.OnlineUser, map[string]userTraffic) {

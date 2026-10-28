@@ -26,7 +26,9 @@ type globalOnlineIPCache interface {
 
 type globalLimitBackend struct {
 	globalOnlineIP globalOnlineIPCache
+	admission      *GlobalAdmission
 	closer         io.Closer
+	err            error
 }
 
 type globalLimitCacheLayer interface {
@@ -195,6 +197,12 @@ func (c *globalLimitBackendCloser) Close() error {
 }
 
 func newGlobalLimitBackend(config *GlobalDeviceLimitConfig) globalLimitBackend {
+	// Legacy direct callers without panel identity keep their cache contract.
+	// Managed runtimes always supply identity, including in cache mode.
+	if config.Namespace != "" || config.APIHost != "" || config.Mode == "strict" {
+		admission, err := NewGlobalAdmission(config, config.PanelType, config.APIHost)
+		return globalLimitBackend{admission: admission, closer: admission, err: err}
+	}
 	localClient := newLocalTTLCache(
 		time.Duration(config.Expiry)*time.Second,
 		localGlobalLimitCleanupInterval,

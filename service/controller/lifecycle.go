@@ -50,6 +50,9 @@ func (c *Controller) StartContext(parent context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.config.ValidateGlobalDeviceLimit(); err != nil {
+		return err
+	}
 	if err := c.beginLifecycleStart(); err != nil {
 		return err
 	}

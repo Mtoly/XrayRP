@@ -30,6 +30,7 @@ func (s *TuicService) ObservabilitySnapshot() service.RuntimeSnapshot {
 		LastFailureAt:        health.LastFailureAt,
 		CleanupPending:       cleanupPending,
 		TrafficReportBacklog: health.TrafficBacklog,
+		GlobalDeviceDegraded: s.globalDeviceDegraded(),
 		CertificateExpiresAt: health.CertificateExpiry,
 		WebSocket:            service.WebSocketDisabled,
 	}
