@@ -68,7 +68,7 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 
 	t.Run("stream", func(t *testing.T) {
 		service := limiterTestService()
-		device, admitted := service.allowConnection("user", host)
+		device, lease, admitted := service.allowConnection(context.Background(), "user", host)
 		if !admitted {
 			t.Fatal("initial device rejected")
 		}
@@ -79,6 +79,7 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 			user:    "user",
 			host:    host,
 			device:  device,
+			lease:   lease,
 			limiter: rate.NewLimiter(1, 0),
 		}
 
@@ -88,7 +89,7 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 
 	t.Run("packet", func(t *testing.T) {
 		service := limiterTestService()
-		device, admitted := service.allowConnection("user", host)
+		device, lease, admitted := service.allowConnection(context.Background(), "user", host)
 		if !admitted {
 			t.Fatal("initial device rejected")
 		}
@@ -98,6 +99,7 @@ func TestLimiterFailureUsesWrapperCloseCleanup(t *testing.T) {
 			user:       "user",
 			host:       host,
 			device:     device,
+			lease:      lease,
 			limiter:    rate.NewLimiter(1, 0),
 		}
 		buffer := buf.As([]byte("blocked"))

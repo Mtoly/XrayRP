@@ -109,6 +109,7 @@ type RuntimeSnapshot struct {
 	LastFailureAt        time.Time
 	CleanupPending       bool
 	TrafficReportBacklog int
+	GlobalDeviceDegraded bool
 	CertificateExpiresAt time.Time
 	Reload               ReloadSnapshot
 	Children             []RuntimeSnapshot
@@ -220,6 +221,7 @@ const (
 	ReadinessReasonSyncUnavailable    ReadinessReason = "sync_unavailable"
 	ReadinessReasonSyncStale          ReadinessReason = "sync_stale"
 	ReadinessReasonCertificateExpired ReadinessReason = "certificate_expired"
+	ReadinessReasonGlobalDevice       ReadinessReason = "global_device_limit_unavailable"
 )
 
 type Readiness struct {
@@ -259,6 +261,10 @@ func EvaluateReadiness(snapshot RuntimeSnapshot, now time.Time, staleAfter time.
 		if current.CleanupPending || current.Lifecycle == RuntimeLifecycleFailedOwned || current.Lifecycle == RuntimeLifecycleRetiring {
 			result.Ready = false
 			reasons[ReadinessReasonCleanupPending] = struct{}{}
+		}
+		if current.GlobalDeviceDegraded {
+			result.Degraded = true
+			reasons[ReadinessReasonGlobalDevice] = struct{}{}
 		}
 		if current.WebSocket == WebSocketDegraded || current.TrafficReportBacklog > 0 {
 			result.Degraded = true

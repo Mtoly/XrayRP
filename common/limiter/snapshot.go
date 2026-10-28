@@ -122,6 +122,9 @@ func snapshotAppliedInbound(state *inboundState) (InboundSnapshot, bool) {
 			return true
 		})
 	}
+	if online, enabled := liveGlobalOnlineUsers(state); enabled {
+		snapshot.OnlineUsers = online
+	}
 	sort.Slice(snapshot.OnlineUsers, func(i, j int) bool {
 		if snapshot.OnlineUsers[i].UID == snapshot.OnlineUsers[j].UID {
 			return snapshot.OnlineUsers[i].IP < snapshot.OnlineUsers[j].IP

@@ -99,6 +99,14 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 	if sess := session.InboundFromContext(ctx); sess != nil && sess.User != nil {
 		email := sess.User.Email
 		if email != "" {
+			if sess.Source.Address == nil || !sess.Source.Address.Family().IsIP() {
+				if w.logger != nil {
+					w.logger.Warn("Device admission rejected non-IP source address")
+				}
+				common.Close(link.Writer)
+				common.Interrupt(link.Reader)
+				return
+			}
 			srcIP := sess.Source.Address.IP().String()
 			nodeTag := w.tag
 
@@ -125,7 +133,7 @@ func (w *dataPathWrapper) Dispatch(ctx context.Context, link *transport.Link) {
 
 			// Device limit and rate limit are owned by the active node wrapper.
 			if w.limiter != nil {
-				reader, writer, reject := w.limiter.Admit(nodeTag, email, srcIP, link.Reader, link.Writer)
+				reader, writer, reject := w.limiter.AdmitContext(ctx, nodeTag, email, srcIP, link.Reader, link.Writer)
 				if reject {
 					common.Close(link.Writer)
 					common.Interrupt(link.Reader)
@@ -281,6 +289,12 @@ func subtractReportedTraffic(counters []reportedCounter) {
 }
 
 func (c *Controller) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList *[]api.UserInfo, globalDeviceLimitConfig *limiter.GlobalDeviceLimitConfig) error {
+	globalDeviceLimitConfig = cloneGlobalDeviceLimitConfig(globalDeviceLimitConfig)
+	if globalDeviceLimitConfig != nil {
+		globalDeviceLimitConfig.PanelType = c.panelType
+		globalDeviceLimitConfig.APIHost = c.apiClient.Describe().APIHost
+		globalDeviceLimitConfig.RuntimeOwner = fmt.Sprintf("controller:%p", c)
+	}
 	err := c.dispatcher.Limiter.AddInboundLimiter(tag, nodeSpeedLimit, c.runtimeLimiterUsers(tag, userList), globalDeviceLimitConfig)
 	return err
 }
