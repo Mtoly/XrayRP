@@ -266,6 +266,16 @@ because a test file exists.
 
 ## Migration and key layout
 
+- If an older deployment already sets `GlobalDeviceLimitConfig.Enable: true`,
+  upgrading changes its legacy Redis cache behavior to shared panel-namespace/UID
+  admission. Xray, AnyTLS, TUIC, and Hysteria2 runtimes now participate, including
+  specialized runtimes that previously enforced only local device limits. With
+  `Namespace` omitted, the runtime derives it from the panel type and `ApiHost`,
+  not the node tag. Nodes for the same panel and UID therefore share a quota
+  without adding a new configuration switch. Review this change before upgrading
+  existing Redis-enabled deployments; `cache` and `open` remain the defaults.
+- Deployments with `Enable: false` (the default) keep their existing local-only
+  admission behavior. The new feature does not enable Redis automatically.
 - New state lives under a dedicated key prefix (`xrayrp:gli:<namespace>:...`)
   with its own layout. It does not read or overwrite the older per-user cache
   entries, so enabling the feature does not require clearing Redis and does not
