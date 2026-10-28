@@ -7,7 +7,7 @@ RUN go mod download
 RUN go build -v -o XrayR -tags with_quic -trimpath -ldflags "-s -w -buildid="
 
 # Release
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 # 安装必要的工具包
 RUN apk --update --no-cache add tzdata ca-certificates \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
