@@ -12,6 +12,10 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 - Redis global source-IP admission requires a coordinated upgrade. Nodes running an older version do not participate in the shared quota and keep their previous local and cache behavior, and participating nodes must use the same namespace, `Mode`, `IPv6Prefix`, and Redis database. New entries use a dedicated Redis key prefix and expire by TTL, so upgrading does not require deleting existing keys.
 
+### Security
+
+- Updated `golang.org/x/net` from `v0.61.0` to `v0.62.0` to fix GO-2026-6860 (CVE-2026-78661), quadratic text-node coalescing in the HTML parser reachable through the Lego ddnss DNS provider. Existing vulnerability-gate exceptions are unchanged.
+
 ### Fixed
 
 - Rejected an authenticated Xray connection whose source is not an IP address before device admission, instead of passing a missing or non-IP source into device checking.
