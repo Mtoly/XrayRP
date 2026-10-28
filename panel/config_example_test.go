@@ -195,6 +195,26 @@ func TestConfigExampleParsesRuntimeConfigContract(t *testing.T) {
 	if deviceLimitConfig.Expiry != 60 {
 		t.Fatalf("expected redis expiry 60, got %d", deviceLimitConfig.Expiry)
 	}
+	if deviceLimitConfig.Mode != "cache" || deviceLimitConfig.FailMode != "open" || deviceLimitConfig.StrictClientIPSource != "peer" {
+		t.Fatalf("unexpected global admission defaults: mode=%q, failure=%q, source=%q", deviceLimitConfig.Mode, deviceLimitConfig.FailMode, deviceLimitConfig.StrictClientIPSource)
+	}
+	if deviceLimitConfig.IPv6Prefix == nil || *deviceLimitConfig.IPv6Prefix != 64 {
+		t.Fatal("expected documented IPv6 /64 prefix to parse")
+	}
+	// Exercise the enabled example through the same validation and identity
+	// propagation as startup without opening a Redis connection.
+	deviceLimitConfig.Enable = true
+	deviceLimitConfig.Mode = "strict"
+	deviceLimitConfig.FailMode = "closed"
+	deviceLimitConfig.StrictClientIPSource = "forwarded"
+	plan, err := buildRuntimeConfigPlan(panelConfig)
+	if err != nil {
+		t.Fatalf("validate enabled global admission example: %v", err)
+	}
+	global := plan.staticNodes[0].materializeControllerConfig().GlobalDeviceLimitConfig
+	if global.PanelType != node.PanelType || global.APIHost != node.ApiConfig.APIHost {
+		t.Fatal("config example lost panel identity during runtime planning")
+	}
 }
 
 func requireConfigKey(t *testing.T, config *viper.Viper, key string) {

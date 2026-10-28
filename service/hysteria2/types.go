@@ -185,6 +185,22 @@ type Hysteria2Service struct {
 	blockedIDs   map[string]bool                 // connection id -> blocked by audit
 	rateLimiters map[string]*rate.Limiter        // uuid -> per-user speed limiter
 
+	// userGeneration increments whenever the published user policy snapshot is
+	// replaced. Global admission revalidates it after the Redis round trip so a
+	// reservation cannot commit against a superseded policy.
+	userGeneration uint64
+
+	// sessions maps the opaque core connection id to the credential and lease
+	// it owns. It is only populated when global admission is enabled; every
+	// authenticated connection then gets its own id so same-credential and
+	// same-IP connections remain distinguishable to Connect/Disconnect.
+	sessions map[string]*hySession
+
+	// globalAdmission is the shared Redis-backed manager when global device
+	// limiting is enabled. It is nil in local-only mode.
+	globalAdmission  globalAdmission
+	admissionFactory func(api.ClientInfo) (globalAdmission, error)
+
 	rateLimitFailures atomic.Uint64
 
 	// reloadMu serializes hot-reload operations (node / cert changes) so that

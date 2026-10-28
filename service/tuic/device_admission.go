@@ -19,6 +19,8 @@ func admissionHost(remote string) string {
 	return remote
 }
 
+// releaseConnection drops one local reference. The caller closes the
+// connection's global lease separately, outside the service mutex.
 func (s *TuicService) releaseConnection(user, host string, device *deviceConnections) {
 	if device == nil {
 		return

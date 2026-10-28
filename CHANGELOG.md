@@ -4,6 +4,22 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Added
+
+- Added opt-in Redis global source-IP admission, configured through `ControllerConfig.GlobalDeviceLimitConfig`. When enabled, one source-IP quota follows the panel UID across XrayRP nodes, processes, and the Xray, AnyTLS, TUIC, and Hysteria2 paths. The same normalized address counts once even when it opens several connections, IPv4-mapped IPv6 addresses count as IPv4, and IPv6 addresses are grouped by `IPv6Prefix` (default `/64`; an explicit `0` counts the full address). `Mode: cache` is the default compatibility mode and reuses a confirmed reservation, while `Mode: strict` verifies every new connection against Redis. `FailMode: open` keeps serving with a process-local quota when Redis fails; `FailMode: closed` rejects new connections that cannot be verified. Leases renew while a connection stays open, including idle connections, and expire by TTL after a crash; lowering a limit does not disconnect addresses that are already admitted. While enabled, panel device snapshots no longer drive admission or online-IP cropping. The feature is disabled by default, and existing configuration keeps local-only admission. See [docs/redis-global-ip-limit.md](docs/redis-global-ip-limit.md).
+
+### Upgrade notes
+
+- Redis global source-IP admission requires a coordinated upgrade. Nodes running an older version do not participate in the shared quota and keep their previous local and cache behavior, and participating nodes must use the same namespace, `Mode`, `IPv6Prefix`, and Redis database. New entries use a dedicated Redis key prefix and expire by TTL, so upgrading does not require deleting existing keys.
+
+### Security
+
+- Updated `golang.org/x/net` from `v0.61.0` to `v0.62.0` to fix GO-2026-6860 (CVE-2026-78661), quadratic text-node coalescing in the HTML parser reachable through the Lego ddnss DNS provider. Existing vulnerability-gate exceptions are unchanged.
+
+### Fixed
+
+- Rejected an authenticated Xray connection whose source is not an IP address before device admission, instead of passing a missing or non-IP source into device checking.
+
 ## 0.9.10 - 2026-10-27
 
 ### Changed

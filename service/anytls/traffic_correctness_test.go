@@ -98,7 +98,7 @@ func TestPacketConnCounterAccountsTrafficAndOnlineIP(t *testing.T) {
 	const host = "192.0.2.1"
 	service := limiterTestService()
 	service.traffic["user"] = &userTraffic{}
-	device, admitted := service.allowConnection("user", host)
+	device, lease, admitted := service.allowConnection(context.Background(), "user", host)
 	if !admitted {
 		t.Fatal("initial device rejected")
 	}
@@ -109,6 +109,7 @@ func TestPacketConnCounterAccountsTrafficAndOnlineIP(t *testing.T) {
 		user:       "user",
 		host:       host,
 		device:     device,
+		lease:      lease,
 		ctx:        context.Background(),
 	}
 

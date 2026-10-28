@@ -127,6 +127,11 @@ func buildStaticRuntimeNodePlans(nodes []*NodesConfig, showErrorDetails bool) ([
 		if err != nil {
 			return nil, err
 		}
+		controllerConfig.GlobalPanelType = node.PanelType
+		if global := controllerConfig.GlobalDeviceLimitConfig; global != nil {
+			global.PanelType = node.PanelType
+			global.APIHost = apiConfig.APIHost
+		}
 		plans = append(plans, staticRuntimeNodePlan{
 			panelType:                node.PanelType,
 			apiConfig:                &apiConfig,
@@ -169,6 +174,11 @@ func buildMachineRuntimeConfigPlan(config *Config, showErrorDetails bool) (*Mach
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
+	controllerConfig.GlobalPanelType = machineConfig.PanelType
+	if global := controllerConfig.GlobalDeviceLimitConfig; global != nil {
+		global.PanelType = machineConfig.PanelType
+		global.APIHost = machineConfig.ApiHost
+	}
 	sharedWSEndpoint := ""
 	if wsConfig := controllerConfig.WebSocketConfig; wsConfig != nil && wsConfig.Enable {
 		endpoint, err := controller.BuildWSEndpoint(&api.WSConfig{
@@ -195,6 +205,9 @@ func buildRuntimeControllerConfig(template *controller.Config, showErrorDetails 
 		}
 	}
 	controllerConfig.ShowErrorDetails = showErrorDetails
+	if err := controllerConfig.ValidateGlobalDeviceLimit(); err != nil {
+		return nil, err
+	}
 
 	return controllerConfig.Clone(), nil
 }

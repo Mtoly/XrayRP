@@ -78,6 +78,9 @@ func (c *Controller) ObservabilitySnapshot() service.RuntimeSnapshot {
 		CertificateExpiresAt: health.CertificateExpiry,
 		WebSocket:            service.WebSocketDisabled,
 	}
+	if c.dispatcher != nil && c.dispatcher.Limiter != nil {
+		snapshot.GlobalDeviceDegraded = c.dispatcher.Limiter.GlobalDeviceDegraded()
+	}
 	if c.config != nil && c.config.WebSocketConfig != nil && c.config.WebSocketConfig.Enable {
 		snapshot.WebSocket = service.WebSocketDisconnected
 		if provider, ok := c.currentWSRuntime().(service.WebSocketSnapshotProvider); ok {

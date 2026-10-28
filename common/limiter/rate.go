@@ -53,11 +53,7 @@ func (l *Limiter) rateReader(reader buf.Reader, limiter *rate.Limiter) buf.Reade
 }
 
 func (l *Limiter) Admit(tag, userKey, ip string, reader buf.Reader, writer buf.Writer) (buf.Reader, buf.Writer, bool) {
-	bucket, speedLimited, rejected := l.getUserBucket(tag, userKey, ip)
-	if rejected || !speedLimited || bucket == nil {
-		return reader, writer, rejected
-	}
-	return l.rateReader(reader, bucket), l.rateWriter(writer, bucket), false
+	return l.AdmitContext(context.Background(), tag, userKey, ip, reader, writer)
 }
 
 func waitRate(owner *Limiter, limiter *rate.Limiter, count int) error {
@@ -89,6 +85,18 @@ func waitRate(owner *Limiter, limiter *rate.Limiter, count int) error {
 }
 func (w *limitedWriter) Close() error {
 	return common.Close(w.writer)
+}
+
+func (w *limitedWriter) Interrupt() {
+	common.Interrupt(w.writer)
+}
+
+func (r *limitedReader) Close() error {
+	return common.Close(r.reader)
+}
+
+func (r *limitedReader) Interrupt() {
+	common.Interrupt(r.reader)
 }
 
 func (w *limitedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
