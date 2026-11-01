@@ -1,6 +1,7 @@
 package newV2board
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -77,13 +78,13 @@ func TestBuildReportStatusPayloadRejectsNilStatus(t *testing.T) {
 
 func TestBuildReportAlivePayloadSkipsInvalidUsers(t *testing.T) {
 	users := []api.OnlineUser{
-		{UID: 1, IP: "1.2.3.4"},
+		{UID: 1, IP: "192.0.2.1"},
 		{UID: 0, IP: "skip.zero.uid"},
 		{UID: 2, IP: ""},
-		{UID: 1, IP: "5.6.7.8"},
+		{UID: 1, IP: "2001:db8::1"},
 	}
 
-	payload := buildReportAlivePayload(&users, 100)
+	payload := buildReportAlivePayload(&users)
 	if payload["type"] != "alive" {
 		t.Fatalf("unexpected type: %#v", payload["type"])
 	}
@@ -92,7 +93,7 @@ func TestBuildReportAlivePayloadSkipsInvalidUsers(t *testing.T) {
 		t.Fatalf("alive payload has unexpected type: %#v", payload["alive"])
 	}
 	got := alive[1]
-	want := []string{"1.2.3.4_100", "5.6.7.8_100"}
+	want := []string{"192.0.2.1", "2001:db8::1"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("unexpected alive users: got %#v want %#v", got, want)
 	}
@@ -110,7 +111,7 @@ func TestBuildReportAlivePayloadAllowsNilAndEmpty(t *testing.T) {
 		"empty": ptrToSlice([]api.OnlineUser{}),
 	} {
 		t.Run(name, func(t *testing.T) {
-			payload := buildReportAlivePayload(users, 100)
+			payload := buildReportAlivePayload(users)
 			alive := payload["alive"].(map[int][]string)
 			if len(alive) != 0 {
 				t.Fatalf("expected empty alive map, got %#v", alive)
@@ -237,28 +238,53 @@ func TestReportNodeStatusPostsToXboardReport(t *testing.T) {
 }
 
 func TestReportNodeOnlineUsersPostsToXboardReport(t *testing.T) {
-	t.Parallel()
-
-	requests := make(chan capturedRequest, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != xboardReportPath {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		requests <- readJSONRequest(t, r)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":true}`))
-	}))
-	defer server.Close()
-
-	client := newReportTestClient(server.URL)
-	users := []api.OnlineUser{{UID: 1, IP: "1.2.3.4"}}
-	if err := client.ReportNodeOnlineUsers(&users); err != nil {
-		t.Fatalf("ReportNodeOnlineUsers returned error: %v", err)
+	tests := []struct {
+		name          string
+		machineID     int
+		wantNodeType  string
+		wantMachineID string
+	}{
+		{name: "static", wantNodeType: "vless"},
+		{name: "machine", machineID: 7, wantMachineID: "7"},
 	}
 
-	got := <-requests
-	if got.Body["type"] != "alive" {
-		t.Fatalf("unexpected body: %#v", got.Body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			requests := make(chan capturedRequest, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- readJSONRequest(t, r)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":true}`))
+			}))
+			defer server.Close()
+
+			client := newReportTestClientWithMachine(server.URL, tt.machineID)
+			users := []api.OnlineUser{
+				{UID: 1, IP: "192.0.2.10"},
+				{UID: 0, IP: "198.51.100.99"},
+				{UID: 1, IP: "2001:db8::10"},
+				{UID: 2, IP: ""},
+			}
+			if err := client.ReportNodeOnlineUsersContext(context.Background(), &users); err != nil {
+				t.Fatalf("ReportNodeOnlineUsersContext returned error: %v", err)
+			}
+
+			got := <-requests
+			if got.Path != xboardReportPath {
+				t.Fatalf("unexpected path: %s", got.Path)
+			}
+			if got.NodeID != "100" || got.NodeType != tt.wantNodeType || got.MachineID != tt.wantMachineID || got.Token != "secret" {
+				t.Fatalf("unexpected query params: %#v", got)
+			}
+			if got.Body["type"] != "alive" {
+				t.Fatalf("unexpected body: %#v", got.Body)
+			}
+			assertAliveIPs(t, got.Body["alive"], map[string][]string{
+				"1": {"192.0.2.10", "2001:db8::10"},
+			})
+		})
 	}
 }
 
@@ -384,29 +410,76 @@ func TestReportNodeStatusFallsBackToLegacyWhenXboardReportUnsupported(t *testing
 }
 
 func TestReportNodeOnlineUsersFallsBackToLegacyWhenXboardReportUnsupported(t *testing.T) {
-	t.Parallel()
-
-	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		switch r.URL.Path {
-		case xboardReportPath:
-			http.NotFound(w, r)
-		case "/api/v1/server/UniProxy/alive":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":true}`))
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := newReportTestClient(server.URL)
-	users := []api.OnlineUser{{UID: 1, IP: "1.2.3.4"}}
-	if err := client.ReportNodeOnlineUsers(&users); err != nil {
-		t.Fatalf("ReportNodeOnlineUsers returned error: %v", err)
+	tests := []struct {
+		name          string
+		machineID     int
+		legacyPath    string
+		wantNodeType  string
+		wantMachineID string
+	}{
+		{
+			name:         "static",
+			legacyPath:   "/api/v1/server/UniProxy/alive",
+			wantNodeType: "vless",
+		},
+		{
+			name:          "machine",
+			machineID:     7,
+			legacyPath:    "/api/v2/server/alive",
+			wantMachineID: "7",
+		},
 	}
-	assertPaths(t, paths, []string{xboardReportPath, "/api/v1/server/UniProxy/alive"})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			requests := make(chan capturedRequest, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case xboardReportPath:
+					requests <- readJSONRequest(t, r)
+					http.NotFound(w, r)
+				case tt.legacyPath:
+					requests <- readJSONRequest(t, r)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"data":true}`))
+				default:
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			client := newReportTestClientWithMachine(server.URL, tt.machineID)
+			users := []api.OnlineUser{
+				{UID: 1, IP: "192.0.2.10"},
+				{UID: 0, IP: "198.51.100.99"},
+				{UID: 1, IP: "2001:db8::10"},
+				{UID: 2, IP: ""},
+			}
+			if err := client.ReportNodeOnlineUsers(&users); err != nil {
+				t.Fatalf("ReportNodeOnlineUsers returned error: %v", err)
+			}
+
+			modern := <-requests
+			legacy := <-requests
+			assertPaths(t, []string{modern.Path, legacy.Path}, []string{xboardReportPath, tt.legacyPath})
+			for _, got := range []capturedRequest{modern, legacy} {
+				if got.NodeID != "100" || got.NodeType != tt.wantNodeType || got.MachineID != tt.wantMachineID || got.Token != "secret" {
+					t.Fatalf("unexpected query params for %s: %#v", got.Path, got)
+				}
+			}
+			assertAliveIPs(t, modern.Body["alive"], map[string][]string{
+				"1": {"192.0.2.10", "2001:db8::10"},
+			})
+			if _, nested := legacy.Body["alive"]; nested {
+				t.Fatalf("legacy payload must be a direct UID map: %#v", legacy.Body)
+			}
+			assertAliveIPs(t, legacy.Body, map[string][]string{
+				"1": {"192.0.2.10", "2001:db8::10"},
+			})
+		})
+	}
 }
 
 func TestReportUserTrafficFallsBackToLegacyWhenXboardReportUnsupported(t *testing.T) {
@@ -544,11 +617,12 @@ func TestReportDoesNotFallbackOnMalformedSuccessfulJSON(t *testing.T) {
 }
 
 type capturedRequest struct {
-	Path     string
-	NodeID   string
-	NodeType string
-	Token    string
-	Body     map[string]any
+	Path      string
+	NodeID    string
+	NodeType  string
+	MachineID string
+	Token     string
+	Body      map[string]any
 }
 
 func readJSONRequest(t *testing.T, r *http.Request) capturedRequest {
@@ -559,22 +633,55 @@ func readJSONRequest(t *testing.T, r *http.Request) capturedRequest {
 		t.Fatalf("decode request body: %v", err)
 	}
 	return capturedRequest{
-		Path:     r.URL.Path,
-		NodeID:   r.URL.Query().Get("node_id"),
-		NodeType: r.URL.Query().Get("node_type"),
-		Token:    r.URL.Query().Get("token"),
-		Body:     body,
+		Path:      r.URL.Path,
+		NodeID:    r.URL.Query().Get("node_id"),
+		NodeType:  r.URL.Query().Get("node_type"),
+		MachineID: r.URL.Query().Get("machine_id"),
+		Token:     r.URL.Query().Get("token"),
+		Body:      body,
 	}
 }
 
 func newReportTestClient(serverURL string) *APIClient {
+	return newReportTestClientWithMachine(serverURL, 0)
+}
+
+func newReportTestClientWithMachine(serverURL string, machineID int) *APIClient {
 	return New(&api.Config{
 		APIHost:     serverURL,
 		Key:         "secret",
 		NodeID:      100,
+		MachineID:   machineID,
 		NodeType:    "V2ray",
 		EnableVless: true,
 	})
+}
+
+func assertAliveIPs(t *testing.T, raw any, want map[string][]string) {
+	t.Helper()
+
+	alive, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("alive payload has unexpected type: %#v", raw)
+	}
+	if len(alive) != len(want) {
+		t.Fatalf("unexpected alive payload: got %#v want %#v", alive, want)
+	}
+	for uid, wantIPs := range want {
+		rawIPs, ok := alive[uid].([]any)
+		if !ok {
+			t.Fatalf("unexpected IP list for UID %s: %#v", uid, alive[uid])
+		}
+		if len(rawIPs) != len(wantIPs) {
+			t.Fatalf("unexpected IPs for UID %s: got %#v want %#v", uid, rawIPs, wantIPs)
+		}
+		for i, wantIP := range wantIPs {
+			ip, ok := rawIPs[i].(string)
+			if !ok || ip != wantIP {
+				t.Fatalf("unexpected IPs for UID %s: got %#v want %#v", uid, rawIPs, wantIPs)
+			}
+		}
+	}
 }
 
 func assertPaths(t *testing.T, got, want []string) {
