@@ -1,7 +1,9 @@
 package machine
 
 import (
+	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -148,6 +150,34 @@ func (c *statusReporterCertAliveCapableStub) GetAliveList() (map[int][]string, e
 	return c.aliveList, c.aliveErr
 }
 
+type statusReporterAliveSnapshotStub struct {
+	*statusReporterAllCapableStub
+	snapshot      *api.AliveSnapshot
+	snapshotErr   error
+	snapshotCalls int
+	contextValue  any
+	aliveCalls    int
+	call          func(context.Context) error
+}
+
+func (c *statusReporterAliveSnapshotStub) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
+	c.snapshotCalls++
+	c.contextValue = ctx.Value(statusReporterAliveContextKey{})
+	if c.call != nil {
+		if err := c.call(ctx); err != nil {
+			return c.snapshot, err
+		}
+	}
+	return c.snapshot, c.snapshotErr
+}
+
+func (c *statusReporterAliveSnapshotStub) GetAliveList() (map[int][]string, error) {
+	c.aliveCalls++
+	return map[int][]string{99: {"198.51.100.99"}}, nil
+}
+
+type statusReporterAliveContextKey struct{}
+
 func (*statusReporterPanelClientStub) Describe() api.ClientInfo              { return api.ClientInfo{} }
 func (*statusReporterPanelClientStub) GetNodeInfo() (*api.NodeInfo, error)   { return nil, nil }
 func (*statusReporterPanelClientStub) GetUserList() (*[]api.UserInfo, error) { return nil, nil }
@@ -215,6 +245,138 @@ func TestReportingAPIReportsStatusToReporterAndRESTClient(t *testing.T) {
 	if reporter.nodeID != 7 || reporter.status != status {
 		t.Fatalf("unexpected reporter arguments: nodeID=%d status=%p", reporter.nodeID, reporter.status)
 	}
+}
+
+func TestReportingAPIForwardsTypedAliveSnapshot(t *testing.T) {
+	sourceSnapshot := &api.AliveSnapshot{
+		IPs:    map[int][]string{2: {"192.0.2.2"}},
+		Counts: map[int]int{1: 3},
+	}
+	source := &statusReporterAliveSnapshotStub{
+		statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+		snapshot:                     sourceSnapshot,
+	}
+	wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+	snapshotProvider, ok := wrapped.(api.AliveSnapshotProvider)
+	if !ok {
+		t.Fatal("machine reporting wrapper did not expose typed alive snapshots")
+	}
+
+	snapshot, err := snapshotProvider.GetAliveSnapshot()
+	if err != nil {
+		t.Fatalf("GetAliveSnapshot() error = %v", err)
+	}
+	if !reflect.DeepEqual(snapshot, sourceSnapshot) || snapshot == sourceSnapshot {
+		t.Fatalf("GetAliveSnapshot() = %#v, want detached %#v", snapshot, sourceSnapshot)
+	}
+	if source.snapshotCalls != 1 || source.aliveCalls != 0 || source.contextValue != nil {
+		t.Fatalf("typed dispatch = snapshots:%d legacy:%d value:%v", source.snapshotCalls, source.aliveCalls, source.contextValue)
+	}
+	snapshot.IPs[2][0] = "192.0.2.3"
+	snapshot.Counts[1] = 4
+	if sourceSnapshot.IPs[2][0] != "192.0.2.2" || sourceSnapshot.Counts[1] != 3 {
+		t.Fatal("machine reporting wrapper leaked snapshot mutation to source")
+	}
+
+	ctx := context.WithValue(context.Background(), statusReporterAliveContextKey{}, "request")
+	contextualProvider, ok := wrapped.(api.ContextAliveSnapshotProvider)
+	if !ok {
+		t.Fatal("machine reporting wrapper did not expose contextual typed alive snapshots")
+	}
+	snapshot, err = contextualProvider.GetAliveSnapshotContext(ctx)
+	if err != nil {
+		t.Fatalf("GetAliveSnapshotContext() error = %v", err)
+	}
+	if source.snapshotCalls != 2 || source.aliveCalls != 0 || source.contextValue != "request" {
+		t.Fatalf("context forwarding = snapshots:%d legacy:%d value:%v", source.snapshotCalls, source.aliveCalls, source.contextValue)
+	}
+	if !reflect.DeepEqual(snapshot, sourceSnapshot) || snapshot == sourceSnapshot {
+		t.Fatalf("GetAliveSnapshotContext() = %#v, want detached %#v", snapshot, sourceSnapshot)
+	}
+}
+
+func TestReportingAPIAliveSnapshotOutcomes(t *testing.T) {
+	providerErr := errors.New("alive snapshot unavailable")
+	t.Run("typed nil", func(t *testing.T) {
+		source := &statusReporterAliveSnapshotStub{
+			statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		snapshot, err := wrapped.(api.AliveSnapshotProvider).GetAliveSnapshot()
+		if snapshot != nil || err != nil {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want nil, nil", snapshot, err)
+		}
+	})
+	t.Run("typed empty", func(t *testing.T) {
+		source := &statusReporterAliveSnapshotStub{
+			statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+			snapshot:                     &api.AliveSnapshot{},
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		snapshot, err := wrapped.(api.AliveSnapshotProvider).GetAliveSnapshot()
+		if err != nil || !reflect.DeepEqual(snapshot, &api.AliveSnapshot{}) {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want empty snapshot, nil", snapshot, err)
+		}
+	})
+	t.Run("typed error does not fall back", func(t *testing.T) {
+		source := &statusReporterAliveSnapshotStub{
+			statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+			snapshot:                     &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+			snapshotErr:                  providerErr,
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		snapshot, err := wrapped.(api.AliveSnapshotProvider).GetAliveSnapshot()
+		if snapshot != nil || !errors.Is(err, providerErr) || source.snapshotCalls != 1 || source.aliveCalls != 0 {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; calls: typed=%d legacy=%d", snapshot, err, source.snapshotCalls, source.aliveCalls)
+		}
+	})
+	t.Run("canceled before provider", func(t *testing.T) {
+		source := &statusReporterAliveSnapshotStub{
+			statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+			snapshot:                     &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		snapshot, err := wrapped.(api.ContextAliveSnapshotProvider).GetAliveSnapshotContext(ctx)
+		if snapshot != nil || !errors.Is(err, context.Canceled) || source.snapshotCalls != 0 {
+			t.Fatalf("GetAliveSnapshotContext() = %#v, %v; calls:%d", snapshot, err, source.snapshotCalls)
+		}
+	})
+	t.Run("canceled after provider returns", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		source := &statusReporterAliveSnapshotStub{
+			statusReporterAllCapableStub: newStatusReporterAllCapableStub(),
+			snapshot:                     &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+			call: func(context.Context) error {
+				cancel()
+				return nil
+			},
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		snapshot, err := wrapped.(api.ContextAliveSnapshotProvider).GetAliveSnapshotContext(ctx)
+		if snapshot != nil || !errors.Is(err, context.Canceled) || source.snapshotCalls != 1 {
+			t.Fatalf("GetAliveSnapshotContext() = %#v, %v; calls:%d", snapshot, err, source.snapshotCalls)
+		}
+	})
+	t.Run("legacy list fallback", func(t *testing.T) {
+		source := newStatusReporterAllCapableStub()
+		source.aliveList = map[int][]string{
+			1: {"192.0.2.1", "2001:db8::1"},
+			2: {},
+		}
+		wrapped := mustWrapMachineAPIWithReporter(t, source, 9, &statusReporterStub{})
+		snapshot, err := wrapped.(api.AliveSnapshotProvider).GetAliveSnapshot()
+		want := &api.AliveSnapshot{IPs: source.aliveList}
+		if err != nil || !reflect.DeepEqual(snapshot, want) {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want %#v, nil", snapshot, err, want)
+		}
+		snapshot.IPs[1][0] = "192.0.2.2"
+		if source.aliveList[1][0] != "192.0.2.1" {
+			t.Fatal("legacy list fallback leaked snapshot mutation to source")
+		}
+	})
 }
 
 func TestReportingAPIDeviceReportingAndReadiness(t *testing.T) {
