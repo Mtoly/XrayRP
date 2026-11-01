@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -83,7 +84,7 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 				logger: log.NewEntry(logger),
 			}
 
-			controller.syncAliveListFromPanel("inbound")
+			controller.syncAliveSnapshotFromPanelContext(context.Background(), "inbound", nil)
 
 			online, err := panelLimiter.GetOnlineDevice("inbound")
 			if err != nil {
@@ -116,6 +117,10 @@ func (a typedAliveSnapshotTestAPI) GetAliveSnapshot() (*api.AliveSnapshot, error
 	return a.snapshot, nil
 }
 
+func (a typedAliveSnapshotTestAPI) GetAliveList() (map[int][]string, error) {
+	return map[int][]string{}, nil
+}
+
 func TestTypedEmptySnapshotPreservesGenuineLocalObservation(t *testing.T) {
 	panelLimiter := limiter.New()
 	users := []api.UserInfo{{UID: 1, Email: "one@example.com"}}
@@ -131,9 +136,10 @@ func TestTypedEmptySnapshotPreservesGenuineLocalObservation(t *testing.T) {
 		dispatcher: &mydispatcher.DefaultDispatcher{
 			Limiter: panelLimiter,
 		},
+		logger: log.NewEntry(log.New()),
 	}
 
-	controller.syncAliveListFromPanel("inbound")
+	controller.syncAliveSnapshotFromPanelContext(context.Background(), "inbound", nil)
 
 	online, err := panelLimiter.GetOnlineDevice("inbound")
 	if err != nil {
