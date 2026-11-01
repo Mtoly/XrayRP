@@ -4,6 +4,14 @@ Notable user-facing, compatibility, security, performance, and operational chang
 
 ## Unreleased
 
+### Added
+
+- Added HTTP panel device-count admission for ordinary Xray nodes using the NewV2board/Xboard alive-list API. Integer device counts can now enforce a conservative cross-node quota based on the latest successfully paired panel count plus locally admitted IPs not covered by that report, while legacy IP arrays remain supported. Fresh WebSocket and Redis admission retain precedence. This path is not atomic distributed admission and does not extend to AnyTLS, TUIC, or Hysteria2. See [Xboard compatibility](docs/xboard-newv2board.md#http-panel-device-count-admission).
+
+### Fixed
+
+- Both the Xboard `/api/v2/server/report` alive report and the legacy `/alive` fallback now send plain IPv4 and IPv6 addresses without a node-ID suffix, so the panel counts the same source once across nodes.
+
 ## 0.9.11 - 2026-10-28
 
 ### Added

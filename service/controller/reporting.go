@@ -43,18 +43,23 @@ func (c *Controller) ensureDeviceReportState() *deviceReportState {
 	return c.deviceReportState
 }
 
-func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) {
+type deviceReportReceipt map[int][]string
+
+func (c *Controller) reportOnlineDevices(tag string, onlineDevice *[]api.OnlineUser) deviceReportReceipt {
 	ctx, cancel := service.WithDefaultTimeout(context.Background(), service.DefaultSyncTimeout)
 	defer cancel()
-	c.reportOnlineDevicesContext(ctx, tag, onlineDevice)
+	return c.reportOnlineDevicesContext(ctx, tag, onlineDevice)
 }
 
-func (c *Controller) reportOnlineDevicesContext(ctx context.Context, tag string, onlineDevice *[]api.OnlineUser) {
+func (c *Controller) reportOnlineDevicesContext(ctx context.Context, tag string, onlineDevice *[]api.OnlineUser) deviceReportReceipt {
+	if ctx.Err() != nil {
+		return nil
+	}
 	if reporter, ok := c.deviceReporter(); ok && deviceReporterReady(reporter) {
 		state := c.ensureDeviceReportState()
 		if devices, pending, changed := state.PrepareChangedReport(onlineDevice); changed {
 			if err := ctx.Err(); err != nil {
-				return
+				return nil
 			}
 			if err := reporter.ReportDevices(devices); err != nil {
 				if c.logger != nil {
@@ -66,13 +71,35 @@ func (c *Controller) reportOnlineDevicesContext(ctx context.Context, tag string,
 		}
 	}
 
-	if onlineDevice != nil && len(*onlineDevice) > 0 {
-		if err := api.ReportNodeOnlineUsersContext(ctx, c.apiClient, onlineDevice); err != nil {
-			c.logger.Print(err)
-		} else {
-			c.logger.Printf("Report %d online users", len(*onlineDevice))
-		}
+	if onlineDevice == nil {
+		return nil
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	reported := cloneSlice(*onlineDevice)
+	receipt := newDeviceReportReceipt(reported)
+	if len(reported) > 0 {
+		input := cloneSlice(reported)
+		if err := api.ReportNodeOnlineUsersContext(ctx, c.apiClient, &input); err != nil {
+			c.logger.Print(err)
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		c.logger.Printf("Report %d online users", len(reported))
+	}
+	return receipt
+}
+
+func newDeviceReportReceipt(users []api.OnlineUser) deviceReportReceipt {
+	receipt := make(deviceReportReceipt)
+	for _, user := range users {
+		receipt[user.UID] = append(receipt[user.UID], user.IP)
+	}
+	return receipt
 }
 
 func (c *Controller) deviceReporter() (controllerDeviceReporter, bool) {
@@ -332,11 +359,10 @@ func (c *Controller) userInfoMonitorContext(ctx context.Context) (err error) {
 	// Report Online info
 	if onlineDevice, err := c.GetOnlineDevice(currentTag); err != nil {
 		c.logger.Print(err)
+		c.syncAliveSnapshotFromPanelContext(ctx, currentTag, nil)
 	} else {
-		c.reportOnlineDevicesContext(ctx, currentTag, onlineDevice)
+		c.reportAndSyncAliveSnapshotContext(ctx, currentTag, onlineDevice)
 	}
-
-	c.syncAliveListFromPanelContext(ctx, currentTag)
 
 	// Report Illegal user
 	if detectResult, err := c.GetDetectResult(currentTag); err != nil {
@@ -371,6 +397,33 @@ func (c *Controller) syncAliveListFromPanelContext(ctx context.Context, tag stri
 		return
 	}
 	if err := c.SyncAliveList(tag, aliveList); err != nil {
+		c.logger.Print(err)
+	}
+}
+
+func (c *Controller) reportAndSyncAliveSnapshotContext(ctx context.Context, tag string, onlineDevice *[]api.OnlineUser) {
+	receipt := c.reportOnlineDevicesContext(ctx, tag, onlineDevice)
+	c.syncAliveSnapshotFromPanelContext(ctx, tag, receipt)
+}
+
+func (c *Controller) syncAliveSnapshotFromPanelContext(ctx context.Context, tag string, receipt deviceReportReceipt) {
+	_, typed := c.apiClient.(api.AliveSnapshotProvider)
+	_, contextual := c.apiClient.(api.ContextAliveSnapshotProvider)
+	if !typed && !contextual {
+		c.syncAliveListFromPanelContext(ctx, tag)
+		return
+	}
+	snapshot, err := api.GetAliveSnapshotContext(ctx, c.apiClient)
+	if err != nil {
+		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+			c.logger.Print(err)
+		}
+		return
+	}
+	if snapshot == nil {
+		return
+	}
+	if err := c.SyncAliveSnapshot(tag, snapshot, receipt); err != nil {
 		c.logger.Print(err)
 	}
 }
