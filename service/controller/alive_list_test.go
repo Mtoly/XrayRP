@@ -3,7 +3,6 @@ package controller
 import (
 	"bytes"
 	"errors"
-	"sort"
 	"strings"
 	"testing"
 
@@ -51,14 +50,14 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 			wantOnline: []api.OnlineUser{{UID: 1, IP: "192.0.2.1"}},
 		},
 		{
-			name:       "authoritative empty snapshot preserves genuine local observation",
+			name:       "authoritative empty snapshot clears old state",
 			alive:      map[int][]string{},
-			wantOnline: []api.OnlineUser{{UID: 1, IP: "192.0.2.1"}},
+			wantOnline: []api.OnlineUser{},
 		},
 		{
-			name:       "legacy IP entry replaces panel state without erasing local observation",
+			name:       "legacy IP entry replaces complete state",
 			alive:      map[int][]string{1: {"198.51.100.1"}},
-			wantOnline: []api.OnlineUser{{UID: 1, IP: "192.0.2.1"}, {UID: 1, IP: "198.51.100.1"}},
+			wantOnline: []api.OnlineUser{{UID: 1, IP: "198.51.100.1"}},
 		},
 	}
 
@@ -90,12 +89,6 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetOnlineDevice failed: %v", err)
 			}
-			sort.Slice(*online, func(i, j int) bool {
-				if (*online)[i].UID != (*online)[j].UID {
-					return (*online)[i].UID < (*online)[j].UID
-				}
-				return (*online)[i].IP < (*online)[j].IP
-			})
 			if len(*online) != len(test.wantOnline) {
 				t.Fatalf("online devices = %#v, want %#v", *online, test.wantOnline)
 			}
@@ -111,6 +104,43 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 				t.Fatalf("log output = %q, did not want %q", output.String(), test.wantNoLog)
 			}
 		})
+	}
+}
+
+type typedAliveSnapshotTestAPI struct {
+	panelClientWithoutDebug
+	snapshot *api.AliveSnapshot
+}
+
+func (a typedAliveSnapshotTestAPI) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return a.snapshot, nil
+}
+
+func TestTypedEmptySnapshotPreservesGenuineLocalObservation(t *testing.T) {
+	panelLimiter := limiter.New()
+	users := []api.UserInfo{{UID: 1, Email: "one@example.com"}}
+	if err := panelLimiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter failed: %v", err)
+	}
+	localIP := "192.0.2.1"
+	if _, _, rejected := panelLimiter.Admit("inbound", "inbound|one@example.com|1", localIP, nil, nil); rejected {
+		t.Fatal("expected user IP to be accepted")
+	}
+	controller := &Controller{
+		apiClient: typedAliveSnapshotTestAPI{snapshot: &api.AliveSnapshot{}},
+		dispatcher: &mydispatcher.DefaultDispatcher{
+			Limiter: panelLimiter,
+		},
+	}
+
+	controller.syncAliveListFromPanel("inbound")
+
+	online, err := panelLimiter.GetOnlineDevice("inbound")
+	if err != nil {
+		t.Fatalf("GetOnlineDevice failed: %v", err)
+	}
+	if len(*online) != 1 || (*online)[0] != (api.OnlineUser{UID: 1, IP: localIP}) {
+		t.Fatalf("online devices = %#v, want genuine local observation", *online)
 	}
 }
 

@@ -146,7 +146,7 @@ func (s *aliveUIDState) admitIP(entry *userOnlineEntry, ip string, uid, deviceLi
 		return false, true
 	}
 
-	if entry.hasLocalIP(ip) || hasIP(s.localIPs, ip) || hasIP(s.pending, ip) {
+	if entry.hasLocalIP(ip) {
 		entry.touchLocalIP(ip, uid)
 		s.localIPs[ip] = struct{}{}
 		return false, false
@@ -162,6 +162,12 @@ func (s *aliveUIDState) admitIP(entry *userOnlineEntry, ip string, uid, deviceLi
 		entry.touchLocalIP(ip, uid)
 		s.localIPs[ip] = struct{}{}
 		s.pending[ip] = struct{}{}
+		return false, false
+	}
+
+	if hasIP(s.localIPs, ip) || hasIP(s.pending, ip) {
+		entry.touchLocalIP(ip, uid)
+		s.localIPs[ip] = struct{}{}
 		return false, false
 	}
 

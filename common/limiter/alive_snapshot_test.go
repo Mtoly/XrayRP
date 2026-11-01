@@ -145,6 +145,59 @@ func TestSyncAliveSnapshotAliasReusesLocalIPSlotAtFullPanelCount(t *testing.T) {
 	}
 }
 
+func TestSyncAliveSnapshotExpiredLocalIPDoesNotBypassFreshWebSocket(t *testing.T) {
+	tests := []struct {
+		name     string
+		reported map[int][]string
+	}{
+		{name: "acknowledged", reported: map[int][]string{1: {"198.51.100.1"}}},
+		{name: "pending", reported: map[int][]string{}},
+	}
+	const localIP = "198.51.100.1"
+	const websocketIP = "192.0.2.1"
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			l := New()
+			users := []api.UserInfo{{UID: 1, Email: "one@example.test", DeviceLimit: 1}}
+			if err := l.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+				t.Fatalf("AddInboundLimiter() error = %v", err)
+			}
+			userKey := "inbound|one@example.test|1"
+			if _, _, rejected := l.Admit("inbound", userKey, localIP, nil, nil); rejected {
+				t.Fatal("initial local IP was rejected")
+			}
+			if err := l.SyncAliveSnapshot(
+				"inbound",
+				&api.AliveSnapshot{Counts: map[int]int{1: 1}},
+				test.reported,
+			); err != nil {
+				t.Fatalf("SyncAliveSnapshot() error = %v", err)
+			}
+
+			value, _ := l.InboundInfo.Load("inbound")
+			entryValue, _ := value.(*inboundState).UserOnlineIP.Load(userKey)
+			entry := entryValue.(*userOnlineEntry)
+			entry.mu.Lock()
+			entry.ips.Store(
+				localIP,
+				connIP{UID: 1, LastSeen: time.Now().Unix() - ipTTL - 1, Local: true},
+			)
+			entry.mu.Unlock()
+			if _, err := l.GetOnlineDevice("inbound"); err != nil {
+				t.Fatalf("GetOnlineDevice() error = %v", err)
+			}
+			if err := l.UpdateGlobalDevices("inbound", map[int][]string{1: {websocketIP}}); err != nil {
+				t.Fatalf("UpdateGlobalDevices() error = %v", err)
+			}
+
+			if _, _, rejected := l.Admit("inbound", userKey, localIP, nil, nil); !rejected {
+				t.Fatal("expired count-state local IP bypassed the fresh WebSocket decision")
+			}
+		})
+	}
+}
+
 func TestSyncAliveSnapshotPairKeepsInFlightLocalAdmissionPending(t *testing.T) {
 	l := New()
 	users := []api.UserInfo{{UID: 1, Email: "one@example.test", DeviceLimit: 3}}

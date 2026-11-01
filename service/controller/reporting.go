@@ -382,7 +382,23 @@ func (c *Controller) syncAliveListFromPanel(tag string) {
 }
 
 func (c *Controller) syncAliveListFromPanelContext(ctx context.Context, tag string) {
-	c.syncAliveSnapshotFromPanelContext(ctx, tag, nil)
+	provider, ok := c.apiClient.(api.AliveListProvider)
+	if !ok {
+		return
+	}
+	aliveList, err := api.GetAliveListContext(ctx, provider)
+	if err != nil {
+		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+			c.logger.Print(err)
+		}
+		return
+	}
+	if aliveList == nil {
+		return
+	}
+	if err := c.SyncAliveList(tag, aliveList); err != nil {
+		c.logger.Print(err)
+	}
 }
 
 func (c *Controller) reportAndSyncAliveSnapshotContext(ctx context.Context, tag string, onlineDevice *[]api.OnlineUser) {
@@ -391,6 +407,12 @@ func (c *Controller) reportAndSyncAliveSnapshotContext(ctx context.Context, tag 
 }
 
 func (c *Controller) syncAliveSnapshotFromPanelContext(ctx context.Context, tag string, receipt deviceReportReceipt) {
+	_, typed := c.apiClient.(api.AliveSnapshotProvider)
+	_, contextual := c.apiClient.(api.ContextAliveSnapshotProvider)
+	if !typed && !contextual {
+		c.syncAliveListFromPanelContext(ctx, tag)
+		return
+	}
 	snapshot, err := api.GetAliveSnapshotContext(ctx, c.apiClient)
 	if err != nil {
 		if !errors.Is(err, api.ErrUnsupportedPanelFeature) {
