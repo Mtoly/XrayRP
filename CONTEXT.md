@@ -64,6 +64,12 @@ The per-runtime AnyTLS/TUIC IP reservations held by admitted connections. Online
 An idle but open connection retains its slot, including while the user is temporarily absent from panel snapshots. Absent users cannot open new connections and are not reported online. The last connection close releases its reservation; a successful runtime stop releases all reservations. A late close cannot release a replacement reservation.
 _Avoid_: reporting interval IP set, global device cache, traffic activity TTL
 
+**HTTP panel device-count admission**:
+The ordinary Xray limiter's conservative cross-node quota when a NewV2board/Xboard alive snapshot contains device counts. A successful HTTP online report creates a detached receipt `R`; only a following valid full snapshot on the same cycle may pair it with panel count `C`. The estimated occupancy is `C + |P|`, where `P` contains distinct locally admitted IPs not covered by that pair. New IPs consume `P` immediately, same-IP and same-UID credential aliases share one slot, and tracked local IPs remain allowed. Real local observations are distinct from panel-only IP-list seeds.
+
+A valid typed empty snapshot replaces only the panel portion. Report or fetch failure, a nil snapshot, or an unpaired count snapshot preserves `C` and `P`, including after the local online TTL removes an entry. An explicit IP-list entry switches that UID back to list mode. Fresh WebSocket state and Redis admission retain precedence, and the feature does not extend to AnyTLS, TUIC, or Hysteria2. The count provides delayed, conservative admission, not atomic distributed admission.
+_Avoid_: local device count, panel count fallback, distributed reservation
+
 **Global device cache**:
 The optional Redis-backed user/IP admission capability. Managed runtimes derive a shared hashed panel namespace independently of local inbound/user tags. Cache mode may reuse a recently confirmed local holder; strict mode executes atomic Redis admission for every new logical connection. Neither mode makes panel `sync.devices` or alive-list snapshots a lease-renewal source. With Redis disabled, existing local and panel-snapshot admission semantics remain unchanged.
 

@@ -216,6 +216,85 @@ Minimum effective intervals are:
 
 Changing only `base_config` reschedules periodic work without rebuilding inbound or outbound runtime state.
 
+## HTTP panel device-count admission
+
+For ordinary Xray nodes using the `newV2board` adapter, XrayRP can enforce a conservative device limit from the panel's alive-list response when polling over HTTP without WebSocket or Redis global admission. This applies to static nodes and machine mode. It does not add HTTP cross-node admission to AnyTLS, TUIC, or Hysteria2.
+
+The alive-list response is a complete snapshot under `alive`. Each UID value may be either a non-negative device count or an IP array, so mixed responses are valid:
+
+```json
+{
+  "alive": {
+    "1": 3,
+    "2": ["192.0.2.10_7", "2001:db8::10"]
+  }
+}
+```
+
+An integer means a count and does not identify an IP. In an IP array, the adapter removes a legacy `_nodeID` suffix and uses the remaining plain IP. `{"alive":{}}` is a valid empty snapshot. A missing `alive` field means no update. Invalid fields reject the whole snapshot instead of applying a partial one.
+
+XrayRP reads static-node snapshots from `/api/v1/server/UniProxy/alivelist` and machine-mode snapshots from `/api/v2/server/alivelist`. Both ordinary HTTP report paths send only plain IPs. The modern `/api/v2/server/report` body is:
+
+```json
+{
+  "type": "alive",
+  "alive": {
+    "1": ["192.0.2.10", "2001:db8::10"]
+  }
+}
+```
+
+The legacy static `/api/v1/server/UniProxy/alive` and machine `/api/v2/server/alive` fallback sends the inner UID-to-IP-array object. Neither HTTP path appends a node ID. WebSocket reporting remains unchanged.
+
+### Pairing and quota calculation
+
+A count can update admission only after a successful HTTP online report followed by a valid alive-list fetch in the same polling cycle. The successful report produces a detached receipt `R`; a WebSocket success is not an HTTP receipt. Empty local state is a successful empty report and can refresh remote counts without sending a request body.
+
+For each UID, XrayRP retains:
+
+- `C`: the latest valid panel device count paired with a successful report.
+- `P`: the distinct set of locally admitted IPs not covered by that pair.
+
+A new distinct local IP is admitted only while `C + |P| < limit`. It is added to `P` immediately and atomically, so concurrent aliases for the same UID cannot race past the remaining headroom. An IP in `P` or another effective local observation for the same UID does not consume an additional slot. The same source IP does not count twice when it appears through several credential aliases.
+
+Only IPs covered by `R` are acknowledged when a report is paired. An admission that starts after sampling or remains in flight therefore stays in `P`. A later valid synchronization may remove expired, no-longer-local pending records.
+
+The panel count already includes IPs from a successful report, so XrayRP does not add the complete local device set to `C` or fall back to `max(C, local)`. Count-mode state is owned per inbound and panel UID, independent of the 120-second online-entry TTL. It survives compatible inbound replacement and credential changes for the same retained UID, but is not copied to a different UID.
+
+A valid typed empty snapshot replaces only the panel portion; it does not erase genuine local observations or uncovered `P`. An established count-mode UID omitted from a successfully paired full snapshot has `C` reset to zero. An explicit IP-array entry switches that UID to the existing list mode. Mixed snapshots apply count and list modes independently, and the legacy public alive-list API keeps its complete-replacement behavior.
+
+### Failure and precedence
+
+HTTP report failure, alive-list fetch failure, a missing snapshot, cancellation, or an unpaired count snapshot preserves the previous `C` and `P`. An empty local online map alone does not release quota. Capacity can be corrected only by a later valid synchronization.
+
+Existing decision precedence remains:
+
+1. Redis admission, when enabled.
+2. An effectively tracked local IP.
+3. A fresh WebSocket global device snapshot.
+4. Paired HTTP panel-count admission.
+5. The pre-existing local fallback when no other state applies.
+
+Panel-only IPs seeded by legacy arrays are not treated as locally observed after the UID switches to count mode. Established connections are not disconnected when a snapshot arrives; the new policy affects subsequent admissions.
+
+### Limitation and polling
+
+An integer count has no IP identity. If `device_limit=1` and the panel count is one, a second node cannot tell whether a candidate IP is the same device already connected through the first node. With no effective local record, the first version conservatively rejects that candidate. It does not guarantee that an unknown A can make its first connection through a second node while the quota is full.
+
+Admission follows periodic HTTP reporting and polling, so it is not an atomic distributed reservation. Concurrent nodes can both decide from an old count, and a transient panel delay can keep offline devices occupying the conservative estimate. Use Redis strict admission when an atomic shared quota is required.
+
+### Manual two-node HTTP check
+
+Use two ordinary Xray nodes against a test panel, with WebSocket disabled on both and `GlobalDeviceLimitConfig.Enable: false`. Do not use production traffic for this trial.
+
+1. Set the test user's device limit to `1`. Clear stale panel device records or wait for the deployed panel's device-record lifetime before starting.
+2. Connect source A to node 1. Wait for node 1's HTTP report and node 2's following alive-list poll to succeed. The panel should show one device.
+3. Connect a new source B to node 2. It should be rejected because the panel count fills the limit.
+4. Also try an A connection that node 2 has not observed. It should be rejected for the same identity limitation; the existing A connection on node 1 remains connected.
+5. To verify deduplication, clear the test state, set the limit to `2`, and connect the same A through both nodes. After both nodes report successfully, the panel should still count one device.
+
+The inspected Xboard snapshot used a 300-second device-record lifetime. That value is a deployment detail, not a universal panel guarantee; set the wait from the panel version and database state actually being tested.
+
 ## Redis global source-IP admission
 
 `ControllerConfig.GlobalDeviceLimitConfig` can enforce one source-IP quota per panel UID across all nodes and processes that share a panel namespace, instead of relying on the panel's device snapshot or per-inbound cache. It is disabled by default and covers the Xray node path plus AnyTLS, TUIC, and Hysteria2.

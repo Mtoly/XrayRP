@@ -53,6 +53,7 @@ type bucketStateSnapshot struct {
 type connIP struct {
 	UID      int
 	LastSeen int64 // unix timestamp
+	Local    bool  // observed through local admission, not a panel-only seed
 }
 
 // userOnlineEntry stores per-user IP tracking with an atomic device counter
@@ -73,13 +74,34 @@ func (e *userOnlineEntry) hasIP(ip string) bool {
 	return loaded
 }
 
-func (e *userOnlineEntry) touchIP(ip string, uid int) {
+func (e *userOnlineEntry) hasLocalIP(ip string) bool {
+	value, loaded := e.ips.Load(ip)
+	if !loaded {
+		return false
+	}
+	return value.(connIP).Local
+}
+
+func (e *userOnlineEntry) touchLocalIP(ip string, uid int) {
 	now := time.Now().Unix()
-	if _, loaded := e.ips.LoadOrStore(ip, connIP{UID: uid, LastSeen: now}); !loaded {
+	if _, loaded := e.ips.LoadOrStore(ip, connIP{UID: uid, LastSeen: now, Local: true}); !loaded {
 		atomic.AddInt32(&e.count, 1)
 		return
 	}
-	e.ips.Store(ip, connIP{UID: uid, LastSeen: now})
+	e.ips.Store(ip, connIP{UID: uid, LastSeen: now, Local: true})
+}
+
+func (e *userOnlineEntry) touchPanelIP(ip string, uid int) {
+	now := time.Now().Unix()
+	value, loaded := e.ips.Load(ip)
+	if !loaded {
+		e.ips.Store(ip, connIP{UID: uid, LastSeen: now})
+		atomic.AddInt32(&e.count, 1)
+		return
+	}
+	entry := value.(connIP)
+	entry.LastSeen = now
+	e.ips.Store(ip, entry)
 }
 
 func (e *userOnlineEntry) snapshotIPs() []string {
@@ -124,7 +146,7 @@ func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDev
 	}
 
 	if e.hasIP(ip) {
-		e.touchIP(ip, uid)
+		e.touchLocalIP(ip, uid)
 		return false, false
 	}
 
@@ -135,7 +157,7 @@ func (e *userOnlineEntry) admitIP(ip string, uid int, deviceLimit int, globalDev
 			return true, false
 		}
 		e.pruneToAdmitted(admitted)
-		e.touchIP(ip, uid)
+		e.touchLocalIP(ip, uid)
 		return false, false
 	}
 
@@ -149,6 +171,7 @@ func (e *userOnlineEntry) addIP(ip string, uid int, deviceLimit int) (reject boo
 	if v, loaded := e.ips.Load(ip); loaded {
 		entry := v.(connIP)
 		entry.LastSeen = now
+		entry.Local = true
 		e.ips.Store(ip, entry)
 		return false
 	}
@@ -160,7 +183,7 @@ func (e *userOnlineEntry) addIP(ip string, uid int, deviceLimit int) (reject boo
 		}
 	}
 	// Try to store; if another goroutine stored the same IP concurrently, don't double-count
-	if _, loaded := e.ips.LoadOrStore(ip, connIP{UID: uid, LastSeen: now}); !loaded {
+	if _, loaded := e.ips.LoadOrStore(ip, connIP{UID: uid, LastSeen: now, Local: true}); !loaded {
 		atomic.AddInt32(&e.count, 1)
 	}
 	return false
@@ -212,8 +235,11 @@ type InboundInfo struct {
 	UserInfo       *sync.Map // Key: user tag (inboundUserKey) -> UserInfo
 	BucketHub      *sync.Map // Key: user tag -> *rate.Limiter
 	UserOnlineIP   *sync.Map // Key: user tag -> *userOnlineEntry
-	GlobalDevices  *globalDeviceState
-	GlobalLimit    *globalLimitState
+	// aliveSnapshot owns count-mode C/P state per panel UID. UID states are
+	// shared only with compatible replacement generations.
+	aliveSnapshot *aliveSnapshotState
+	GlobalDevices *globalDeviceState
+	GlobalLimit   *globalLimitState
 
 	admissionMu         sync.RWMutex
 	retired             bool
@@ -705,6 +731,7 @@ func inheritCompatibleAdmissionState(candidate, applied *inboundState) {
 	if applied.GlobalDevices != nil {
 		candidate.GlobalDevices = applied.GlobalDevices
 	}
+	candidate.aliveSnapshot.inheritForUsers(applied.aliveSnapshot, candidate.UserInfo)
 	candidate.UserInfo.Range(func(key, value interface{}) bool {
 		if online, exists := applied.UserOnlineIP.Load(key); exists {
 			candidate.UserOnlineIP.Store(key, online)
@@ -745,6 +772,7 @@ func (l *Limiter) AddInboundLimiter(tag string, nodeSpeedLimit uint64, userList 
 		NodeSpeedLimit:   nodeSpeedLimit,
 		BucketHub:        new(sync.Map),
 		UserOnlineIP:     new(sync.Map),
+		aliveSnapshot:    newAliveSnapshotState(),
 		GlobalDevices:    newGlobalDeviceState(),
 		GlobalLimit:      ownedGlobalLimit,
 		ownedGlobalLimit: ownedGlobalLimit,
@@ -870,6 +898,7 @@ func (l *Limiter) RestoreInboundLimiterState(tag string, snapshot *InboundLimite
 	if candidate == snapshot.state {
 		candidate.retireAdmissions()
 		restoreInboundPolicies(candidate, snapshot)
+		candidate.aliveSnapshot.retainForUsers(candidate.UserInfo)
 		snapshot.state.activateAdmissions()
 		l.publishAppliedInbound(tag, snapshot.state)
 		snapshot.state.GlobalLimit.pruneKeyLocks(snapshot.state.UserInfo)
@@ -880,6 +909,10 @@ func (l *Limiter) RestoreInboundLimiterState(tag string, snapshot *InboundLimite
 	}
 	snapshot.state.retireAdmissions()
 	restoreInboundPolicies(snapshot.state, snapshot)
+	if candidate != nil {
+		snapshot.state.aliveSnapshot.inheritForUsers(candidate.aliveSnapshot, snapshot.state.UserInfo)
+	}
+	snapshot.state.aliveSnapshot.retainForUsers(snapshot.state.UserInfo)
 
 	originalOwnedGlobalLimit := snapshot.state.ownedGlobalLimit
 	publicUsesOwnedGlobalLimit := snapshot.state.GlobalLimit == originalOwnedGlobalLimit
@@ -998,6 +1031,7 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 		if inboundInfo.GlobalLimit != nil && inboundInfo.GlobalLimit.admission != nil {
 			return nil
 		}
+		inboundInfo.aliveSnapshot.clearModes()
 
 		// Build a complete authoritative panel snapshot for quick lookup.
 		panelIPs := make(map[string]map[string]bool)
@@ -1023,7 +1057,7 @@ func (l *Limiter) SyncAliveList(tag string, aliveList map[int][]string) error {
 				return true
 			})
 			for ip := range admitted {
-				entry.touchIP(ip, uid)
+				entry.touchPanelIP(ip, uid)
 			}
 		}
 		inboundInfo.UserOnlineIP.Range(func(userKey, value interface{}) bool {
@@ -1192,7 +1226,7 @@ func getUserBucketFromState(inboundInfo *inboundState, userKey string, ip string
 			entryValue, _ = inboundInfo.UserOnlineIP.LoadOrStore(userKey, newUserOnlineEntry())
 		}
 		entry := entryValue.(*userOnlineEntry)
-		reject, retry := entry.admitIP(ip, uid, deviceLimit, globalDevices)
+		reject, retry := inboundInfo.admitIP(entry, ip, uid, deviceLimit, globalDevices, atomicGlobal)
 		if retry {
 			continue
 		}
@@ -1363,10 +1397,12 @@ func (l *Limiter) ReplaceInboundUsers(tag string, userList *[]api.UserInfo) erro
 		UserInfo:         userInfo,
 		BucketHub:        bucketHub,
 		UserOnlineIP:     userOnlineIP,
+		aliveSnapshot:    newAliveSnapshotState(),
 		GlobalDevices:    inboundInfo.GlobalDevices,
 		GlobalLimit:      inboundInfo.GlobalLimit,
 		ownedGlobalLimit: inboundInfo.ownedGlobalLimit,
 	}
+	replacement.aliveSnapshot.inheritForUsers(inboundInfo.aliveSnapshot, userInfo)
 	syncGlobalPolicies(replacement)
 	l.publishReplacementInbound(tag, inboundInfo, replacement)
 	inboundInfo.GlobalLimit.pruneKeyLocks(userInfo)

@@ -337,6 +337,10 @@ func (c *Controller) SyncAliveList(tag string, aliveList map[int][]string) error
 	return err
 }
 
+func (c *Controller) SyncAliveSnapshot(tag string, snapshot *api.AliveSnapshot, reportedIPs map[int][]string) error {
+	return c.dispatcher.Limiter.SyncAliveSnapshot(tag, snapshot, reportedIPs)
+}
+
 func (c *Controller) UpdateRule(tag string, newRuleList []api.DetectRule) error {
 	err := c.dispatcher.RuleManager.UpdateRule(tag, newRuleList)
 	return err
