@@ -1,6 +1,10 @@
 package machine
 
-import "github.com/Mtoly/XrayRP/api"
+import (
+	"context"
+
+	"github.com/Mtoly/XrayRP/api"
+)
 
 // WrapAPIWithReporter retains the original public wrapper contract. Machine
 // construction uses WrapMachineAPIWithReporter so incomplete capability sets
@@ -295,6 +299,14 @@ func wrapReportingAPIWithCapabilities(wrapped *reportingAPI, capabilities panelC
 	default:
 		return wrapped
 	}
+}
+
+func (a *reportingAPI) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return a.GetAliveSnapshotContext(context.Background())
+}
+
+func (a *reportingAPI) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
+	return api.GetAliveSnapshotContext(ctx, a.PanelClient)
 }
 
 func (a *reportingAPI) ReportNodeStatus(nodeStatus *api.NodeStatus) error {

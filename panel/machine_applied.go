@@ -323,6 +323,14 @@ func (c *machineAppliedPanelClient) GetAliveListContext(ctx context.Context) (ma
 	return cloned, nil
 }
 
+func (c *machineAppliedPanelClient) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return c.GetAliveSnapshotContext(context.Background())
+}
+
+func (c *machineAppliedPanelClient) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
+	return api.GetAliveSnapshotContext(ctx, c.source)
+}
+
 func (c *machineAppliedPanelClient) ReportNodeDevices(devices map[int][]string) error {
 	reporter, ok := c.source.(interface {
 		ReportNodeDevices(map[int][]string) error

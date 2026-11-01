@@ -31,12 +31,43 @@ type machineAppliedSnapshotTestClient struct {
 	snapshotCalls int
 }
 
+type machineAppliedAliveSnapshotTestClient struct {
+	*machineAppliedTestClient
+	snapshot      *api.AliveSnapshot
+	snapshotErr   error
+	snapshotCalls int
+	contextValue  any
+	call          func(context.Context) error
+}
+
+type machineAppliedAliveListTestClient struct {
+	*machineAppliedTestClient
+	aliveList  map[int][]string
+	aliveCalls int
+}
+
 func (c *machineAppliedSnapshotTestClient) GetNodeSnapshotContext(ctx context.Context) (*api.NodeSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	c.snapshotCalls++
 	return c.snapshot, nil
+}
+
+func (c *machineAppliedAliveSnapshotTestClient) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
+	c.snapshotCalls++
+	c.contextValue = ctx.Value(machineAppliedAliveContextKey{})
+	if c.call != nil {
+		if err := c.call(ctx); err != nil {
+			return c.snapshot, err
+		}
+	}
+	return c.snapshot, c.snapshotErr
+}
+
+func (c *machineAppliedAliveListTestClient) GetAliveList() (map[int][]string, error) {
+	c.aliveCalls++
+	return c.aliveList, nil
 }
 
 type orderedMachineRuntimeService struct {
@@ -175,6 +206,148 @@ func TestMachineAppliedPanelClientUsesNormalizedSnapshotCapability(t *testing.T)
 	if source.snapshot.Port != 8443 {
 		t.Fatalf("machine wrapper leaked snapshot mutation to source: %#v", source.snapshot)
 	}
+}
+
+type machineAppliedAliveContextKey struct{}
+
+func TestMachineAppliedPanelClientForwardsAliveSnapshot(t *testing.T) {
+	sourceSnapshot := &api.AliveSnapshot{
+		IPs:    map[int][]string{2: {"192.0.2.2"}},
+		Counts: map[int]int{1: 3},
+	}
+	source := &machineAppliedAliveSnapshotTestClient{
+		machineAppliedTestClient: &machineAppliedTestClient{},
+		snapshot:                 sourceSnapshot,
+	}
+	client := newMachineAppliedPanelClient(source, nil)
+	snapshotProvider, ok := any(client).(api.AliveSnapshotProvider)
+	if !ok {
+		t.Fatal("machine applied client did not expose typed alive snapshots")
+	}
+
+	snapshot, err := snapshotProvider.GetAliveSnapshot()
+	if err != nil {
+		t.Fatalf("GetAliveSnapshot() error = %v", err)
+	}
+	if !reflect.DeepEqual(snapshot, sourceSnapshot) || snapshot == sourceSnapshot {
+		t.Fatalf("GetAliveSnapshot() = %#v, want detached %#v", snapshot, sourceSnapshot)
+	}
+	if source.snapshotCalls != 1 || source.contextValue != nil {
+		t.Fatalf("non-contextual call = calls:%d value:%v", source.snapshotCalls, source.contextValue)
+	}
+	snapshot.IPs[2][0] = "192.0.2.3"
+	snapshot.Counts[1] = 4
+	if sourceSnapshot.IPs[2][0] != "192.0.2.2" || sourceSnapshot.Counts[1] != 3 {
+		t.Fatal("machine applied wrapper leaked snapshot mutation to source")
+	}
+
+	ctx := context.WithValue(context.Background(), machineAppliedAliveContextKey{}, "request")
+	contextualProvider, ok := any(client).(api.ContextAliveSnapshotProvider)
+	if !ok {
+		t.Fatal("machine applied client did not expose contextual typed alive snapshots")
+	}
+	snapshot, err = contextualProvider.GetAliveSnapshotContext(ctx)
+	if err != nil {
+		t.Fatalf("GetAliveSnapshotContext() error = %v", err)
+	}
+	if source.snapshotCalls != 2 || source.contextValue != "request" {
+		t.Fatalf("context forwarding = calls:%d value:%v", source.snapshotCalls, source.contextValue)
+	}
+	if !reflect.DeepEqual(snapshot, sourceSnapshot) || snapshot == sourceSnapshot {
+		t.Fatalf("GetAliveSnapshotContext() = %#v, want detached %#v", snapshot, sourceSnapshot)
+	}
+}
+
+func TestMachineAppliedPanelClientAliveSnapshotOutcomes(t *testing.T) {
+	providerErr := errors.New("alive snapshot unavailable")
+	t.Run("unsupported", func(t *testing.T) {
+		client := newMachineAppliedPanelClient(&machineAppliedTestClient{}, nil)
+		snapshot, err := client.GetAliveSnapshot()
+		if snapshot != nil || !errors.Is(err, api.ErrUnsupportedPanelFeature) {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want nil, unsupported", snapshot, err)
+		}
+	})
+	t.Run("typed nil", func(t *testing.T) {
+		client := newMachineAppliedPanelClient(&machineAppliedAliveSnapshotTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+		}, nil)
+		snapshot, err := client.GetAliveSnapshot()
+		if snapshot != nil || err != nil {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want nil, nil", snapshot, err)
+		}
+	})
+	t.Run("typed empty", func(t *testing.T) {
+		client := newMachineAppliedPanelClient(&machineAppliedAliveSnapshotTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+			snapshot:                 &api.AliveSnapshot{},
+		}, nil)
+		snapshot, err := client.GetAliveSnapshot()
+		if err != nil || !reflect.DeepEqual(snapshot, &api.AliveSnapshot{}) {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; want empty snapshot, nil", snapshot, err)
+		}
+	})
+	t.Run("typed error", func(t *testing.T) {
+		source := &machineAppliedAliveSnapshotTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+			snapshot:                 &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+			snapshotErr:              providerErr,
+		}
+		client := newMachineAppliedPanelClient(source, nil)
+		snapshot, err := client.GetAliveSnapshot()
+		if snapshot != nil || !errors.Is(err, providerErr) || source.snapshotCalls != 1 {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; calls:%d", snapshot, err, source.snapshotCalls)
+		}
+	})
+	t.Run("canceled before provider", func(t *testing.T) {
+		source := &machineAppliedAliveSnapshotTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+			snapshot:                 &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+		}
+		client := newMachineAppliedPanelClient(source, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		snapshot, err := client.GetAliveSnapshotContext(ctx)
+		if snapshot != nil || !errors.Is(err, context.Canceled) || source.snapshotCalls != 0 {
+			t.Fatalf("GetAliveSnapshotContext() = %#v, %v; calls:%d", snapshot, err, source.snapshotCalls)
+		}
+	})
+	t.Run("canceled after provider returns", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		source := &machineAppliedAliveSnapshotTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+			snapshot:                 &api.AliveSnapshot{Counts: map[int]int{1: 2}},
+			call: func(context.Context) error {
+				cancel()
+				return nil
+			},
+		}
+		client := newMachineAppliedPanelClient(source, nil)
+		snapshot, err := client.GetAliveSnapshotContext(ctx)
+		if snapshot != nil || !errors.Is(err, context.Canceled) || source.snapshotCalls != 1 {
+			t.Fatalf("GetAliveSnapshotContext() = %#v, %v; calls:%d", snapshot, err, source.snapshotCalls)
+		}
+	})
+	t.Run("legacy list fallback", func(t *testing.T) {
+		sourceAlive := map[int][]string{
+			1: {"192.0.2.1", "2001:db8::1"},
+			2: {},
+		}
+		source := &machineAppliedAliveListTestClient{
+			machineAppliedTestClient: &machineAppliedTestClient{},
+			aliveList:                sourceAlive,
+		}
+		client := newMachineAppliedPanelClient(source, nil)
+		snapshot, err := client.GetAliveSnapshot()
+		want := &api.AliveSnapshot{IPs: sourceAlive}
+		if err != nil || !reflect.DeepEqual(snapshot, want) || source.aliveCalls != 1 {
+			t.Fatalf("GetAliveSnapshot() = %#v, %v; calls:%d", snapshot, err, source.aliveCalls)
+		}
+		snapshot.IPs[1][0] = "192.0.2.2"
+		if sourceAlive[1][0] != "192.0.2.1" {
+			t.Fatal("legacy list fallback leaked snapshot mutation to source")
+		}
+	})
 }
 
 func (c *machineAppliedTestClient) GetUserList() (*[]api.UserInfo, error) {

@@ -176,6 +176,14 @@ func (a *machineReportingAPI) GetAliveListContext(ctx context.Context) (map[int]
 	return api.GetAliveListContext(ctx, a.machinePanelClient)
 }
 
+func (a *machineReportingAPI) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return a.GetAliveSnapshotContext(context.Background())
+}
+
+func (a *machineReportingAPI) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
+	return api.GetAliveSnapshotContext(ctx, a.machinePanelClient)
+}
+
 func (a *machineReportingAPI) DiscoverWSEndpointContext(ctx context.Context) (string, error) {
 	return api.DiscoverWSEndpointContext(ctx, a.machinePanelClient)
 }
