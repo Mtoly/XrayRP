@@ -332,6 +332,8 @@ Include and exclude filters currently use exact, prefix, or substring matching. 
 
 Managed-node handoff also fails closed when the target handler is missing, has a mismatched tag, is not a managed data-path wrapper, or would recurse into the current wrapper. This prevents route selection from bypassing node limiter and rule enforcement.
 
+Custom `OutboundConfigPath` files are validated by the pinned Xray-core. Starting with upstream `v26.10.31`, the unencrypted VLESS/Trojan exception for IP destinations is limited to private, loopback, and link-local unicast addresses. Shared (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), and documentation ranges are no longer exempt: use TLS or supported VLESS encryption. The upstream private-domain exception remains. An invalid custom outbound prevents startup; XrayRP does not bypass that validation. Managed `freedom` outbounds are unaffected.
+
 ## VLESS, Trojan, REALITY, and XHTTP
 
 The Xboard adapter supports VLESS TLS/REALITY, Trojan TLS, and the tested XHTTP/splithttp fields, including mode, raw `extra`, padding/placement options, uplink chunk size, and header toggles.

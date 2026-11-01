@@ -126,11 +126,12 @@ func (b coreConfigBuilder) Build(panelConfig *Config) (*core.Instance, error) {
 			serial.ToTypedMessage(&dispatcher.Config{}),
 			serial.ToTypedMessage(&mydispatcher.Config{}),
 			serial.ToTypedMessage(&stats.Config{}),
-			serial.ToTypedMessage(&proxyman.InboundConfig{}),
 			serial.ToTypedMessage(&proxyman.OutboundConfig{}),
 			serial.ToTypedMessage(policyConfig),
 			serial.ToTypedMessage(dnsConfig),
 			serial.ToTypedMessage(routeConfig),
+			// Start listeners only after routing and its dependencies are ready.
+			serial.ToTypedMessage(&proxyman.InboundConfig{}),
 		},
 		Inbound:  inBoundConfig,
 		Outbound: outBoundConfig,

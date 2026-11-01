@@ -2,6 +2,7 @@ package panel
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -57,11 +58,11 @@ func TestCoreConfigBuilderBuildsDefaultApplications(t *testing.T) {
 		"xray.app.dispatcher.Config",
 		serial.GetMessageType(&mydispatcher.Config{}),
 		"xray.app.stats.Config",
-		"xray.app.proxyman.InboundConfig",
 		"xray.app.proxyman.OutboundConfig",
 		serial.GetMessageType(&policy.Config{}),
 		serial.GetMessageType(&dns.Config{}),
 		serial.GetMessageType(&router.Config{}),
+		"xray.app.proxyman.InboundConfig",
 	}
 	gotTypes := make([]string, len(captured.App))
 	for i, app := range captured.App {
@@ -83,7 +84,7 @@ func TestCoreConfigBuilderBuildsDefaultApplications(t *testing.T) {
 		t.Fatalf("unexpected default log config: %#v", logConfig)
 	}
 
-	policyMessage, err := captured.App[6].GetInstance()
+	policyMessage, err := captured.App[5].GetInstance()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +100,14 @@ func TestCoreConfigBuilderBuildsDefaultApplications(t *testing.T) {
 		t.Fatalf("unexpected default stats/buffer policy: %#v", levelZero)
 	}
 
-	dnsMessage, err := captured.App[7].GetInstance()
+	dnsMessage, err := captured.App[6].GetInstance()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := dnsMessage.(*dns.Config); len(got.NameServer) != 0 || len(got.StaticHosts) != 0 {
 		t.Fatalf("unexpected default DNS config: %#v", got)
 	}
-	routeMessage, err := captured.App[8].GetInstance()
+	routeMessage, err := captured.App[7].GetInstance()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +175,57 @@ func TestCoreConfigBuilderPreservesCustomHandlers(t *testing.T) {
 	gotOutboundTags := []string{captured.Outbound[0].Tag, captured.Outbound[1].Tag}
 	if !reflect.DeepEqual(gotOutboundTags, []string{"custom-outbound", "custom-outbound-two"}) {
 		t.Fatalf("custom outbound not preserved: %#v", captured.Outbound)
+	}
+}
+
+func TestCoreConfigBuilderValidatesCustomOutboundTransportSecurity(t *testing.T) {
+	for _, protocol := range []string{"vless", "trojan"} {
+		for _, tt := range []struct {
+			name    string
+			address string
+			tls     bool
+			reject  bool
+		}{
+			{name: "loopback", address: "127.0.0.1"},
+			{name: "private", address: "10.0.0.1"},
+			{name: "link local", address: "169.254.0.1"},
+			{name: "shared address space", address: "100.64.0.1", reject: true},
+			{name: "benchmark range", address: "198.18.0.1", reject: true},
+			{name: "documentation range", address: "192.0.2.1", reject: true},
+			{name: "TLS documentation range", address: "192.0.2.1", tls: true},
+		} {
+			t.Run(protocol+"/"+tt.name, func(t *testing.T) {
+				settings := fmt.Sprintf(`{"servers":[{"address":%q,"port":443,"password":"test-only"}]}`, tt.address)
+				if protocol == "vless" {
+					settings = fmt.Sprintf(`{"vnext":[{"address":%q,"port":443,"users":[{"id":"1b4e28ba-2fa1-11d2-883f-0016d3cca427","encryption":"none"}]}]}`, tt.address)
+				}
+				security := "none"
+				if tt.tls {
+					security = "tls"
+				}
+				path := writeCoreConfigFixture(t, "outbounds.json", fmt.Sprintf(
+					`[{"tag":"custom-outbound","protocol":%q,"settings":%s,"streamSettings":{"security":%q}}]`,
+					protocol, settings, security))
+				var captured *core.Config
+				builder := capturingCoreConfigBuilder(&captured, new(core.Instance))
+				_, err := builder.Build(&Config{OutboundConfigPath: path})
+				if tt.reject {
+					if err == nil || !strings.Contains(err.Error(), "failed to understand outbound config") || !strings.Contains(err.Error(), "prohibited") {
+						t.Fatalf("error = %v, want wrapped transport-security rejection", err)
+					}
+					if captured != nil {
+						t.Fatal("rejected outbound reached instance construction")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if captured == nil || len(captured.Outbound) != 1 || captured.Outbound[0].Tag != "custom-outbound" {
+					t.Fatalf("custom outbound was not preserved: %#v", captured)
+				}
+			})
+		}
 	}
 }
 

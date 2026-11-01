@@ -11,6 +11,15 @@ Notable user-facing, compatibility, security, performance, and operational chang
 ### Fixed
 
 - Both the Xboard `/api/v2/server/report` alive report and the legacy `/alive` fallback now send plain IPv4 and IPv6 addresses without a node-ID suffix, so the panel counts the same source once across nodes.
+- Initialize the Xray inbound manager after routing and its dependencies, matching upstream startup ordering so listeners do not start before those modules are ready.
+
+### Security
+
+- Updated Xray-core to `v1.260327.1-0.20261031132019-a4a3dff5b20c` (upstream `v26.10.31`), including its default TCP listener MPTCP disablement as a mitigation for the upstream-reported Linux IPv4 MPTCP vulnerability. Explicit upstream `tcpMptcp` opt-in remains supported; this mitigation does not replace kernel security updates or change the dedicated AnyTLS, TUIC, or Hysteria2 runtimes.
+
+### Upgrade notes
+
+- Xray-core now rejects additional unencrypted VLESS and Trojan custom outbounds to non-private addresses, including shared (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), and documentation ranges. Review `OutboundConfigPath` files before upgrading: use TLS or supported VLESS encryption for those destinations. Private, loopback, and link-local unicast IP exceptions remain; managed `freedom` outbounds are unaffected. See [outbound compatibility](docs/xboard-newv2board.md#route-and-outbound-compatibility).
 
 ## 0.9.11 - 2026-10-28
 
