@@ -2,7 +2,11 @@
 
 package api
 
-import "errors"
+import (
+	"errors"
+	"maps"
+	"slices"
+)
 
 var ErrUnsupportedPanelFeature = errors.New("panel feature unsupported by adapter")
 
@@ -48,4 +52,34 @@ type CertConfigProvider interface {
 // empty map, is an authoritative replacement snapshot.
 type AliveListProvider interface {
 	GetAliveList() (map[int][]string, error)
+}
+
+// AliveSnapshot is a complete panel device snapshot. Each UID appears in
+// either IPs or Counts, never both. Counts are non-negative device counts;
+// they do not identify IPs. A non-nil empty snapshot clears previous panel
+// state, while a nil snapshot means no update is available.
+type AliveSnapshot struct {
+	IPs    map[int][]string
+	Counts map[int]int
+}
+
+// AliveSnapshotProvider is an optional capability for adapters that expose
+// device counts as well as IP lists without changing AliveListProvider.
+type AliveSnapshotProvider interface {
+	GetAliveSnapshot() (*AliveSnapshot, error)
+}
+
+// Clone returns a detached snapshot, preserving nil maps and IP lists.
+func (s *AliveSnapshot) Clone() *AliveSnapshot {
+	if s == nil {
+		return nil
+	}
+	cloned := &AliveSnapshot{Counts: maps.Clone(s.Counts)}
+	if s.IPs != nil {
+		cloned.IPs = make(map[int][]string, len(s.IPs))
+		for uid, ips := range s.IPs {
+			cloned.IPs[uid] = slices.Clone(ips)
+		}
+	}
+	return cloned
 }

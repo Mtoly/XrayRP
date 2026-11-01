@@ -1,9 +1,13 @@
 package newV2board
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Mtoly/XrayRP/api"
 )
@@ -66,10 +70,139 @@ func TestGetXrayRCertConfigFetchesConfigWhenCacheEmpty(t *testing.T) {
 	}
 }
 
+func TestGetAliveSnapshotReadsDeviceCounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/server/UniProxy/alivelist" || r.URL.Query().Get("node_id") != "1" {
+			t.Errorf("unexpected alive request: %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"alive":{"1":3}}`))
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
+	got, err := client.GetAliveSnapshot()
+	want := &api.AliveSnapshot{IPs: map[int][]string{}, Counts: map[int]int{1: 3}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetAliveSnapshot() = %#v, %v; want %#v, nil", got, err, want)
+	}
+}
+
+func TestGetAliveSnapshotPreservesFormats(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		want    *api.AliveSnapshot
+		wantErr bool
+	}{
+		{name: "absent", payload: `{}`},
+		{name: "empty", payload: `{"alive":{}}`, want: &api.AliveSnapshot{IPs: map[int][]string{}}},
+		{name: "zero count", payload: `{"alive":{"1":0}}`, want: &api.AliveSnapshot{IPs: map[int][]string{}, Counts: map[int]int{1: 0}}},
+		{name: "legacy IPs", payload: `{"alive":{"1":["192.0.2.5_1","2001:db8::1_2","192.0.2.1"],"2":[]}}`, want: &api.AliveSnapshot{
+			IPs: map[int][]string{1: {"192.0.2.5", "2001:db8::1", "192.0.2.1"}, 2: {}},
+		}},
+		{name: "mixed", payload: `{"alive":{"1":3,"2":["192.0.2.5_1"]}}`, want: &api.AliveSnapshot{
+			IPs: map[int][]string{2: {"192.0.2.5"}}, Counts: map[int]int{1: 3},
+		}},
+		{name: "null snapshot", payload: `{"alive":null}`, wantErr: true},
+		{name: "array snapshot", payload: `{"alive":[]}`, wantErr: true},
+		{name: "negative count", payload: `{"alive":{"1":-1}}`, wantErr: true},
+		{name: "fractional count", payload: `{"alive":{"1":1.5}}`, wantErr: true},
+		{name: "exponent count", payload: `{"alive":{"1":1e2}}`, wantErr: true},
+		{name: "overflow count", payload: `{"alive":{"1":9223372036854775808}}`, wantErr: true},
+		{name: "string count", payload: `{"alive":{"1":"3"}}`, wantErr: true},
+		{name: "null count", payload: `{"alive":{"1":null}}`, wantErr: true},
+		{name: "boolean count", payload: `{"alive":{"1":true}}`, wantErr: true},
+		{name: "invalid uid", payload: `{"alive":{"0":3}}`, wantErr: true},
+		{name: "malformed IP", payload: `{"alive":{"1":[42]}}`, wantErr: true},
+		{name: "valid and invalid values are not partially accepted", payload: `{"alive":{"1":3,"2":["192.0.2.1_1"],"3":-1}}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.payload))
+			}))
+			defer server.Close()
+
+			client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
+			got, err := client.GetAliveSnapshot()
+			if test.wantErr {
+				if err == nil || got != nil {
+					t.Fatalf("GetAliveSnapshot() = %#v, %v; want nil snapshot and error", got, err)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("GetAliveSnapshot() = %#v, %v; want %#v, nil", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestGetAliveSnapshotUsesMachineEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/server/alivelist" || r.URL.Query().Get("node_id") != "7" || r.URL.Query().Get("machine_id") != "2" {
+			t.Errorf("unexpected machine alive request: %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"alive":{"1":2}}`))
+	}))
+	defer server.Close()
+
+	client := New(&api.Config{APIHost: server.URL, NodeID: 7, MachineID: 2, NodeType: "V2ray"})
+	got, err := api.GetAliveSnapshotContext(context.Background(), client)
+	want := &api.AliveSnapshot{IPs: map[int][]string{}, Counts: map[int]int{1: 2}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("GetAliveSnapshotContext() = %#v, %v; want %#v, nil", got, err, want)
+	}
+}
+
+func TestGetAliveSnapshotContextCancelsInFlightRequest(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	client := New(&api.Config{APIHost: server.URL, NodeID: 1, NodeType: "V2ray"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		got, err := client.GetAliveSnapshotContext(ctx)
+		if got != nil {
+			t.Errorf("canceled request returned snapshot %#v", got)
+		}
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not reach test server")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("GetAliveSnapshotContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("alive request ignored cancellation")
+	}
+}
+
 func TestGetAliveListNormalizesAliveIPs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"alive":{"1":["1.2.3.4_1","5.6.7.8_1"],"2":["9.9.9.9_1"]}}`))
+		_, _ = w.Write([]byte(`{"alive":{"1":["192.0.2.1_1","192.0.2.2_2"],"2":["2001:db8::1_1"]}}`))
 	}))
 	defer server.Close()
 
@@ -78,10 +211,10 @@ func TestGetAliveListNormalizesAliveIPs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAliveList returned error: %v", err)
 	}
-	if len(alive[1]) != 2 || alive[1][0] != "1.2.3.4" || alive[1][1] != "5.6.7.8" {
+	if len(alive[1]) != 2 || alive[1][0] != "192.0.2.1" || alive[1][1] != "192.0.2.2" {
 		t.Fatalf("unexpected normalized alive list for uid 1: %#v", alive[1])
 	}
-	if len(alive[2]) != 1 || alive[2][0] != "9.9.9.9" {
+	if len(alive[2]) != 1 || alive[2][0] != "2001:db8::1" {
 		t.Fatalf("unexpected normalized alive list for uid 2: %#v", alive[2])
 	}
 }
@@ -103,6 +236,21 @@ func TestGetAliveListDistinguishesAbsentEmptyAndMalformedSnapshots(t *testing.T)
 			name:      "authoritative empty snapshot",
 			payload:   `{"alive":{}}`,
 			wantEmpty: true,
+		},
+		{
+			name:    "counts cannot be projected as IPs",
+			payload: `{"alive":{"1":3}}`,
+			wantNil: true,
+		},
+		{
+			name:    "zero count is not an empty IP snapshot",
+			payload: `{"alive":{"1":0}}`,
+			wantNil: true,
+		},
+		{
+			name:    "mixed snapshot cannot be partially projected",
+			payload: `{"alive":{"1":3,"2":["192.0.2.1_1"]}}`,
+			wantNil: true,
 		},
 		{
 			name:    "alive is null",
