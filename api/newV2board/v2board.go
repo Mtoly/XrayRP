@@ -270,6 +270,23 @@ func (c *APIClient) GetAliveList() (aliveList map[int][]string, err error) {
 }
 
 func (c *APIClient) GetAliveListContext(ctx context.Context) (aliveList map[int][]string, err error) {
+	snapshot, err := c.GetAliveSnapshotContext(ctx)
+	if err != nil || snapshot == nil {
+		return nil, err
+	}
+	// IP-only callers require a complete snapshot, never a partial projection
+	// that would treat count-only users as offline.
+	if len(snapshot.Counts) > 0 {
+		return nil, nil
+	}
+	return snapshot.IPs, nil
+}
+
+func (c *APIClient) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return c.GetAliveSnapshotContext(context.Background())
+}
+
+func (c *APIClient) GetAliveSnapshotContext(ctx context.Context) (*api.AliveSnapshot, error) {
 	path := c.aliveListPath()
 
 	res, err := c.client.R().
@@ -297,14 +314,26 @@ func (c *APIClient) GetAliveListContext(ctx context.Context) (aliveList map[int]
 		return nil, fmt.Errorf("parse alive list from %s: alive must be an object", c.assembleURL(path))
 	}
 
-	aliveData := make(map[int][]string, len(aliveMap))
+	aliveData := &api.AliveSnapshot{IPs: make(map[int][]string)}
 	for uidStr, ips := range aliveMap {
 		uidInt, err := strconv.Atoi(uidStr)
 		if err != nil || uidInt <= 0 {
 			return nil, fmt.Errorf("parse alive list from %s: invalid uid %q", c.assembleURL(path), uidStr)
 		}
+		trimmed := strings.TrimSpace(string(ips))
+		if len(trimmed) > 0 && trimmed[0] >= '0' && trimmed[0] <= '9' {
+			var count int
+			if err := json.Unmarshal(ips, &count); err != nil {
+				return nil, fmt.Errorf("parse alive list from %s: uid %d count must be a non-negative integer", c.assembleURL(path), uidInt)
+			}
+			if aliveData.Counts == nil {
+				aliveData.Counts = make(map[int]int)
+			}
+			aliveData.Counts[uidInt] = count
+			continue
+		}
 		var ipList []json.RawMessage
-		if trimmed := strings.TrimSpace(string(ips)); len(trimmed) == 0 || trimmed[0] != '[' {
+		if len(trimmed) == 0 || trimmed[0] != '[' {
 			return nil, fmt.Errorf("parse alive list from %s: uid %d IPs must be an array", c.assembleURL(path), uidInt)
 		}
 		if err := json.Unmarshal(ips, &ipList); err != nil {
@@ -321,7 +350,7 @@ func (c *APIClient) GetAliveListContext(ctx context.Context) (aliveList map[int]
 			}
 			strIPs = append(strIPs, ipStr)
 		}
-		aliveData[uidInt] = strIPs
+		aliveData.IPs[uidInt] = strIPs
 	}
 
 	if err := ctx.Err(); err != nil {

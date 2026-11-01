@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -54,6 +55,11 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 			alive:      map[int][]string{},
 			wantOnline: []api.OnlineUser{},
 		},
+		{
+			name:       "legacy IP entry replaces complete state",
+			alive:      map[int][]string{1: {"198.51.100.1"}},
+			wantOnline: []api.OnlineUser{{UID: 1, IP: "198.51.100.1"}},
+		},
 	}
 
 	for _, test := range tests {
@@ -78,7 +84,7 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 				logger: log.NewEntry(logger),
 			}
 
-			controller.syncAliveListFromPanel("inbound")
+			controller.syncAliveSnapshotFromPanelContext(context.Background(), "inbound", nil)
 
 			online, err := panelLimiter.GetOnlineDevice("inbound")
 			if err != nil {
@@ -99,5 +105,72 @@ func TestSyncAliveListFromPanelClassifiesCapabilityOutcomes(t *testing.T) {
 				t.Fatalf("log output = %q, did not want %q", output.String(), test.wantNoLog)
 			}
 		})
+	}
+}
+
+type typedAliveSnapshotTestAPI struct {
+	panelClientWithoutDebug
+	snapshot *api.AliveSnapshot
+}
+
+func (a typedAliveSnapshotTestAPI) GetAliveSnapshot() (*api.AliveSnapshot, error) {
+	return a.snapshot, nil
+}
+
+func (a typedAliveSnapshotTestAPI) GetAliveList() (map[int][]string, error) {
+	return map[int][]string{}, nil
+}
+
+func TestTypedEmptySnapshotPreservesGenuineLocalObservation(t *testing.T) {
+	panelLimiter := limiter.New()
+	users := []api.UserInfo{{UID: 1, Email: "one@example.com"}}
+	if err := panelLimiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter failed: %v", err)
+	}
+	localIP := "192.0.2.1"
+	if _, _, rejected := panelLimiter.Admit("inbound", "inbound|one@example.com|1", localIP, nil, nil); rejected {
+		t.Fatal("expected user IP to be accepted")
+	}
+	controller := &Controller{
+		apiClient: typedAliveSnapshotTestAPI{snapshot: &api.AliveSnapshot{}},
+		dispatcher: &mydispatcher.DefaultDispatcher{
+			Limiter: panelLimiter,
+		},
+		logger: log.NewEntry(log.New()),
+	}
+
+	controller.syncAliveSnapshotFromPanelContext(context.Background(), "inbound", nil)
+
+	online, err := panelLimiter.GetOnlineDevice("inbound")
+	if err != nil {
+		t.Fatalf("GetOnlineDevice failed: %v", err)
+	}
+	if len(*online) != 1 || (*online)[0] != (api.OnlineUser{UID: 1, IP: localIP}) {
+		t.Fatalf("online devices = %#v, want genuine local observation", *online)
+	}
+}
+
+func TestLegacySyncAliveListStillReplacesCompleteControllerState(t *testing.T) {
+	panelLimiter := limiter.New()
+	users := []api.UserInfo{{UID: 1, Email: "one@example.com"}}
+	if err := panelLimiter.AddInboundLimiter("inbound", 0, &users, nil); err != nil {
+		t.Fatalf("AddInboundLimiter failed: %v", err)
+	}
+	if _, _, rejected := panelLimiter.Admit("inbound", "inbound|one@example.com|1", "192.0.2.1", nil, nil); rejected {
+		t.Fatal("expected user IP to be accepted")
+	}
+	controller := &Controller{
+		dispatcher: &mydispatcher.DefaultDispatcher{Limiter: panelLimiter},
+	}
+
+	if err := controller.SyncAliveList("inbound", map[int][]string{}); err != nil {
+		t.Fatalf("SyncAliveList() error = %v", err)
+	}
+	online, err := panelLimiter.GetOnlineDevice("inbound")
+	if err != nil {
+		t.Fatalf("GetOnlineDevice() error = %v", err)
+	}
+	if len(*online) != 0 {
+		t.Fatalf("legacy SyncAliveList() online devices = %#v, want empty", *online)
 	}
 }

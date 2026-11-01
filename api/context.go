@@ -24,6 +24,10 @@ type ContextAliveListProvider interface {
 	GetAliveListContext(context.Context) (map[int][]string, error)
 }
 
+type ContextAliveSnapshotProvider interface {
+	GetAliveSnapshotContext(context.Context) (*AliveSnapshot, error)
+}
+
 type ContextWSEndpointDiscoverer interface {
 	DiscoverWSEndpointContext(context.Context) (string, error)
 }
@@ -191,6 +195,38 @@ func GetAliveListContext(ctx context.Context, provider AliveListProvider) (map[i
 	}
 	value, err := provider.GetAliveList()
 	return value, finishContextCall(ctx, err)
+}
+
+// GetAliveSnapshotContext returns a detached device snapshot, falling back
+// to the IP-only capability for older adapters.
+func GetAliveSnapshotContext(ctx context.Context, provider any) (*AliveSnapshot, error) {
+	ctx = contextOrBackground(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := provider.(ContextAliveSnapshotProvider); ok {
+		value, err := contextual.GetAliveSnapshotContext(ctx)
+		if err = finishContextCall(ctx, err); err != nil {
+			return nil, err
+		}
+		return value.Clone(), nil
+	}
+	if typed, ok := provider.(AliveSnapshotProvider); ok {
+		value, err := typed.GetAliveSnapshot()
+		if err = finishContextCall(ctx, err); err != nil {
+			return nil, err
+		}
+		return value.Clone(), nil
+	}
+	legacy, ok := provider.(AliveListProvider)
+	if !ok {
+		return nil, ErrUnsupportedPanelFeature
+	}
+	ips, err := GetAliveListContext(ctx, legacy)
+	if err != nil || ips == nil {
+		return nil, err
+	}
+	return (&AliveSnapshot{IPs: ips}).Clone(), nil
 }
 
 func DiscoverWSEndpointContext(ctx context.Context, provider WSEndpointDiscoverer) (string, error) {

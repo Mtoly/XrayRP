@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"strconv"
 	"strings"
 
 	"github.com/Mtoly/XrayRP/api"
@@ -61,10 +60,10 @@ func buildNodeStatusWSPayload(nodeID int, nodeStatus *api.NodeStatus) (map[strin
 	}, nil
 }
 
-func buildReportAlivePayload(onlineUsers *[]api.OnlineUser, nodeID int) map[string]any {
+func buildReportAlivePayload(onlineUsers *[]api.OnlineUser) map[string]any {
 	return map[string]any{
 		"type":  "alive",
-		"alive": buildAliveMap(onlineUsers, nodeID),
+		"alive": buildAliveMap(onlineUsers),
 	}
 }
 
@@ -75,7 +74,7 @@ func buildReportTrafficPayload(userTraffic *[]api.UserTraffic) map[string]any {
 	}
 }
 
-func buildAliveMap(onlineUsers *[]api.OnlineUser, nodeID int) map[int][]string {
+func buildAliveMap(onlineUsers *[]api.OnlineUser) map[int][]string {
 	alive := make(map[int][]string)
 	if onlineUsers == nil {
 		return alive
@@ -85,7 +84,7 @@ func buildAliveMap(onlineUsers *[]api.OnlineUser, nodeID int) map[int][]string {
 		if user.UID == 0 || user.IP == "" {
 			continue
 		}
-		alive[user.UID] = append(alive[user.UID], user.IP+"_"+strconv.Itoa(nodeID))
+		alive[user.UID] = append(alive[user.UID], user.IP)
 	}
 	return alive
 }
@@ -198,7 +197,7 @@ func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) erro
 }
 
 func (c *APIClient) ReportNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
-	payload := buildReportAlivePayload(onlineUserList, c.NodeID)
+	payload := buildReportAlivePayload(onlineUserList)
 	if !c.xboardReportUnsupported.Load() {
 		if err := c.postXboardReportContext(ctx, payload); err == nil {
 			return nil
@@ -290,7 +289,7 @@ func (c *APIClient) reportLegacyNodeStatusContext(ctx context.Context, nodeStatu
 
 func (c *APIClient) reportLegacyNodeOnlineUsersContext(ctx context.Context, onlineUserList *[]api.OnlineUser) error {
 	path := c.legacyAlivePath()
-	data := buildAliveMap(onlineUserList, c.NodeID)
+	data := buildAliveMap(onlineUserList)
 
 	res, err := c.client.R().
 		SetContext(ctx).
