@@ -10,6 +10,19 @@ import (
 
 var ErrUnsupportedPanelFeature = errors.New("panel feature unsupported by adapter")
 
+// PanelClient is the base contract every panel adapter implements.
+// Optional capabilities stay separate.
+type PanelClient interface {
+	Describe() ClientInfo
+	GetNodeInfo() (*NodeInfo, error)
+	GetUserList() (*[]UserInfo, error)
+	GetNodeRule() (*[]DetectRule, error)
+	ReportNodeStatus(*NodeStatus) error
+	ReportNodeOnlineUsers(*[]OnlineUser) error
+	ReportUserTraffic(*[]UserTraffic) error
+	ReportIllegal(*[]DetectResult) error
+}
+
 // WSConfig carries the minimum panel adapter state needed to opt into
 // websocket-driven control-plane features without changing the base API contract.
 type WSConfig struct {

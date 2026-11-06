@@ -19,24 +19,7 @@ type runtimePanelIdentityReader interface {
 	Describe() api.ClientInfo
 }
 
-type runtimePanelSnapshotReader interface {
-	GetNodeInfo() (*api.NodeInfo, error)
-	GetUserList() (*[]api.UserInfo, error)
-	GetNodeRule() (*[]api.DetectRule, error)
-}
-
-type runtimePanelReporter interface {
-	ReportNodeStatus(*api.NodeStatus) error
-	ReportNodeOnlineUsers(*[]api.OnlineUser) error
-	ReportUserTraffic(*[]api.UserTraffic) error
-	ReportIllegal(*[]api.DetectResult) error
-}
-
-type runtimePanelClient interface {
-	runtimePanelIdentityReader
-	runtimePanelSnapshotReader
-	runtimePanelReporter
-}
+type runtimePanelClient = api.PanelClient
 
 type panelClientFactory func(*api.Config) runtimePanelClient
 

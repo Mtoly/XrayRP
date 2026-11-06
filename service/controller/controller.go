@@ -17,28 +17,7 @@ import (
 	"github.com/Mtoly/XrayRP/service"
 )
 
-type panelIdentityReader interface {
-	Describe() api.ClientInfo
-}
-
-type panelSnapshotReader interface {
-	GetNodeInfo() (*api.NodeInfo, error)
-	GetUserList() (*[]api.UserInfo, error)
-	GetNodeRule() (*[]api.DetectRule, error)
-}
-
-type panelReporter interface {
-	ReportNodeStatus(*api.NodeStatus) error
-	ReportNodeOnlineUsers(*[]api.OnlineUser) error
-	ReportUserTraffic(*[]api.UserTraffic) error
-	ReportIllegal(*[]api.DetectResult) error
-}
-
-type PanelClient interface {
-	panelIdentityReader
-	panelSnapshotReader
-	panelReporter
-}
+type PanelClient = api.PanelClient
 
 type LimitInfo struct {
 	end               int64
