@@ -34,6 +34,35 @@ func BenchmarkTrafficAccounting5000Users(b *testing.B) {
 	}
 }
 
+func BenchmarkTrafficAccountingIsolated5000Users(b *testing.B) {
+	for _, scenario := range []struct {
+		name        string
+		activeUsers int
+	}{
+		{name: "low-active-50", activeUsers: 50},
+		{name: "burst-active-1000", activeUsers: 1000},
+		{name: "high-active-5000", activeUsers: 5000},
+	} {
+		b.Run(scenario.name, func(b *testing.B) {
+			service, userKeys := benchmarkTrafficService(5000)
+			logger := &hyTrafficLogger{svc: service}
+			var next atomic.Uint64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				index := int(next.Add(1)-1) % scenario.activeUsers
+				for pb.Next() {
+					if !logger.LogTraffic(userKeys[index], 1, 1) {
+						b.Errorf("traffic for user %d rejected", index)
+						return
+					}
+					index = (index + 1) % scenario.activeUsers
+				}
+			})
+		})
+	}
+}
+
 func benchmarkTrafficService(userCount int) (*Hysteria2Service, []string) {
 	service := &Hysteria2Service{
 		users:   make(map[string]userRecord, userCount),
