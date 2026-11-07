@@ -438,15 +438,19 @@ func TestLocalAuthUnchangedWithoutGlobalAdmission(t *testing.T) {
 
 	ok, id := (&hyAuthenticator{svc: svc}).Authenticate(
 		&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}, "credential-a", 0)
-	if !ok || id != "credential-a" {
-		t.Fatalf("local Authenticate() = (%q, %v), want credential id", id, ok)
+	if !ok || id == "" || id == "credential-a" {
+		t.Fatal("local Authenticate() did not return an accepted opaque session id")
 	}
 	svc.mu.RLock()
 	_, online := svc.onlineIPs["credential-a"]["192.0.2.1"]
 	sessions := len(svc.sessions)
+	session := svc.sessions[id]
 	svc.mu.RUnlock()
-	if !online || sessions != 0 {
-		t.Fatalf("local mode tracking: online=%v sessions=%d, want local IP and no sessions", online, sessions)
+	if !online || sessions != 1 {
+		t.Fatalf("local mode tracking: online=%v sessions=%d, want local IP and one session", online, sessions)
+	}
+	if session == nil || !session.local || session.lease != nil {
+		t.Fatal("local session must be tracked without a global lease")
 	}
 
 	if ok, _ := (&hyAuthenticator{svc: svc}).Authenticate(
@@ -456,6 +460,14 @@ func TestLocalAuthUnchangedWithoutGlobalAdmission(t *testing.T) {
 	if ok, _ := (&hyAuthenticator{svc: svc}).Authenticate(
 		&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5001}, "credential-a", 0); !ok {
 		t.Fatal("local mode rejected a repeat IP connection")
+	}
+
+	(&hyEventLogger{svc: svc}).Disconnect(&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}, id, nil)
+	svc.mu.RLock()
+	_, online = svc.onlineIPs["credential-a"]["192.0.2.1"]
+	svc.mu.RUnlock()
+	if online {
+		t.Fatal("local Disconnect() retained the IP while another same-IP session was live")
 	}
 }
 
