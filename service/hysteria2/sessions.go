@@ -3,13 +3,13 @@ package hysteria2
 import "time"
 
 // hySession ties one authenticated Hysteria2 connection to the credential it
-// used and the global lease it owns. The core treats the returned opaque id as
-// the connection id for every later callback, so two connections that share a
-// credential and source IP still own independent leases.
+// used and any global lease it owns. The core uses the opaque id for every
+// later callback, keeping audit marks and leases scoped to one connection.
 type hySession struct {
 	credential string
 	ip         string
 	lease      globalLease
+	local      bool
 }
 
 // userForIDLocked resolves a core connection id to its user record and
@@ -112,8 +112,9 @@ func (h *Hysteria2Service) retireSessionLease(sessionID string) {
 	_ = closeGlobalLease(lease)
 }
 
-// endSession removes a session-owned connection, keeps the online IP while
-// another live session still uses it, and stops lease renewal outside h.mu.
+// endSession removes a connection and its audit mark, and stops lease renewal
+// outside h.mu. Local sessions always forget their IP; global sessions keep it
+// while another live session still uses it.
 func (h *Hysteria2Service) endSession(sessionID string) {
 	if h == nil {
 		return
@@ -128,7 +129,7 @@ func (h *Hysteria2Service) endSession(sessionID string) {
 	delete(h.blockedIDs, sessionID)
 	lease := session.lease
 	session.lease = nil
-	if !h.sessionHoldsIPLocked(session.credential, session.ip) {
+	if session.local || !h.sessionHoldsIPLocked(session.credential, session.ip) {
 		h.forgetIPLocked(session.credential, session.ip)
 	}
 	h.mu.Unlock()
@@ -162,7 +163,7 @@ func (h *Hysteria2Service) liveSessionIPsLocked() map[int][]string {
 	}
 	seen := make(map[int]map[string]struct{}, len(h.sessions))
 	for _, session := range h.sessions {
-		if session == nil || session.ip == "" {
+		if session == nil || session.local || session.ip == "" {
 			continue
 		}
 		user, ok := h.users[session.credential]
