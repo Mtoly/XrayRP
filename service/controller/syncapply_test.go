@@ -199,6 +199,8 @@ type syncApplyRecorder struct {
 	addedUserPayloads       [][]api.UserInfo
 	updatedLimiterTags      []string
 	updatedLimiterPayloads  [][]api.UserInfo
+	addedLimiterPayloads    [][]api.UserInfo
+	deletedLimiterPayloads  [][]api.UserInfo
 	addUserCalls            int
 	addLimiterCalls         int
 	deleteLimiterCalls      int
@@ -317,6 +319,13 @@ func newTestSyncApplyController(apiClient PanelClient) (*Controller, *syncApplyR
 			},
 		},
 		limiter: syncApplyLimiterHooks{
+			applyInboundUserDiff: func(tag string, added, updated, deleted []api.UserInfo) error {
+				users := append(cloneSlice(added), updated...)
+				recorder.recordUpdateInboundLimiter(tag, &users)
+				recorder.addedLimiterPayloads = append(recorder.addedLimiterPayloads, cloneSlice(added))
+				recorder.deletedLimiterPayloads = append(recorder.deletedLimiterPayloads, cloneSlice(deleted))
+				return recorder.updateLimiterErr
+			},
 			addInbound: func(tag string, _ uint64, _ *[]api.UserInfo, _ *limiter.GlobalDeviceLimitConfig) error {
 				recorder.addLimiterCalls++
 				if recorder.activeLimiterTags == nil {
@@ -1935,7 +1944,9 @@ func TestSyncApply_UserDiffPayloadOrder(t *testing.T) {
 	if len(recorder.updatedLimiterPayloads) != 1 {
 		t.Fatalf("expected one limiter update payload, got %d", len(recorder.updatedLimiterPayloads))
 	}
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], nextUsers)
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{addedUser, limitNext, runtimeNext})
+	assertUserPayload(t, recorder.addedLimiterPayloads[0], []api.UserInfo{addedUser})
+	assertUserPayload(t, recorder.deletedLimiterPayloads[0], []api.UserInfo{deletedUser})
 	if len(recorder.removedUsers) != 1 {
 		t.Fatalf("expected one runtime remove batch, got %#v", recorder.removedUsers)
 	}
@@ -2275,12 +2286,14 @@ func TestSyncApply_NodeUserReadinessFailureRestoresRealLimiterAdmission(t *testi
 	}
 }
 
-func TestSyncApply_AuthoritativeLimiterUsersPreserveActiveAutoLimitOverlay(t *testing.T) {
+func TestSyncApply_IncrementalLimiterUsersPreserveActiveAutoLimitOverlay(t *testing.T) {
 	limitedUser := api.UserInfo{UID: 1, Email: "limited@example.com", UUID: "limited-uuid", SpeedLimit: 100}
 	removedUser := api.UserInfo{UID: 2, Email: "removed@example.com", UUID: "removed-uuid", SpeedLimit: 200}
 	addedUser := api.UserInfo{UID: 3, Email: "added@example.com", UUID: "added-uuid", SpeedLimit: 300}
 	currentUsers := []api.UserInfo{limitedUser, removedUser}
-	nextUsers := []api.UserInfo{limitedUser, addedUser}
+	limitedNext := limitedUser
+	limitedNext.DeviceLimit = 3
+	nextUsers := []api.UserInfo{limitedNext, addedUser}
 	controller, recorder := newTestSyncApplyController(&fakeSyncApplyAPI{userList: &nextUsers})
 	node := &api.NodeInfo{NodeType: "V2ray", NodeID: 1, Port: 443}
 	tag := controller.buildNodeTagFrom(node)
@@ -2300,10 +2313,10 @@ func TestSyncApply_AuthoritativeLimiterUsersPreserveActiveAutoLimitOverlay(t *te
 	if len(recorder.updatedLimiterPayloads) != 1 {
 		t.Fatalf("limiter replacement payloads = %d, want 1", len(recorder.updatedLimiterPayloads))
 	}
-	wantLimited := limitedUser
+	wantLimited := limitedNext
 	wantLimited.SpeedLimit = 1_000_000
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{wantLimited, addedUser})
-	if info, exists := controller.limitedUsers[limitedUser]; !exists || info.currentSpeedLimit != 8 {
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], []api.UserInfo{addedUser, wantLimited})
+	if info, exists := controller.limitedUsers[limitedNext]; !exists || info.currentSpeedLimit != 8 {
 		t.Fatalf("active auto-limit overlay changed during user replacement: %#v", controller.limitedUsers)
 	}
 }
@@ -2341,7 +2354,7 @@ func TestSyncApply_RuntimeRemoveFailurePreservesAppliedAutoLimitOverlay(t *testi
 	}
 }
 
-func TestSyncApply_UserDeletionReplacesLimiterWithAuthoritativeUsers(t *testing.T) {
+func TestSyncApply_UserDeletionAppliesOnlyDeletedLimiterUsers(t *testing.T) {
 	kept := api.UserInfo{UID: 1, Email: "kept@example.test", UUID: "kept-uuid", SpeedLimit: 100}
 	removed := api.UserInfo{UID: 2, Email: "removed@example.test", UUID: "removed-uuid", SpeedLimit: 200}
 	currentUsers := []api.UserInfo{kept, removed}
@@ -2359,5 +2372,6 @@ func TestSyncApply_UserDeletionReplacesLimiterWithAuthoritativeUsers(t *testing.
 	if recorder.updateLimiterCalls != 1 || len(recorder.updatedLimiterPayloads) != 1 {
 		t.Fatalf("limiter replacements = calls:%d payloads:%d, want one", recorder.updateLimiterCalls, len(recorder.updatedLimiterPayloads))
 	}
-	assertUserPayload(t, recorder.updatedLimiterPayloads[0], nextUsers)
+	assertUserPayload(t, recorder.updatedLimiterPayloads[0], nil)
+	assertUserPayload(t, recorder.deletedLimiterPayloads[0], []api.UserInfo{removed})
 }
