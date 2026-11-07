@@ -113,8 +113,8 @@ func (h *Hysteria2Service) retireSessionLease(sessionID string) {
 }
 
 // endSession removes a connection and its audit mark, and stops lease renewal
-// outside h.mu. Local sessions always forget their IP; global sessions keep it
-// while another live session still uses it.
+// outside h.mu. The IP is forgotten only when no other live session still uses
+// it, regardless of whether the session is local or global.
 func (h *Hysteria2Service) endSession(sessionID string) {
 	if h == nil {
 		return
@@ -129,7 +129,7 @@ func (h *Hysteria2Service) endSession(sessionID string) {
 	delete(h.blockedIDs, sessionID)
 	lease := session.lease
 	session.lease = nil
-	if session.local || !h.sessionHoldsIPLocked(session.credential, session.ip) {
+	if !h.sessionHoldsIPLocked(session.credential, session.ip) {
 		h.forgetIPLocked(session.credential, session.ip)
 	}
 	h.mu.Unlock()
@@ -163,7 +163,7 @@ func (h *Hysteria2Service) liveSessionIPsLocked() map[int][]string {
 	}
 	seen := make(map[int]map[string]struct{}, len(h.sessions))
 	for _, session := range h.sessions {
-		if session == nil || session.local || session.ip == "" {
+		if session == nil || session.ip == "" {
 			continue
 		}
 		user, ok := h.users[session.credential]

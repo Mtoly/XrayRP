@@ -181,3 +181,79 @@ func TestTrafficLoggerAuditDisconnectRedactsAuthenticationID(t *testing.T) {
 		})
 	}
 }
+
+// TestLocalDisconnectKeepsIPWhileAnotherSessionStaysOpen verifies that
+// disconnecting one local-mode connection does not remove the online-IP record
+// while a second connection from the same IP is still active.
+func TestLocalDisconnectKeepsIPWhileAnotherSessionStaysOpen(t *testing.T) {
+	service := newLocalAuditTestService(t)
+	authenticator := &hyAuthenticator{svc: service}
+	events := &hyEventLogger{svc: service}
+	sharedAddr := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}
+
+	ok, firstID := authenticator.Authenticate(sharedAddr, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected first connection")
+	}
+	ok, secondID := authenticator.Authenticate(sharedAddr, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected second connection from same IP")
+	}
+
+	// Disconnect only the first connection.
+	events.Disconnect(sharedAddr, firstID, nil)
+
+	// The IP must still be tracked because secondID is alive.
+	service.mu.RLock()
+	ipSet := service.onlineIPs["auth-user"]
+	_, ipPresent := ipSet[sharedAddr.IP.String()]
+	service.mu.RUnlock()
+	if !ipPresent {
+		t.Error("onlineIPs lost the shared IP after first disconnect; second session still open")
+	}
+
+	// Now disconnect the second connection too; the IP must be gone.
+	events.Disconnect(sharedAddr, secondID, nil)
+
+	service.mu.RLock()
+	ipSet = service.onlineIPs["auth-user"]
+	_, ipPresent = ipSet[sharedAddr.IP.String()]
+	service.mu.RUnlock()
+	if ipPresent {
+		t.Error("onlineIPs retained IP after both connections disconnected")
+	}
+}
+
+// TestLocalLiveSessionIPsIncludesLocalSessions verifies that liveSessionIPsLocked
+// reports local-mode sessions in the online-IP map, consistent with the
+// keep-while-alive behaviour introduced by this fix.
+func TestLocalLiveSessionIPsIncludesLocalSessions(t *testing.T) {
+	service := newLocalAuditTestService(t)
+	authenticator := &hyAuthenticator{svc: service}
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 6000}
+
+	ok, _ := authenticator.Authenticate(addr, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected connection")
+	}
+
+	service.mu.RLock()
+	live := service.liveSessionIPsLocked()
+	service.mu.RUnlock()
+
+	if len(live) == 0 {
+		t.Fatal("liveSessionIPsLocked() returned nothing for a live local session")
+	}
+	uid := service.users["auth-user"].UID
+	ips := live[uid]
+	found := false
+	for _, ip := range ips {
+		if ip == addr.IP.String() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("liveSessionIPsLocked() did not include local session IP %s; got %v", addr.IP, ips)
+	}
+}
