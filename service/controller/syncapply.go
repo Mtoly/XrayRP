@@ -143,12 +143,13 @@ func (hooks syncApplyHooks) updateRuleForApply(tag string, rules []api.DetectRul
 }
 
 type syncApplyLimiterHooks struct {
-	addInbound         func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
-	deleteInbound      func(string) error
-	replaceInbound     func(string, *[]api.UserInfo) error
-	snapshotInbound    func(string) (*limiter.InboundLimiterStateSnapshot, error)
-	restoreInbound     func(string, *limiter.InboundLimiterStateSnapshot) error
-	applyGlobalDevices func(string, globalDeviceApply) error
+	addInbound           func(string, uint64, *[]api.UserInfo, *limiter.GlobalDeviceLimitConfig) error
+	deleteInbound        func(string) error
+	replaceInbound       func(string, *[]api.UserInfo) error
+	applyInboundUserDiff func(string, []api.UserInfo, []api.UserInfo, []api.UserInfo) error
+	snapshotInbound      func(string) (*limiter.InboundLimiterStateSnapshot, error)
+	restoreInbound       func(string, *limiter.InboundLimiterStateSnapshot) error
+	applyGlobalDevices   func(string, globalDeviceApply) error
 }
 
 type syncApplyHooks struct {
@@ -800,7 +801,25 @@ func (a nodeRuntimeStateApplyModule) applyUserSnapshot(
 			return restoreLimiter(err)
 		}
 	}
-	if err := hooks.limiter.replaceInbound(tag, cloneUserList(limiterUsers)); err != nil {
+	updated := make([]api.UserInfo, 0, len(diff.LimitOnly)+len(diff.RuntimeUpdated))
+	updated = append(updated, diff.LimitOnly...)
+	updated = append(updated, diff.RuntimeUpdated...)
+	// Apply the existing auto-speed overlay only to changed limiter policies.
+	changed := make(map[userIdentityKey]*api.UserInfo, len(diff.Added)+len(updated))
+	for _, users := range [][]api.UserInfo{diff.Added, updated} {
+		for index := range users {
+			user := &users[index]
+			changed[userIdentityKey{UID: user.UID, Email: user.Email}] = user
+		}
+	}
+	if limiterUsers != nil {
+		for _, user := range *limiterUsers {
+			if target := changed[userIdentityKey{UID: user.UID, Email: user.Email}]; target != nil {
+				*target = user
+			}
+		}
+	}
+	if err := hooks.limiter.applyInboundUserDiff(tag, diff.Added, updated, diff.Deleted); err != nil {
 		if rollbackErr := a.rollbackRuntimeUsersAfterAddFailureSnapshot(snapshot, tag, usersToRestore, usersToAdd, config); rollbackErr != nil {
 			err = errors.Join(err, rollbackErr)
 		}
@@ -1105,6 +1124,9 @@ func (c *Controller) resolveSyncApplyHooks(contexts ...context.Context) syncAppl
 	}
 	if hooks.limiter.replaceInbound == nil {
 		hooks.limiter.replaceInbound = c.replaceInboundLimiterUsers
+	}
+	if hooks.limiter.applyInboundUserDiff == nil {
+		hooks.limiter.applyInboundUserDiff = c.applyInboundLimiterUserDiff
 	}
 	if hooks.limiter.snapshotInbound == nil {
 		hooks.limiter.snapshotInbound = c.snapshotInboundLimiter

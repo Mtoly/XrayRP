@@ -42,6 +42,17 @@ type InboundLimiterStateSnapshot struct {
 	state         *inboundState
 	policyVersion uint64
 	buckets       map[string]*rate.Limiter
+	removals      *inboundUserRemoval
+}
+
+// Snapshots retain a cursor into removals made after they were taken. The
+// inbound owns only the empty tail, so older entries live only with snapshots.
+type inboundUserRemoval struct {
+	userKey string
+	online  *userOnlineEntry
+	uid     int
+	alive   *aliveUIDState
+	next    *inboundUserRemoval
 }
 
 type bucketStateSnapshot struct {
@@ -246,6 +257,7 @@ type InboundInfo struct {
 	replacementReady    chan struct{}
 	replacementNotified bool
 	policyVersion       uint64
+	userRemovals        *inboundUserRemoval
 	owner               *Limiter
 	ownerTag            string
 	self                *InboundInfo
@@ -676,6 +688,19 @@ func restoreInboundPolicies(state *inboundState, snapshot *InboundLimiterStateSn
 		}
 		return true
 	})
+	// In-place diffs remove entries from the snapshot's generation. Restore
+	// missing entries without discarding observations made by retained users.
+	for removal := snapshot.removals; removal != nil && removal.next != nil; removal = removal.next {
+		if _, applied := snapshot.UserInfo[removal.userKey]; !applied {
+			continue
+		}
+		if removal.online != nil {
+			state.UserOnlineIP.LoadOrStore(removal.userKey, removal.online)
+		}
+		if removal.alive != nil {
+			state.aliveSnapshot.uids.LoadOrStore(removal.uid, removal.alive)
+		}
+	}
 	state.policyVersion = snapshot.policyVersion
 	syncGlobalPolicies(state)
 }
@@ -847,6 +872,81 @@ func (l *Limiter) UpdateInboundLimiter(tag string, updatedUserList *[]api.UserIn
 	return nil
 }
 
+// ApplyInboundUserDiff updates user policies in place, retaining online IPs and
+// compatible buckets for every user that is not deleted.
+func (l *Limiter) ApplyInboundUserDiff(tag string, added, updated, deleted []api.UserInfo) error {
+	if err := l.beginMutation(); err != nil {
+		return err
+	}
+	defer l.endMutation()
+
+	inboundInfo, ok := l.loadAppliedInbound(tag)
+	if !ok {
+		return fmt.Errorf("no such inbound in limiter: %s", tag)
+	}
+	if len(added) == 0 && len(updated) == 0 && len(deleted) == 0 {
+		return nil
+	}
+	l.drainAdmissions(inboundInfo)
+	defer inboundInfo.activateAdmissions()
+
+	var retainedKeys map[string]struct{}
+	if len(deleted) > 0 {
+		retainedKeys = make(map[string]struct{}, len(added)+len(updated))
+	}
+	for _, users := range [][]api.UserInfo{added, updated} {
+		for _, user := range users {
+			userKey := inboundUserKey(tag, user)
+			if retainedKeys != nil {
+				retainedKeys[userKey] = struct{}{}
+			}
+			inboundInfo.UserInfo.Store(userKey, userPolicy{
+				UID:         user.UID,
+				SpeedLimit:  user.SpeedLimit,
+				DeviceLimit: user.DeviceLimit,
+			})
+			limit := determineRate(inboundInfo.NodeSpeedLimit, user.SpeedLimit)
+			if limit == 0 {
+				inboundInfo.BucketHub.Delete(userKey)
+			} else if existing, exists := inboundInfo.BucketHub.Load(userKey); exists {
+				bucket := existing.(*rate.Limiter)
+				if bucket.Limit() != rate.Limit(limit) || bucket.Burst() != int(limit) {
+					inboundInfo.BucketHub.Store(userKey, rate.NewLimiter(rate.Limit(limit), int(limit)))
+				}
+			} else {
+				inboundInfo.BucketHub.Store(userKey, rate.NewLimiter(rate.Limit(limit), int(limit)))
+			}
+		}
+	}
+	for _, user := range deleted {
+		userKey := inboundUserKey(tag, user)
+		// A panel identity change can remove and add the same opaque runtime key.
+		if _, retained := retainedKeys[userKey]; retained {
+			continue
+		}
+		if removal := inboundInfo.userRemovals; removal != nil {
+			removal.userKey = userKey
+			if entry, exists := inboundInfo.UserOnlineIP.Load(userKey); exists {
+				removal.online = entry.(*userOnlineEntry)
+			}
+			removal.uid = user.UID
+			removal.alive = inboundInfo.aliveSnapshot.uidState(user.UID, false)
+			removal.next = &inboundUserRemoval{}
+			inboundInfo.userRemovals = removal.next
+		}
+		inboundInfo.UserInfo.Delete(userKey)
+		inboundInfo.BucketHub.Delete(userKey)
+		inboundInfo.UserOnlineIP.Delete(userKey)
+	}
+	if len(deleted) > 0 {
+		inboundInfo.aliveSnapshot.retainForUsers(inboundInfo.UserInfo)
+	}
+	inboundInfo.policyVersion++
+	syncGlobalPolicies(inboundInfo)
+	inboundInfo.GlobalLimit.pruneKeyLocks(inboundInfo.UserInfo)
+	return nil
+}
+
 func (l *Limiter) SnapshotInboundLimiterState(tag string) (*InboundLimiterStateSnapshot, error) {
 	snapshot := newInboundLimiterStateSnapshot()
 	if l == nil || l.InboundInfo == nil {
@@ -864,6 +964,10 @@ func (l *Limiter) SnapshotInboundLimiterState(tag string) (*InboundLimiterStateS
 	snapshot.state = state
 	snapshot.policyVersion = snapshot.state.policyVersion
 	snapshot.buckets = snapshotInboundPolicies(snapshot.state, snapshot.UserInfo)
+	if state.userRemovals == nil {
+		state.userRemovals = &inboundUserRemoval{}
+	}
+	snapshot.removals = state.userRemovals
 	populateCompatibilitySnapshot(snapshot)
 	return snapshot, nil
 }

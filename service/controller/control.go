@@ -309,6 +309,13 @@ func (c *Controller) replaceInboundLimiterUsers(tag string, userList *[]api.User
 	return err
 }
 
+func (c *Controller) applyInboundLimiterUserDiff(tag string, added, updated, deleted []api.UserInfo) error {
+	return c.dispatcher.Limiter.ApplyInboundUserDiff(tag,
+		*c.runtimeLimiterUsers(tag, &added),
+		*c.runtimeLimiterUsers(tag, &updated),
+		*c.runtimeLimiterUsers(tag, &deleted))
+}
+
 // runtimeLimiterUsers returns an owned view whose keys match the opaque user
 // tags installed in Xray. Panel emails can contain UUIDs, passwords, or other
 // credentials and must never become runtime identifiers or loggable stats keys.
