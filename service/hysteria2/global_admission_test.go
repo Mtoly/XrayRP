@@ -462,12 +462,18 @@ func TestLocalAuthUnchangedWithoutGlobalAdmission(t *testing.T) {
 		t.Fatal("local mode rejected a repeat IP connection")
 	}
 
+	// Disconnect the first session; the second session (same IP, different port)
+	// is still alive, so the IP must be retained.
 	(&hyEventLogger{svc: svc}).Disconnect(&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}, id, nil)
 	svc.mu.RLock()
 	_, online = svc.onlineIPs["credential-a"]["192.0.2.1"]
+	sessions = len(svc.sessions)
 	svc.mu.RUnlock()
-	if online {
-		t.Fatal("local Disconnect() retained the IP while another same-IP session was live")
+	if !online {
+		t.Fatal("local Disconnect() removed the IP while another same-IP session was still live")
+	}
+	if sessions != 1 {
+		t.Fatalf("expected 1 remaining session after first disconnect, got %d", sessions)
 	}
 }
 
