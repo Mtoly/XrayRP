@@ -190,10 +190,9 @@ type Hysteria2Service struct {
 	// reservation cannot commit against a superseded policy.
 	userGeneration uint64
 
-	// sessions maps the opaque core connection id to the credential and lease
-	// it owns. It is only populated when global admission is enabled; every
-	// authenticated connection then gets its own id so same-credential and
-	// same-IP connections remain distinguishable to Connect/Disconnect.
+	// sessions maps each opaque core connection id to its credential and any
+	// global lease it owns. Every authenticated connection gets its own id so
+	// audit marks and disconnects stay scoped to that connection.
 	sessions map[string]*hySession
 
 	// globalAdmission is the shared Redis-backed manager when global device

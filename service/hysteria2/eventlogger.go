@@ -22,8 +22,7 @@ func (l *hyEventLogger) logger() *log.Entry {
 }
 
 // userFields resolves the given Hysteria2 connection ID to a stable,
-// non-sensitive user identity such as UID / email for logging purposes. The ID
-// is either a credential (local mode) or an opaque session id (global mode).
+// non-sensitive user identity such as UID / email for logging purposes.
 func (l *hyEventLogger) userFields(id string) log.Fields {
 	fields := log.Fields{}
 	if l == nil || l.svc == nil {

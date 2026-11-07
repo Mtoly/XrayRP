@@ -14,10 +14,9 @@ import (
 // hyAuthenticator implements server.Authenticator and performs user lookup
 // and local device limit enforcement based on SSPanel's UUID.
 //
-// When Redis global admission is enabled, the returned id is an opaque
-// per-connection session identifier rather than the credential. The core
-// reuses that id for every later callback, so session state owns the lease and
-// same-credential connections from one IP stay distinguishable.
+// The returned id is an opaque per-connection session identifier. The core
+// reuses that id for every later callback, so same-credential connections from
+// one IP stay distinguishable and session state owns any global lease.
 type hyAuthenticator struct {
 	svc      *Hysteria2Service
 	authGate *runtimeAuthGate
@@ -67,8 +66,8 @@ func (a *hyAuthenticator) Authenticate(addr net.Addr, auth string, tx uint64) (b
 	return a.authenticateGlobal(host, auth, admission, logger)
 }
 
-// authenticateLocal keeps the pre-Redis behavior: authenticate, enforce the
-// local device limit, and return the credential itself as the connection id.
+// authenticateLocal enforces the local device limit and tracks each connection
+// under its own opaque id while keeping the existing online-IP behavior.
 func (a *hyAuthenticator) authenticateLocal(host, auth string, logger *log.Entry) (bool, string) {
 	a.svc.mu.Lock()
 	defer a.svc.mu.Unlock()
@@ -96,12 +95,26 @@ func (a *hyAuthenticator) authenticateLocal(host, auth string, logger *log.Entry
 			}).Warn("Hysteria2 user exceeded device limit")
 			return false, ""
 		}
-		ipSet[host] = struct{}{}
 	}
 
-	a.svc.touchIPLocked(auth, host, now)
+	sessionID, sessionErr := newSessionID()
+	if sessionErr != nil {
+		logger.WithError(sessionErr).WithField("remote", host).Warn("Hysteria2 auth failed: unable to allocate session id")
+		return false, ""
+	}
 
-	return true, auth
+	ipSet[host] = struct{}{}
+	a.svc.touchIPLocked(auth, host, now)
+	if a.svc.sessions == nil {
+		a.svc.sessions = make(map[string]*hySession)
+	}
+	a.svc.sessions[sessionID] = &hySession{
+		credential: auth,
+		ip:         host,
+		local:      true,
+	}
+
+	return true, sessionID
 }
 
 // authenticateGlobal reserves the source IP in Redis and records a session that

@@ -1,6 +1,7 @@
 package hysteria2
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -42,6 +43,80 @@ func TestEventLoggerAuditsExplicitUID(t *testing.T) {
 	}
 	if results == nil || len(*results) != 1 || (*results)[0].UID != 17 {
 		t.Fatalf("audit results = %#v, want explicit UID 17", results)
+	}
+}
+
+func newLocalAuditTestService(t *testing.T) *Hysteria2Service {
+	t.Helper()
+	service := New(&configurablePanelClient{}, &controller.Config{})
+	service.tag = "node"
+	service.users["auth-user"] = userRecord{UID: 17}
+	if err := service.rules.UpdateRule("node", []api.DetectRule{{
+		ID:      3,
+		Pattern: regexp.MustCompile(`blocked\.example`),
+	}}); err != nil {
+		t.Fatalf("UpdateRule() error = %v", err)
+	}
+	return service
+}
+
+func TestLocalAuditDisconnectsOnlyAuditedConnection(t *testing.T) {
+	service := newLocalAuditTestService(t)
+	authenticator := &hyAuthenticator{svc: service}
+	events := &hyEventLogger{svc: service}
+	traffic := &hyTrafficLogger{svc: service}
+	first := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}
+	second := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 5001}
+	ok, firstID := authenticator.Authenticate(first, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected the first device")
+	}
+	ok, secondID := authenticator.Authenticate(second, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected the second device")
+	}
+
+	events.TCPRequest(first, firstID, "blocked.example:443")
+	// The other device sends traffic while the audited connection is dialing.
+	if !traffic.LogTraffic(secondID, 32*1024, 0) {
+		t.Error("LogTraffic() disconnected the other device")
+	}
+	if traffic.LogTraffic(firstID, 512, 0) {
+		t.Error("LogTraffic() allowed the audited connection")
+	}
+}
+
+func TestLocalAuditMarkRemovedAfterFailedDialDisconnect(t *testing.T) {
+	service := newLocalAuditTestService(t)
+	authenticator := &hyAuthenticator{svc: service}
+	events := &hyEventLogger{svc: service}
+	traffic := &hyTrafficLogger{svc: service}
+	first := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5000}
+	ok, firstID := authenticator.Authenticate(first, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected the initial connection")
+	}
+
+	// A failed audited dial has no traffic callback before the core disconnects.
+	events.TCPRequest(first, firstID, "blocked.example:443")
+	events.TCPError(first, firstID, "blocked.example:443", errors.New("dial failed"))
+	traffic.LogOnlineState(firstID, false)
+	events.Disconnect(first, firstID, nil)
+	service.mu.RLock()
+	marks := len(service.blockedIDs)
+	service.mu.RUnlock()
+	if marks != 0 {
+		t.Errorf("Disconnect() retained %d audit marks, want none", marks)
+	}
+
+	second := &net.UDPAddr{IP: net.ParseIP("198.51.100.1"), Port: 5001}
+	ok, secondID := authenticator.Authenticate(second, "auth-user", 0)
+	if !ok {
+		t.Fatal("Authenticate() rejected the new connection")
+	}
+	events.TCPRequest(second, secondID, "allowed.example:443")
+	if !traffic.LogTraffic(secondID, 100, 0) {
+		t.Fatal("LogTraffic() disconnected the new connection after the audited connection ended")
 	}
 }
 
