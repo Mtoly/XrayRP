@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/Mtoly/XrayRP/api"
 	"github.com/Mtoly/XrayRP/common/limiter"
 	"github.com/Mtoly/XrayRP/common/mylego"
 	xraycommon "github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/features/outbound"
 )
 
 type syncApplySnapshot struct {
@@ -924,6 +926,113 @@ func (a nodeRuntimeStateApplyModule) cleanupRuntimeTagSnapshot(snapshot *api.Nod
 		}
 	}
 	return errors.Join(cleanupErrs...)
+}
+
+// cleanupRuntimeTagForLifecycle removes a controller runtime during lifecycle
+// cleanup and, when the removed tag owned the shared core's default outbound,
+// transfers default ownership to another managed node outbound. Xray clears the
+// default when its owner is removed and does not select a replacement, so a
+// remaining node would lose the only egress for traffic that falls back to the
+// default. Custom outbounds are never promoted.
+func (a nodeRuntimeStateApplyModule) cleanupRuntimeTagForLifecycle(snapshot *api.NodeSnapshot, tag string) error {
+	// Capture ownership before cleanup: an already-empty default (for example a
+	// transient window during a port update) must not be filled by closing an
+	// unrelated node.
+	ownedDefault := a.runtimeOwnsDefaultOutbound(tag)
+	cleanupErr := a.cleanupRuntimeTagSnapshot(snapshot, tag)
+	// Outbound removal can succeed even when another cleanup step fails. The
+	// promotion is state-checked, so running it after any cleanup outcome keeps
+	// remaining nodes reachable while the failed controller retains ownership
+	// for a retry.
+	var promoteErr error
+	if ownedDefault {
+		promoteErr = a.promoteManagedDefaultOutbound(tag)
+	}
+	return errors.Join(cleanupErr, promoteErr)
+}
+
+func (a nodeRuntimeStateApplyModule) runtimeOwnsDefaultOutbound(tag string) bool {
+	c := a.controller
+	if c == nil || c.obm == nil || tag == "" {
+		return false
+	}
+	defaultHandler := c.obm.GetDefaultHandler()
+	return defaultHandler != nil && defaultHandler.Tag() == tag
+}
+
+func (a nodeRuntimeStateApplyModule) promoteManagedDefaultOutbound(removedTag string) error {
+	c := a.controller
+	if c == nil || c.obm == nil || removedTag == "" {
+		return nil
+	}
+	if c.obm.GetDefaultHandler() != nil {
+		return nil
+	}
+	ctx := a.operationContext()
+	for _, candidate := range managedDefaultCandidateTags(c.obm, removedTag) {
+		handler := c.obm.GetHandler(candidate)
+		// A registered outbound whose controller already removed its inbound is
+		// shutting down or failed. Promoting it would resurrect a closed node
+		// (lifecycle cleanup removes the inbound before the runtime).
+		if handler == nil || !c.managedInboundLive(candidate) {
+			continue
+		}
+		// outbound.Manager has no setter for the default handler. Removing and
+		// re-adding a handler is the only public way to make an already
+		// registered handler the default: AddHandler assigns the default only
+		// while it is nil.
+		if err := c.obm.RemoveHandler(ctx, candidate); err != nil {
+			return fmt.Errorf("remove replacement outbound %s: %w", candidate, err)
+		}
+		if err := c.obm.AddHandler(ctx, handler); err != nil {
+			if restoreErr := c.obm.AddHandler(ctx, handler); restoreErr != nil {
+				return errors.Join(
+					fmt.Errorf("promote outbound %s as default: %w", candidate, err),
+					fmt.Errorf("restore outbound %s: %w", candidate, restoreErr),
+				)
+			}
+			return fmt.Errorf("promote outbound %s as default: %w", candidate, err)
+		}
+		if !c.managedInboundLive(candidate) {
+			// The candidate's controller finished closing between the liveness
+			// check and the re-add. Remove it again rather than resurrect it.
+			if err := c.obm.RemoveHandler(ctx, candidate); err != nil {
+				return fmt.Errorf("remove outbound %s after its controller closed: %w", candidate, err)
+			}
+			continue
+		}
+		return nil
+	}
+	return nil
+}
+
+// managedInboundLive reports whether the controller that owns tag still has its
+// inbound registered. Lifecycle cleanup removes the inbound before the outbound,
+// so an absent inbound marks a closing or already closed node.
+func (c *Controller) managedInboundLive(tag string) bool {
+	if c == nil || c.ibm == nil || tag == "" {
+		return false
+	}
+	handler, err := c.ibm.GetHandler(context.Background(), tag)
+	return err == nil && handler != nil
+}
+
+// managedDefaultCandidateTags returns deterministic candidates for default
+// ownership. Only wrappers owned by a controller qualify; handlers loaded from
+// custom outbound configuration are excluded.
+func managedDefaultCandidateTags(manager outbound.Manager, removedTag string) []string {
+	var tags []string
+	for _, handler := range manager.ListHandlers(context.Background()) {
+		if handler == nil || handler.Tag() == "" || handler.Tag() == removedTag {
+			continue
+		}
+		if _, ok := handler.(managedDataPathHandler); !ok {
+			continue
+		}
+		tags = append(tags, handler.Tag())
+	}
+	sort.Strings(tags)
+	return tags
 }
 
 func (a nodeRuntimeStateApplyModule) restoreRuntimeAfterFailedApplySnapshot(snapshot *api.NodeSnapshot, tag string, users *[]api.UserInfo, config *Config) error {
