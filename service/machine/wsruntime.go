@@ -263,6 +263,10 @@ func (r *SharedWSRuntime) handleEvent(client wslifecycle.Client, event *newV2boa
 		newV2board.WSEventXboardError:
 		return
 	case newV2board.WSEventXboardSyncNodes:
+		// XBoard uses an application pong to mark newly bound nodes online.
+		if ponger, ok := client.(interface{ Pong() error }); ok {
+			_ = ponger.Pong()
+		}
 		r.triggerRediscover()
 		return
 	}

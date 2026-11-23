@@ -220,6 +220,35 @@ func TestSharedWSRuntimeSyncNodesTriggersRediscover(t *testing.T) {
 	}
 }
 
+func TestSharedWSRuntimeSyncNodesAcknowledgesMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"success", nil}, {"write_failure", errors.New("write failed")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newRecordingSharedWSClient()
+			calls := 0
+			client.onPong = func() error { calls++; return tc.err }
+			runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
+			startSharedWSRuntimeWithClient(t, runtime, client)
+			rediscovered := make(chan struct{}, 1)
+			runtime.SetRediscover(func() error {
+				rediscovered <- struct{}{}
+				return nil
+			})
+			runtime.handleEvent(client, &newV2board.WSEvent{Event: newV2board.WSEventXboardSyncNodes})
+			if calls != 1 {
+				t.Fatalf("pong calls = %d, want 1", calls)
+			}
+			select {
+			case <-rediscovered:
+			case <-time.After(time.Second):
+				t.Fatal("missing rediscovery")
+			}
+		})
+	}
+}
+
 func TestSharedWSRuntimeRediscoveryCoalescesAndCloseCancelsJoinsOwner(t *testing.T) {
 	runtime := NewSharedWSRuntime(SharedWSRuntimeConfig{})
 	factoryEntered := make(chan struct{}, 1)
@@ -519,6 +548,7 @@ type recordingSharedWSClient struct {
 	statusCalls    chan statusCall
 	deviceCalls    chan deviceCall
 
+	onPong      func() error
 	consumeOnce sync.Once
 	closeOnce   sync.Once
 }
@@ -541,7 +571,12 @@ func (c *recordingSharedWSClient) Events() <-chan *newV2board.WSEvent {
 func (c *recordingSharedWSClient) Errors() <-chan error  { return c.errs }
 func (c *recordingSharedWSClient) Done() <-chan struct{} { return c.done }
 func (c *recordingSharedWSClient) KeepAlive() error      { return nil }
-func (c *recordingSharedWSClient) Pong() error           { return nil }
+func (c *recordingSharedWSClient) Pong() error {
+	if c.onPong != nil {
+		return c.onPong()
+	}
+	return nil
+}
 func (c *recordingSharedWSClient) Close() error {
 	c.closeOnce.Do(func() { close(c.done) })
 	return nil
