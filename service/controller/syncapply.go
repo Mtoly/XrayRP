@@ -600,6 +600,13 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(
 		return a.cleanupRuntimeTagSnapshot(currentNodeSnapshot, currentTag)
 	}
 
+	// Xray assigns the default on add and clears it on removal without
+	// promoting an already registered handler. Replace its owner in order.
+	replacesDefault := false
+	if newTag != currentTag && c.obm != nil {
+		defaultHandler := c.obm.GetDefaultHandler()
+		replacesDefault = defaultHandler != nil && defaultHandler.Tag() == currentTag
+	}
 	switch {
 	case currentNodeSnapshot == nil || currentTag == "":
 		if err := hooks.runtime.addTagForSnapshot(nextNodeSnapshot, newTag, candidateConfig); err != nil {
@@ -608,7 +615,7 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(
 			}
 			return currentNodeSnapshot, currentTag, false, err
 		}
-	case newTag != currentTag:
+	case newTag != currentTag && !replacesDefault:
 		// When the runtime tag changes, stage the new runtime before tearing down
 		// the old one so add failures don't drop the currently serving node.
 		if err := hooks.runtime.addTagForSnapshot(nextNodeSnapshot, newTag, candidateConfig); err != nil {
@@ -631,13 +638,11 @@ func (a nodeRuntimeStateApplyModule) applyNodeSnapshot(
 			return currentNodeSnapshot, currentTag, false, errors.Join(joined...)
 		}
 	default:
-		// Same-tag rebuilds cannot pre-stage another runtime without introducing
-		// dual-active behavior. Remove the old runtime, then fully restore the
-		// previous runtime if replacement add fails so the controller/runtime state
-		// stays on the last known-good node.
+		// Remove first when reusing a tag or transferring default ownership.
+		// Restore the previous runtime if the replacement fails.
 		if err := removeCurrentRuntime(); err != nil {
 			if restoreErr := a.restoreRuntimeAfterFailedApplySnapshot(currentNodeSnapshot, currentTag, currentUserList, appliedConfig); restoreErr != nil {
-				return currentNodeSnapshot, currentTag, false, errors.Join(err, fmt.Errorf("restore old runtime after failed same-tag cleanup: %w", restoreErr))
+				return currentNodeSnapshot, currentTag, false, errors.Join(err, fmt.Errorf("restore old runtime after failed cleanup: %w", restoreErr))
 			}
 			return currentNodeSnapshot, currentTag, false, err
 		}
