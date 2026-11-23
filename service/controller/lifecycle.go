@@ -343,7 +343,7 @@ func (c *Controller) cleanupControllerOwnershipContext(ctx context.Context, owne
 	}
 	if ownership.runtime {
 		apply := nodeRuntimeStateApplyModule{controller: c, ctx: ctx, hooks: hooks}
-		if err := apply.cleanupRuntimeTagSnapshot(ownership.nodeSnapshot, ownership.tag); err != nil {
+		if err := apply.cleanupRuntimeTagForLifecycle(ownership.nodeSnapshot, ownership.tag); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete controller runtime: %w", err))
 		} else {
 			ownership.runtime = false
